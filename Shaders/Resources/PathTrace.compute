@@ -1,0 +1,659 @@
+// ============================================================================
+// PathTrace.compute — G5: 경로추적(AO / Direct / Indirect) GPU 포팅.
+//   G4(BvhTraverse.compute)에서 검증된 2단 BVH 순회 프리미티브를 그대로 복사 재사용하고,
+//   그 위에 RNG·CosineHemisphere·Sky·NEE·경로추적 루프를 얹는다.
+//   ground truth(정확 미러 대상):
+//     Script/LightmapEvaluate/RadianceCore.cs           (Rng / CosineHemisphere / EvaluateDirect)
+//     Script/LightmapEvaluate/Burst/BurstAO.cs          (AO)
+//     Script/LightmapEvaluate/Burst/BurstDirect.cs      (Direct)
+//     Script/LightmapEvaluate/Burst/BurstIndirect.cs    (Indirect 경로추적 루프)
+//     Script/LightmapEvaluate/Burst/BurstSky.cs         (Sky)
+//     Script/LightmapEvaluate/Burst/Occluders/BurstTwoLevelBVH.cs (ClosestHit 위치/노멀/알베도)
+//
+// 커널:
+//   CSAO       : AO       → _AoOut[i]       (float)   가시성 평균
+//   CSDirect   : Direct   → _DirectOut[i]   (float3)  태양 NEE(그림자 포함)
+//   CSIndirect : Indirect → _IndirectOut[i] (float3)  경로추적 + RR
+//   CSRadiance : Direct+Indirect → _RadianceOut[i] (float3)  라이트맵 조도(1회 readback)
+//                = BurstRadianceBaker.Bake(=Direct+Indirect) 정합. AtlasApplyDebug GPU 백엔드용.
+//   CSSHBake   : per-probe SH9 → _ShOut[i] (GpuSH9=9×float3)  구면 입사조도 SH9 프로젝션
+//                = BurstSHBaker.SHJob 정합(SH-G). RNG 없음(고정 피보나치 _Dirs) → 결정적.
+//
+// 시드 규약(G6-2): 호출측이 StructuredBuffer<uint> _Seeds 로 per-lumel 시드를 명시 공급.
+//   RngInit(_Seeds[i]) — Burst 의 seed=seed+li*const 와 1:1(디스패치 인덱스 기반 _BaseSeed 폐기).
+//
+// 정밀도(rule #3): 전 경로 32-bit float. RNG 상태는 uint(xorshift32) → CPU 와 비트동일.
+//   half/min16float 금지(그레이징 레이·인덱스 발산).
+//
+// ⚠️ 결정론 주의: RNG(uint)는 비트동일하나 sqrt/sin/cos(초월함수)는 GPU 하드웨어가
+//   CPU(Mathf)와 미세하게 다르다 → Indirect/AO 는 per-texel 비트동일 불가, 통계(mean/ε)로 검증.
+//   Direct 는 무작위 없음 → 타이트 일치 기대.
+//
+// dxc 검증: #pragma kernel 3줄 제거 후 `dxc -T cs_5_0 -E <Kernel>` 로 커널별 컴파일.
+// ============================================================================
+
+#pragma kernel CSAO
+#pragma kernel CSDirect
+#pragma kernel CSIndirect
+#pragma kernel CSRadiance
+#pragma kernel CSSHBake
+
+#define PI    3.14159265358979323846
+#define INF   3.402823466e38          // float.MaxValue (ClosestHit tmax 초기값)
+
+// ── G6 X4714 완화: 순회 스택 깊이 상수 (indexable-temp/local-memory 압박 축소) ──
+// 이 iterative BVH 순회는 내부노드마다 두 자식을 push(하나 pop) → 스택 최대 점유 = 트리 높이(≈+1/하강).
+// SAH 빌드(LeafMax=4)에서 균형 트리 높이 H=32 ⇒ ~2^31·4≈86억 삼각형까지 커버 → 실 라이트맵 씬에 충분한 마진.
+// CPU/Burst 레퍼런스는 stackalloc int[64]지만, GPU는 CSIndirect의 TlasClosest+IntersectBlas 스택이
+// 동시 live(int[64]×2=512B/스레드 로컬)라 64 threads×indexable-temp 가 권장치 16384 초과(X4714).
+// 32 로 절반 축소 → 권장치 이하(48 이미 통과, 32 는 추가 헤드룸). 순회 로직/결과는 무변경.
+#define BVH_STACK 32
+
+// ────────────────────────────────────────────────────────────────────────────
+// 씬 구조체 (G4 BvhTraverse.compute 와 동일 stride — StructuredBuffer tight packing).
+//   GpuNode=32, GpuTri=36, GpuInstance=64, GpuInstNormal=48.
+// ────────────────────────────────────────────────────────────────────────────
+struct GpuNode                 // 32B
+{
+    float3 bmin;               // 0
+    float3 bmax;               // 12
+    int    leftFirst;          // 24
+    int    count;              // 28
+};
+
+struct GpuTri                  // 36B
+{
+    float3 v0;
+    float3 v1;
+    float3 v2;
+};
+
+struct GpuInstance             // 64B : world→local 3행 + meshIndex
+{
+    float4 w2lRow0;
+    float4 w2lRow1;
+    float4 w2lRow2;
+    int    meshIndex;
+    int    _pad0, _pad1, _pad2;
+};
+
+struct GpuInstNormal           // 48B : instNormalMatrix 3행 (월드 노멀 변환용, MultiplyVector)
+{
+    float4 n2wRow0;
+    float4 n2wRow1;
+    float4 n2wRow2;
+};
+
+// ---- 씬 SRV (G4 와 동일 + G5 추가분) ----
+StructuredBuffer<GpuNode>       _TlasNodes;
+StructuredBuffer<int>           _InstIdx;
+StructuredBuffer<GpuInstance>   _Instances;
+StructuredBuffer<GpuInstNormal> _InstNormals;    // G5
+StructuredBuffer<float3>        _MeshAlbedo;      // G5 (tight float3 = 12B)
+StructuredBuffer<GpuNode>       _BlasNodes;
+StructuredBuffer<int>           _BlasTriIdx;
+StructuredBuffer<GpuTri>        _BlasTris;
+StructuredBuffer<int>           _BlasNodeStart;
+StructuredBuffer<int>           _BlasNodeCount;
+StructuredBuffer<int>           _BlasTriIdxStart;
+StructuredBuffer<int>           _BlasTriStart;
+
+int _TlasCount;
+
+// ---- 텍셀 입력 ----
+StructuredBuffer<float3> _Points;
+StructuredBuffer<float3> _Normals;
+StructuredBuffer<uint>   _Valid;                  // 1=유효, 0=스킵
+StructuredBuffer<uint>   _Seeds;                  // G6-2: per-lumel 명시 시드(호출측 공급) → RngInit(_Seeds[i])
+int  _Count;
+
+// ---- SH-G 베이크 입력 (CSSHBake 전용) ----
+// 피보나치 방향셋은 CPU(BurstSHBaker.FibonacchiSphere)에서 계산해 업로드 → Burst 와 동일 방향(sqrt/sin/cos 발산 제거).
+StructuredBuffer<float3> _Dirs;                   // 구면 균등 방향셋(공유, 정규화 완료)
+int   _DirCount;                                  // = _Dirs.Length
+float _ShWeight;                                  // = 4π/N (몬테카를로 균등 가중)
+
+// ---- 품질 파라미터 (BakeQualitySettings) ----
+int   _AoSamples;
+int   _IndirectSamples;
+int   _MaxBounces;
+int   _RRStartDepth;
+float _RayBias;
+float _AoMaxDist;
+
+// ---- 태양(DirectionalLight) ----
+float3 _SunDir;                                   // 진행 방향(정규화 안돼도 셰이더에서 normalize)
+float3 _SunColor;
+float  _SunIntensity;
+
+// ---- 하늘(BurstSky) ----
+int    _SkyType;                                  // 0=uniform, 1=gradient
+float3 _SkyTop;                                   // A (uniform: L / gradient: Top)
+float3 _SkyBottom;                                // B (gradient: Bottom)
+
+// ---- 출력 ----
+RWStructuredBuffer<float>  _AoOut;
+RWStructuredBuffer<float3> _DirectOut;
+RWStructuredBuffer<float3> _IndirectOut;
+RWStructuredBuffer<float3> _RadianceOut;          // G6-2: Direct+Indirect 합산(CSRadiance)
+
+// GpuSH9 — C# SH9(9×Vector3, Stride=108) 와 1:1. StructuredBuffer tight packing(float3=12B → 9×12=108).
+struct GpuSH9
+{
+    float3 c0;
+    float3 c1, c2, c3;
+    float3 c4, c5, c6, c7, c8;
+};
+RWStructuredBuffer<GpuSH9> _ShOut;                // SH-G: per-probe SH9 계수 출력
+
+// ============================================================================
+// 순회 프리미티브 — G4 BvhTraverse.compute 에서 비트동일 복사(검증 완료).
+// ============================================================================
+bool RayAABB(float3 o, float3 invD, float3 bmin, float3 bmax, float tmin, float tmax)
+{
+    float t0 = (bmin.x - o.x) * invD.x, t1 = (bmax.x - o.x) * invD.x;
+    if (invD.x < 0.0) { float tmp = t0; t0 = t1; t1 = tmp; }
+    tmin = t0 > tmin ? t0 : tmin; tmax = t1 < tmax ? t1 : tmax;
+    if (tmax < tmin) return false;
+
+    t0 = (bmin.y - o.y) * invD.y; t1 = (bmax.y - o.y) * invD.y;
+    if (invD.y < 0.0) { float tmp = t0; t0 = t1; t1 = tmp; }
+    tmin = t0 > tmin ? t0 : tmin; tmax = t1 < tmax ? t1 : tmax;
+    if (tmax < tmin) return false;
+
+    t0 = (bmin.z - o.z) * invD.z; t1 = (bmax.z - o.z) * invD.z;
+    if (invD.z < 0.0) { float tmp = t0; t0 = t1; t1 = tmp; }
+    tmin = t0 > tmin ? t0 : tmin; tmax = t1 < tmax ? t1 : tmax;
+    return tmax >= tmin;
+}
+
+bool RayTri(float3 o, float3 d, GpuTri t, float tmin, float tmax, out float hitT)
+{
+    hitT = 0.0;
+    float3 e1 = t.v1 - t.v0;
+    float3 e2 = t.v2 - t.v0;
+
+    float3 p = cross(d, e2);
+    float det = dot(e1, p);
+    if (abs(det) < 1e-12) return false;
+
+    float inv = 1.0 / det;
+    float3 tv = o - t.v0;
+    float u = dot(tv, p) * inv;
+    if (u < 0.0 || u > 1.0) return false;
+
+    float3 q = cross(tv, e1);
+    float v = dot(d, q) * inv;
+    if (v < 0.0 || u + v > 1.0) return false;
+
+    float tt = dot(e2, q) * inv;
+    if (tt <= tmin || tt >= tmax) return false;
+
+    hitT = tt;
+    return true;
+}
+
+// MultiplyPoint3x4 / MultiplyVector (w2l) — G4 와 동일.
+float3 MulPoint(GpuInstance inst, float3 o)
+{
+    return float3(dot(inst.w2lRow0.xyz, o) + inst.w2lRow0.w,
+                  dot(inst.w2lRow1.xyz, o) + inst.w2lRow1.w,
+                  dot(inst.w2lRow2.xyz, o) + inst.w2lRow2.w);
+}
+float3 MulVector(GpuInstance inst, float3 d)
+{
+    return float3(dot(inst.w2lRow0.xyz, d),
+                  dot(inst.w2lRow1.xyz, d),
+                  dot(inst.w2lRow2.xyz, d));
+}
+// MultiplyVector by instNormalMatrix (상단 3x3) — TransformNormalToWorld 재현(정규화는 호출측).
+float3 MulNormal(GpuInstNormal nm, float3 localN)
+{
+    return float3(dot(nm.n2wRow0.xyz, localN),
+                  dot(nm.n2wRow1.xyz, localN),
+                  dot(nm.n2wRow2.xyz, localN));
+}
+
+bool IntersectBlas(int mesh, float3 o, float3 d, float tmin, float t, out float hT, out int hTri)
+{
+    hT = t; hTri = 0;
+    if (_BlasNodeCount[mesh] == 0) return false;
+
+    int triIdxBase = _BlasTriIdxStart[mesh];
+    int triBase    = _BlasTriStart[mesh];
+    int nodeBase   = _BlasNodeStart[mesh];
+    float3 invD = float3(1.0 / d.x, 1.0 / d.y, 1.0 / d.z);
+
+    bool valid = false;
+    int stack[BVH_STACK];
+    int sp = 0; stack[sp++] = 0;
+
+    while (sp > 0)
+    {
+        GpuNode node = _BlasNodes[nodeBase + stack[--sp]];
+        if (!RayAABB(o, invD, node.bmin, node.bmax, tmin, hT)) continue;
+        if (node.count > 0)
+        {
+            int end = node.leftFirst + node.count;
+            for (int slot = node.leftFirst; slot < end; slot++)
+            {
+                int orig = _BlasTriIdx[triIdxBase + slot];
+                float h;
+                if (RayTri(o, d, _BlasTris[triBase + orig], tmin, hT, h))
+                {
+                    valid = true;
+                    hT = h;
+                    hTri = orig;
+                }
+            }
+        }
+        else
+        {
+            int leftNode = node.leftFirst;
+            stack[sp++] = leftNode;
+            stack[sp++] = leftNode + 1;
+        }
+    }
+    return valid;
+}
+
+bool OccludedBlas(int mesh, float3 o, float3 d, float maxDist)
+{
+    if (_BlasNodeCount[mesh] == 0) return false;
+    int nodeBase   = _BlasNodeStart[mesh];
+    int triIdxBase = _BlasTriIdxStart[mesh];
+    int triBase    = _BlasTriStart[mesh];
+    float3 invD = float3(1.0 / d.x, 1.0 / d.y, 1.0 / d.z);
+
+    int stack[BVH_STACK];
+    int sp = 0; stack[sp++] = 0;
+    while (sp > 0)
+    {
+        GpuNode node = _BlasNodes[nodeBase + stack[--sp]];
+        if (!RayAABB(o, invD, node.bmin, node.bmax, 0.0, maxDist)) continue;
+        if (node.count > 0)
+        {
+            int end = node.leftFirst + node.count;
+            for (int s = node.leftFirst; s < end; s++)
+            {
+                int orig = _BlasTriIdx[triIdxBase + s];
+                float h;
+                if (RayTri(o, d, _BlasTris[triBase + orig], 0.0, maxDist, h)) return true;
+            }
+        }
+        else { stack[sp++] = node.leftFirst; stack[sp++] = node.leftFirst + 1; }
+    }
+    return false;
+}
+
+// TLAS 최근접(IntersectInstanced 미러) — G4 CSClosestHit 본문을 함수화.
+bool TlasClosest(float3 o, float3 d, float tmin, float tmax,
+                 out float bestT, out int bestInst, out int bestMesh, out int bestTri)
+{
+    bestT = tmax; bestInst = 0; bestMesh = 0; bestTri = 0;
+    bool valid = false;
+    if (_TlasCount == 0) return false;
+
+    float3 invD = float3(1.0 / d.x, 1.0 / d.y, 1.0 / d.z);
+    int stack[BVH_STACK];
+    int sp = 0; stack[sp++] = 0;
+
+    while (sp > 0)
+    {
+        GpuNode node = _TlasNodes[stack[--sp]];
+        if (!RayAABB(o, invD, node.bmin, node.bmax, tmin, bestT)) continue;
+        if (node.count > 0)
+        {
+            int end = node.leftFirst + node.count;
+            for (int slot = node.leftFirst; slot < end; slot++)
+            {
+                int instIdx = _InstIdx[slot];
+                GpuInstance inst = _Instances[instIdx];
+                int mesh = inst.meshIndex;
+                float3 lo = MulPoint(inst, o);
+                float3 ld = MulVector(inst, d);
+
+                float hT; int hTri;
+                if (IntersectBlas(mesh, lo, ld, tmin, bestT, hT, hTri) && hT < bestT)
+                {
+                    valid    = true;
+                    bestT    = hT;
+                    bestInst = instIdx;
+                    bestMesh = mesh;
+                    bestTri  = hTri;
+                }
+            }
+        }
+        else
+        {
+            stack[sp++] = node.leftFirst;
+            stack[sp++] = node.leftFirst + 1;
+        }
+    }
+    return valid;
+}
+
+// TLAS any-hit(Occluded 미러) — G4 CSOccluded 본문을 함수화.
+bool TlasOccluded(float3 o, float3 d, float maxDist)
+{
+    if (_TlasCount == 0) return false;
+
+    float3 invD = float3(1.0 / d.x, 1.0 / d.y, 1.0 / d.z);
+    int stack[BVH_STACK];
+    int sp = 0; stack[sp++] = 0;
+
+    while (sp > 0)
+    {
+        GpuNode node = _TlasNodes[stack[--sp]];
+        if (!RayAABB(o, invD, node.bmin, node.bmax, 0.0, maxDist)) continue;
+        if (node.count > 0)
+        {
+            int end = node.leftFirst + node.count;
+            for (int slot = node.leftFirst; slot < end; slot++)
+            {
+                int instIdx = _InstIdx[slot];
+                GpuInstance inst = _Instances[instIdx];
+                int mesh = inst.meshIndex;
+                float3 lo = MulPoint(inst, o);
+                float3 ld = MulVector(inst, d);
+                if (OccludedBlas(mesh, lo, ld, maxDist)) return true;
+            }
+        }
+        else
+        {
+            stack[sp++] = node.leftFirst;
+            stack[sp++] = node.leftFirst + 1;
+        }
+    }
+    return false;
+}
+
+// ============================================================================
+// ClosestHitNA — BurstTwoLevelBVH.ClosestHit 미러(위치·역전치 월드노멀(레이 향함)·메시 알베도).
+//   로컬 면노멀 = normalize(cross(v1-v0, v2-v0)); 월드 = normalize(MulNormal(...)); dot>0 flip.
+//   tmin 매개변수화(SH-G): 경로추적(EvalIndirect)은 0.0(G5 거동 보존), SH 베이크는 1e-4(BurstSHBaker 규약).
+// ============================================================================
+bool ClosestHitNA(float3 o, float3 d, float tmin, out float3 pos, out float3 nrm, out float3 albedo)
+{
+    pos = float3(0, 0, 0); nrm = float3(0, 0, 0); albedo = float3(0, 0, 0);
+
+    float bestT; int inst, mesh, tri;
+    if (!TlasClosest(o, d, tmin, INF, bestT, inst, mesh, tri)) return false;
+
+    pos = o + d * bestT;
+
+    GpuTri t3 = _BlasTris[_BlasTriStart[mesh] + tri];
+    float3 localN = normalize(cross(t3.v1 - t3.v0, t3.v2 - t3.v0));
+    float3 wn = normalize(MulNormal(_InstNormals[inst], localN));
+    if (dot(wn, d) > 0.0) wn = -wn;                 // 레이 향함
+    nrm = wn;
+
+    albedo = _MeshAlbedo[mesh];
+    return true;
+}
+
+// ============================================================================
+// RNG (xorshift32) — RadianceCore.Rng 비트동일. 상태는 uint, inout 으로 전달.
+//   Next(): _s^=_s<<13; _s^=_s>>17; _s^=_s<<5; return (_s & 0xFFFFFF)/16777216.
+// ============================================================================
+uint RngInit(uint seed) { return seed == 0u ? 1u : seed; }
+
+float RngNext(inout uint s)
+{
+    s ^= s << 13;
+    s ^= s >> 17;
+    s ^= s << 5;
+    return float(s & 0x00FFFFFFu) / 16777216.0;     // 분모 2^24, 분자 ≤ 2^24-1 → fp32 정확
+}
+
+// CosineHemisphere — RadianceCore.CosineHemisphere 미러. r1 먼저, r2 다음(호출 순서 고정).
+float3 CosineHemisphere(float3 n, inout uint s)
+{
+    float r1 = RngNext(s);
+    float r2 = RngNext(s);
+    float st = sqrt(r1);
+    float phi = 2.0 * PI * r2;
+
+    float lx = st * cos(phi);
+    float ly = st * sin(phi);
+    float lz = sqrt(max(0.0, 1.0 - r1));
+
+    float3 up = (abs(n.x) < 0.9) ? float3(1, 0, 0) : float3(0, 1, 0);
+    float3 t = normalize(cross(n, up));
+    float3 b = cross(n, t);
+    return normalize(t * lx + b * ly + n * lz);
+}
+
+// Sky — BurstSky.Radiance 미러. gradient: Lerp(Bottom, Top, clamp01(dir.y*0.5+0.5)) / uniform: A.
+float3 SkyRadiance(float3 dir)
+{
+    if (_SkyType == 1)
+    {
+        float t = saturate(dir.y * 0.5 + 0.5);
+        return lerp(_SkyBottom, _SkyTop, t);        // Lerp(B, A, t)
+    }
+    return _SkyTop;                                 // uniform: A
+}
+
+// Direct NEE — RadianceCore.EvaluateDirect 미러(그림자 origin 은 1e-3 하드코드, maxDist 1e30).
+float3 DirectNEE(float3 hp, float3 hn)
+{
+    float3 L = -normalize(_SunDir);
+    float ndl = dot(L, hn);
+    if (ndl <= 0.0) return float3(0, 0, 0);
+    if (TlasOccluded(hp + hn * 1e-3, L, 1e30)) return float3(0, 0, 0);
+    return _SunColor * _SunIntensity * ndl;
+}
+
+// ============================================================================
+// EvalIndirect — BurstIndirect.IndirectJob 경로추적 루프 미러(π 상쇄·NEE·RR).
+//   CSIndirect / CSRadiance 공용(단일 진실원). RNG 상태 s 는 inout(호출측이 _Seeds[i] 로 초기화).
+//   결과는 IndirectSamples 로 평균한 간접 조도(점 알베도 미적용).
+// ============================================================================
+float3 EvalIndirect(float3 p, float3 n, inout uint s)
+{
+    float3 sum = float3(0, 0, 0);
+
+    [loop] for (int sp = 0; sp < _IndirectSamples; sp++)
+    {
+        float3 acc = float3(0, 0, 0);
+        float3 tp  = float3(1, 1, 1);
+        float3 dir = CosineHemisphere(n, s);
+        float3 o   = p + n * _RayBias;
+
+        // 바운스 루프: b+1>=_MaxBounces 또는 미스 또는 RR 로 반드시 종료(캡은 안전장치).
+        [loop] for (int b = 0; b < 1024; b++)
+        {
+            float3 hp, hn, alb;
+            if (!ClosestHitNA(o, dir, 0.0, hp, hn, alb))   // tmin=0.0 : G5 경로추적 거동 보존
+            {
+                acc += tp * SkyRadiance(dir) * PI;      // 미스: 하늘(π)
+                break;
+            }
+
+            float3 eD = DirectNEE(hp, hn);
+            acc += tp * (alb * eD);
+            tp = tp * alb;                              // throughput *= ρ
+
+            if (b + 1 >= _MaxBounces) break;
+
+            if (b + 1 >= _RRStartDepth)
+            {
+                float pSurv = clamp(max(tp.x, max(tp.y, tp.z)), 0.05, 1.0);
+                if (RngNext(s) > pSurv) break;
+                tp /= pSurv;
+            }
+
+            dir = CosineHemisphere(hn, s);
+            o = hp + hn * _RayBias;
+        }
+        sum += acc;
+    }
+    return sum / (float)_IndirectSamples;
+}
+
+// ============================================================================
+// CSAO — BurstAO.AoJob 미러. o=p+n*1e-3; occ=Σ Occluded(CosineHemisphere); AO=1-occ/N.
+// ============================================================================
+[numthreads(64, 1, 1)]
+void CSAO(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if ((int)i >= _Count) return;
+    if (_Valid[i] == 0) { _AoOut[i] = 0.0; return; }
+
+    uint s = RngInit(_Seeds[i]);
+    float3 n = _Normals[i];
+    float3 o = _Points[i] + n * 1e-3;
+
+    int occ = 0;
+    [loop] for (int k = 0; k < _AoSamples; k++)
+    {
+        float3 d = CosineHemisphere(n, s);
+        if (TlasOccluded(o, d, _AoMaxDist)) occ++;
+    }
+    _AoOut[i] = 1.0 - (float)occ / (float)_AoSamples;
+}
+
+// ============================================================================
+// CSDirect — BurstDirect.DirectJob 미러(무작위 없음 → 타이트 일치 기대).
+//   L=-normalize(sun.dir); ndl=dot(L,n); ndl<=0→0; Occluded(p+n*1e-3,L,1e30)→0; else color*I*ndl.
+// ============================================================================
+[numthreads(64, 1, 1)]
+void CSDirect(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if ((int)i >= _Count) return;
+    if (_Valid[i] == 0) { _DirectOut[i] = float3(0, 0, 0); return; }
+
+    float3 n = _Normals[i];
+    float3 p = _Points[i];
+    float3 L = -normalize(_SunDir);
+    float ndl = dot(L, n);
+    if (ndl <= 0.0) { _DirectOut[i] = float3(0, 0, 0); return; }
+    if (TlasOccluded(p + n * 1e-3, L, 1e30)) { _DirectOut[i] = float3(0, 0, 0); return; }
+    _DirectOut[i] = _SunColor * _SunIntensity * ndl;
+}
+
+// ============================================================================
+// CSIndirect — BurstIndirect.IndirectJob 미러(경로추적 + RR).
+//   코사인 중요도(π·1/π 상쇄 → 알베도만 누적, π는 하늘 미스 항). NEE per bounce. RRStartDepth 부터 RR.
+// ============================================================================
+[numthreads(64, 1, 1)]
+void CSIndirect(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if ((int)i >= _Count) return;
+    if (_Valid[i] == 0) { _IndirectOut[i] = float3(0, 0, 0); return; }
+
+    uint s = RngInit(_Seeds[i]);
+    _IndirectOut[i] = EvalIndirect(_Points[i], _Normals[i], s);
+}
+
+// ============================================================================
+// CSRadiance — 라이트맵 조도 = Direct(태양 NEE) + Indirect(경로추적). 한 디스패치·1회 readback.
+//   BurstRadianceBaker.Bake(=BurstDirect + BurstIndirect) 와 정합.
+//   Direct 는 무작위 없음(RNG 미소비) → CSDirect 와 동일. Indirect 만 _Seeds[i] 로 RNG 초기화
+//   (Burst 도 Direct 후 new Rng(Seeds[i]) → 호출 순서 일치).
+// ============================================================================
+[numthreads(64, 1, 1)]
+void CSRadiance(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if ((int)i >= _Count) return;
+    if (_Valid[i] == 0) { _RadianceOut[i] = float3(0, 0, 0); return; }
+
+    float3 p = _Points[i];
+    float3 n = _Normals[i];
+
+    float3 direct = DirectNEE(p, n);                    // = CSDirect 본문(origin p, 그림자 p+n*1e-3)
+    uint s = RngInit(_Seeds[i]);
+    float3 indirect = EvalIndirect(p, n, s);
+
+    _RadianceOut[i] = direct + indirect;
+}
+
+// ============================================================================
+// SH-G : per-probe SH9 프로젝션. BurstSHBaker.SHJob 미러(RNG 없음, 결정적).
+// ============================================================================
+
+// SH9.Basis 포팅 — SH9.cs 상수/다항식 1:1(cos/sin 없음, 순수 다항식 기저).
+//   y0=k0; y1=k1·y; y2=k1·z; y3=k1·x; y4=k2a·xy; y5=k2a·yz; y6=k2b·(3z²-1); y7=k2a·zx; y8=k2c·(x²-y²).
+void ShBasis(float3 d, out float y0, out float y1, out float y2, out float y3,
+             out float y4, out float y5, out float y6, out float y7, out float y8)
+{
+    const float k0  = 0.2820948;    // 1/(2√π)
+    const float k1  = 0.4886025;    // √(3/4π)
+    const float k2a = 1.0925484;    // √(15/4π)   (xy, yz, xz)
+    const float k2b = 0.3153916;    // √(5/16π)   (3z²-1)
+    const float k2c = 0.5462742;    // √(15/16π)  (x²-y²)
+
+    float x = d.x, y = d.y, z = d.z;
+    y0 = k0;
+    y1 = k1 * y;
+    y2 = k1 * z;
+    y3 = k1 * x;
+    y4 = k2a * (x * y);
+    y5 = k2a * (y * z);
+    y6 = k2b * (3.0 * z * z - 1.0);
+    y7 = k2a * (z * x);
+    y8 = k2c * (x * x - y * y);
+}
+
+// SH-G 입사조도 — BurstSHBaker.Incoming 미러.
+//   hit  : albedo ⊙ (DirectAt(hp,hn) + AmbientAt(hn))  , DirectAt=DirectNEE , AmbientAt=SkyRadiance(hn)
+//   miss : SkyRadiance(d)
+//   ⚠ tmin=1e-4(BurstSHBaker 규약) — ClosestHitNA 에 명시 전달.
+float3 ShIncoming(float3 p, float3 d)
+{
+    float3 hp, hn, alb;
+    float3 result = SkyRadiance(d);                         // 미스 기본값(하늘)
+    if (ClosestHitNA(p, d, 1e-4, hp, hn, alb))
+    {
+        float3 irr = DirectNEE(hp, hn) + SkyRadiance(hn);   // 태양(그림자 포함) + 하늘 앰비언트
+        result = alb * irr;
+    }
+    return result;                                          // 단일 반환(fxc X4000 false-positive 회피)
+}
+
+// ============================================================================
+// CSSHBake — 스레드=프로브. 각 방향 d: L=ShIncoming(p,d) → SH9 기저 → c_k += L·y_k·_ShWeight.
+//   _Valid/_Seeds/_Normals 미참조(BurstSHBaker 는 전 프로브 무조건 베이크·RNG 없음).
+// ============================================================================
+[numthreads(64, 1, 1)]
+void CSSHBake(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if ((int)i >= _Count) return;
+
+    float3 p = _Points[i];
+
+    // 누적 계수(9×float3). fp32.
+    float3 c0 = float3(0, 0, 0), c1 = float3(0, 0, 0), c2 = float3(0, 0, 0), c3 = float3(0, 0, 0);
+    float3 c4 = float3(0, 0, 0), c5 = float3(0, 0, 0), c6 = float3(0, 0, 0), c7 = float3(0, 0, 0), c8 = float3(0, 0, 0);
+
+    [loop] for (int s = 0; s < _DirCount; s++)
+    {
+        float3 d = _Dirs[s];
+        float3 L = ShIncoming(p, d);
+
+        float y0, y1, y2, y3, y4, y5, y6, y7, y8;
+        ShBasis(d, y0, y1, y2, y3, y4, y5, y6, y7, y8);
+
+        // c_k += L · y_k · weight (채널별 RGB)
+        c0 += L * y0 * _ShWeight;
+        c1 += L * y1 * _ShWeight;
+        c2 += L * y2 * _ShWeight;
+        c3 += L * y3 * _ShWeight;
+        c4 += L * y4 * _ShWeight;
+        c5 += L * y5 * _ShWeight;
+        c6 += L * y6 * _ShWeight;
+        c7 += L * y7 * _ShWeight;
+        c8 += L * y8 * _ShWeight;
+    }
+
+    GpuSH9 sh;
+    sh.c0 = c0; sh.c1 = c1; sh.c2 = c2; sh.c3 = c3;
+    sh.c4 = c4; sh.c5 = c5; sh.c6 = c6; sh.c7 = c7; sh.c8 = c8;
+    _ShOut[i] = sh;
+}

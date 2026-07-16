@@ -1,0 +1,20 @@
+{
+    "name": "HuskyLibs.CustomLightmapper.Samples",
+    "rootNamespace": "HuskyLibs.CustomLightmapper",
+    "references": [
+        "HuskyLibs.CustomLightmapper",
+        "HuskyLibs.CustomLightmapper.Tests",
+        "Unity.Burst",
+        "Unity.Collections",
+        "Unity.Mathematics"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": true,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

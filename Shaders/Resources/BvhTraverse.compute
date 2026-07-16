@@ -1,0 +1,358 @@
+// ============================================================================
+// BvhTraverse.compute — G4: 2단 BVH 순회 GPU 포팅 (조명 없음, 순수 교차/차폐)
+//   BurstTwoLevelBVH.IntersectInstanced / Occluded 를 비트 충실하게 미러.
+//   ground truth:
+//     Script/LightmapEvaluate/Burst/Occluders/BurstTwoLevelBVH.cs
+//     Script/LightmapEvaluate/Occluders/BVH.cs (RayAABB)
+//     Script/LightmapEvaluate/Occluders/Occluder.cs (RayGeometry.RayTri)
+//
+// 커널:
+//   CSClosestHit : IntersectInstanced → _HitsOut[i] = {valid,t,inst,mesh,tri}
+//   CSOccluded   : Occluded          → _OccOut[i]  = 0/1
+//
+// 정밀도(rule #3 Precision Control): 월드좌표/깊이/순회는 전부 32-bit float.
+//   half/min16float 금지 (그레이징 레이에서 발산 → 인덱스 불일치 유발).
+//
+// ⚠️ fast-math 주석: Unity compute 는 기본 fast-math 로 컴파일된다. det(1e-12)·
+//   1/det·슬랩 t 계산 순서가 Burst(FMA/정밀도)와 미세하게 갈릴 수 있어 near-tie
+//   레이에서 tri 인덱스가 달라질 수 있음. 검증 측에서 |Tcpu-Tgpu|<ε 이면 허용.
+// ============================================================================
+
+#pragma kernel CSClosestHit
+#pragma kernel CSOccluded
+
+// ── G6 X4714 완화: 순회 스택 깊이 상수 (PathTrace.compute 와 일원화) ──
+// iterative 순회는 내부노드마다 두 자식 push(하나 pop) → 스택 최대 점유 = 트리 높이.
+// SAH(LeafMax=4) 균형트리 높이 32 ⇒ ~86억 삼각형 커버. CPU/Burst 는 stackalloc int[64]지만
+// GPU indexable-temp 압박(X4714) 완화를 위해 32 로 통일. 순회 로직/결과 무변경.
+// (이 파일 2커널은 baseline 에서 X4714 미발생이나, 두 셰이더 스택 깊이를 동일 상수로 유지.)
+#define BVH_STACK 32
+
+// ---- 재패킹 GPU 구조체 (StructuredBuffer tight packing; C# stride 와 정합) ----
+// StructuredBuffer 는 cbuffer 의 16B no-straddle 규칙이 아니라 tight(scalar) packing 을
+// 쓴다 → float3 = 12B. C# GpuScene 의 stride 와 반드시 1:1 (GpuNode=32, GpuTri=36,
+// GpuInstance=64, GpuRay=32, GpuHit=32).
+struct GpuNode                 // 32B : BVH.Node {Vector3 Min,Max; int LeftFirst,Count}
+{
+    float3 bmin;               // 0
+    float3 bmax;               // 12
+    int    leftFirst;          // 24  (Count>0=리프: triIdx 시작슬롯 / Count==0=내부: 왼자식)
+    int    count;              // 28  (0=내부, >0=리프)
+};
+
+struct GpuTri                  // 36B : Tri {Vector3 V0,V1,V2}
+{
+    float3 v0;
+    float3 v1;
+    float3 v2;
+};
+
+// 인스턴스: Unity Matrix4x4 를 float4x4 로 올려 mul() 에 의존하지 않는다(rule #1: column-major 트랩 회피).
+// C# 에서 w2l.GetRow(r) = (mR0,mR1,mR2,mR3) 를 그대로 3행 업로드 →
+// MultiplyPoint3x4(o) = (dot(rowR.xyz,o)+rowR.w) 를 명시적 dot 으로 재현.
+struct GpuInstance             // 64B
+{
+    float4 w2lRow0;            // (m00,m01,m02,m03)
+    float4 w2lRow1;            // (m10,m11,m12,m13)
+    float4 w2lRow2;            // (m20,m21,m22,m23)
+    int    meshIndex;          // instBlas[inst]
+    int    _pad0, _pad1, _pad2;
+};
+
+struct GpuRay                  // 32B
+{
+    float3 origin;            // 0
+    float  tmin;              // 12
+    float3 dir;               // 16
+    float  tmax;              // 28
+};
+
+struct GpuHit                  // 32B
+{
+    int   valid;              // 0
+    float t;                  // 4
+    int   inst;               // 8
+    int   mesh;               // 12
+    int   tri;                // 16  (mesh-상대 orig tri 인덱스)
+    int   _pad0, _pad1, _pad2;
+};
+
+// ---- 씬 SRV ----
+StructuredBuffer<GpuNode>     _TlasNodes;
+StructuredBuffer<int>         _InstIdx;        // TLAS 리프 슬롯 → 인스턴스
+StructuredBuffer<GpuInstance> _Instances;
+StructuredBuffer<GpuNode>     _BlasNodes;      // 메시 concat
+StructuredBuffer<int>         _BlasTriIdx;     // 메시 concat
+StructuredBuffer<GpuTri>      _BlasTris;       // 메시 concat
+StructuredBuffer<int>         _BlasNodeStart;  // 메시당 오프셋
+StructuredBuffer<int>         _BlasNodeCount;
+StructuredBuffer<int>         _BlasTriIdxStart;
+StructuredBuffer<int>         _BlasTriStart;
+
+// ---- 레이 / 출력 ----
+StructuredBuffer<GpuRay>      _Rays;
+RWStructuredBuffer<GpuHit>    _HitsOut;        // CSClosestHit
+RWStructuredBuffer<uint>      _OccOut;         // CSOccluded
+
+int _RayCount;
+int _TlasCount;
+
+// ============================================================================
+// RayAABB — BVH.cs 미러. 슬랩. flat(두께0) 박스 통과: 축마다 (tmax<tmin) return false;
+//   최종 tmax>=tmin. tmin/tmax 는 값 복사(로컬 변형 OK).
+// ============================================================================
+bool RayAABB(float3 o, float3 invD, float3 bmin, float3 bmax, float tmin, float tmax)
+{
+    float t0 = (bmin.x - o.x) * invD.x, t1 = (bmax.x - o.x) * invD.x;
+    if (invD.x < 0.0) { float tmp = t0; t0 = t1; t1 = tmp; }
+    tmin = t0 > tmin ? t0 : tmin; tmax = t1 < tmax ? t1 : tmax;
+    if (tmax < tmin) return false;                 // < (not <=)
+
+    t0 = (bmin.y - o.y) * invD.y; t1 = (bmax.y - o.y) * invD.y;
+    if (invD.y < 0.0) { float tmp = t0; t0 = t1; t1 = tmp; }
+    tmin = t0 > tmin ? t0 : tmin; tmax = t1 < tmax ? t1 : tmax;
+    if (tmax < tmin) return false;                 // < (not <=)
+
+    t0 = (bmin.z - o.z) * invD.z; t1 = (bmax.z - o.z) * invD.z;
+    if (invD.z < 0.0) { float tmp = t0; t0 = t1; t1 = tmp; }
+    tmin = t0 > tmin ? t0 : tmin; tmax = t1 < tmax ? t1 : tmax;
+    return tmax >= tmin;                           // >= : coplanar 통과
+}
+
+// ============================================================================
+// RayTri — RayGeometry.RayTri 미러(Möller–Trumbore). hitT=tt 반환.
+// ============================================================================
+bool RayTri(float3 o, float3 d, GpuTri t, float tmin, float tmax, out float hitT)
+{
+    hitT = 0.0;
+    float3 e1 = t.v1 - t.v0;
+    float3 e2 = t.v2 - t.v0;
+
+    float3 p = cross(d, e2);
+    float det = dot(e1, p);
+    if (abs(det) < 1e-12) return false;
+
+    float inv = 1.0 / det;
+    float3 tv = o - t.v0;
+    float u = dot(tv, p) * inv;
+    if (u < 0.0 || u > 1.0) return false;
+
+    float3 q = cross(tv, e1);
+    float v = dot(d, q) * inv;
+    if (v < 0.0 || u + v > 1.0) return false;
+
+    float tt = dot(e2, q) * inv;
+    if (tt <= tmin || tt >= tmax) return false;
+
+    hitT = tt;
+    return true;
+}
+
+// MultiplyPoint3x4 (affine, w=1) / MultiplyVector (상단 3x3) — Unity 정합.
+float3 MulPoint(GpuInstance inst, float3 o)
+{
+    return float3(dot(inst.w2lRow0.xyz, o) + inst.w2lRow0.w,
+                  dot(inst.w2lRow1.xyz, o) + inst.w2lRow1.w,
+                  dot(inst.w2lRow2.xyz, o) + inst.w2lRow2.w);
+}
+float3 MulVector(GpuInstance inst, float3 d)
+{
+    return float3(dot(inst.w2lRow0.xyz, d),
+                  dot(inst.w2lRow1.xyz, d),
+                  dot(inst.w2lRow2.xyz, d));
+}
+
+// ============================================================================
+// IntersectBlas — BurstTwoLevelBVH.IntersectBlas 미러(로컬 좌표).
+//   hT 초기값 = 들어온 best.T (t). BLAS-상대 노드 인덱스, tri = triBase + orig.
+// ============================================================================
+bool IntersectBlas(int mesh, float3 o, float3 d, float tmin, float t, out float hT, out int hTri)
+{
+    hT = t; hTri = 0;
+    if (_BlasNodeCount[mesh] == 0) return false;
+
+    int triIdxBase = _BlasTriIdxStart[mesh];
+    int triBase    = _BlasTriStart[mesh];
+    int nodeBase   = _BlasNodeStart[mesh];
+    float3 invD = float3(1.0 / d.x, 1.0 / d.y, 1.0 / d.z);
+
+    bool valid = false;
+    int stack[BVH_STACK];
+    int sp = 0; stack[sp++] = 0;                   // BLAS-상대 루트
+
+    while (sp > 0)
+    {
+        GpuNode node = _BlasNodes[nodeBase + stack[--sp]];
+        if (!RayAABB(o, invD, node.bmin, node.bmax, tmin, hT)) continue;
+        if (node.count > 0)
+        {
+            int end = node.leftFirst + node.count;
+            for (int slot = node.leftFirst; slot < end; slot++)
+            {
+                int orig = _BlasTriIdx[triIdxBase + slot];
+                float h;
+                if (RayTri(o, d, _BlasTris[triBase + orig], tmin, hT, h))
+                {
+                    valid = true;
+                    hT = h;
+                    hTri = orig;
+                }
+            }
+        }
+        else
+        {
+            int leftNode = node.leftFirst;
+            stack[sp++] = leftNode;
+            stack[sp++] = leftNode + 1;
+        }
+    }
+    return valid;
+}
+
+// ============================================================================
+// OccludedBlas — BurstTwoLevelBVH.OccludedBlas 미러(any-hit). RayAABB tmin=0.
+// ============================================================================
+bool OccludedBlas(int mesh, float3 o, float3 d, float maxDist)
+{
+    if (_BlasNodeCount[mesh] == 0) return false;
+    int nodeBase   = _BlasNodeStart[mesh];
+    int triIdxBase = _BlasTriIdxStart[mesh];
+    int triBase    = _BlasTriStart[mesh];
+    float3 invD = float3(1.0 / d.x, 1.0 / d.y, 1.0 / d.z);
+
+    int stack[BVH_STACK];
+    int sp = 0; stack[sp++] = 0;
+    while (sp > 0)
+    {
+        GpuNode node = _BlasNodes[nodeBase + stack[--sp]];
+        if (!RayAABB(o, invD, node.bmin, node.bmax, 0.0, maxDist)) continue;
+        if (node.count > 0)
+        {
+            int end = node.leftFirst + node.count;
+            for (int s = node.leftFirst; s < end; s++)
+            {
+                int orig = _BlasTriIdx[triIdxBase + s];
+                float h;
+                if (RayTri(o, d, _BlasTris[triBase + orig], 0.0, maxDist, h)) return true;
+            }
+        }
+        else { stack[sp++] = node.leftFirst; stack[sp++] = node.leftFirst + 1; }
+    }
+    return false;
+}
+
+// ============================================================================
+// CSClosestHit — IntersectInstanced 미러.
+// ============================================================================
+[numthreads(64, 1, 1)]
+void CSClosestHit(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if ((int)i >= _RayCount) return;
+
+    GpuHit outHit;
+    outHit.valid = 0; outHit.t = 0.0; outHit.inst = 0; outHit.mesh = 0; outHit.tri = 0;
+    outHit._pad0 = 0; outHit._pad1 = 0; outHit._pad2 = 0;
+
+    GpuRay ray = _Rays[i];
+    float3 o = ray.origin, d = ray.dir;
+    float tmin = ray.tmin, tmax = ray.tmax;
+
+    if (_TlasCount == 0) { _HitsOut[i] = outHit; return; }
+
+    float bestT = tmax;                             // best.T 초기 = tmax
+    int   bestInst = 0, bestMesh = 0, bestTri = 0;
+    bool  valid = false;
+
+    float3 invD = float3(1.0 / d.x, 1.0 / d.y, 1.0 / d.z);
+    int stack[BVH_STACK];
+    int sp = 0; stack[sp++] = 0;
+
+    while (sp > 0)
+    {
+        GpuNode node = _TlasNodes[stack[--sp]];
+        if (!RayAABB(o, invD, node.bmin, node.bmax, tmin, bestT)) continue;
+        if (node.count > 0)
+        {
+            int end = node.leftFirst + node.count;
+            for (int slot = node.leftFirst; slot < end; slot++)
+            {
+                int instIdx = _InstIdx[slot];
+                GpuInstance inst = _Instances[instIdx];
+                int mesh = inst.meshIndex;
+                float3 lo = MulPoint(inst, o);
+                float3 ld = MulVector(inst, d);
+
+                float hT; int hTri;
+                if (IntersectBlas(mesh, lo, ld, tmin, bestT, hT, hTri) && hT < bestT)
+                {
+                    valid   = true;
+                    bestT   = hT;
+                    bestInst = instIdx;
+                    bestMesh = mesh;
+                    bestTri  = hTri;
+                }
+            }
+        }
+        else
+        {
+            stack[sp++] = node.leftFirst;
+            stack[sp++] = node.leftFirst + 1;
+        }
+    }
+
+    outHit.valid = valid ? 1 : 0;
+    outHit.t     = valid ? bestT : tmax;            // 미스면 tmax(=best.T 초기값) 유지
+    outHit.inst  = bestInst;
+    outHit.mesh  = bestMesh;
+    outHit.tri   = bestTri;
+    _HitsOut[i] = outHit;
+}
+
+// ============================================================================
+// CSOccluded — Occluded 미러(any-hit). maxDist = ray.tmax.
+// ============================================================================
+[numthreads(64, 1, 1)]
+void CSOccluded(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if ((int)i >= _RayCount) return;
+
+    GpuRay ray = _Rays[i];
+    float3 o = ray.origin, d = ray.dir;
+    float maxDist = ray.tmax;
+
+    if (_TlasCount == 0) { _OccOut[i] = 0; return; }
+
+    float3 invD = float3(1.0 / d.x, 1.0 / d.y, 1.0 / d.z);
+    int stack[BVH_STACK];
+    int sp = 0; stack[sp++] = 0;
+
+    uint result = 0;
+    while (sp > 0)
+    {
+        GpuNode node = _TlasNodes[stack[--sp]];
+        if (!RayAABB(o, invD, node.bmin, node.bmax, 0.0, maxDist)) continue;
+        if (node.count > 0)
+        {
+            int end = node.leftFirst + node.count;
+            int hit = 0;
+            for (int slot = node.leftFirst; slot < end; slot++)
+            {
+                int instIdx = _InstIdx[slot];
+                GpuInstance inst = _Instances[instIdx];
+                int mesh = inst.meshIndex;
+                float3 lo = MulPoint(inst, o);
+                float3 ld = MulVector(inst, d);
+                if (OccludedBlas(mesh, lo, ld, maxDist)) { hit = 1; break; }
+            }
+            if (hit == 1) { result = 1; break; }
+        }
+        else
+        {
+            stack[sp++] = node.leftFirst;
+            stack[sp++] = node.leftFirst + 1;
+        }
+    }
+    _OccOut[i] = result;
+}
