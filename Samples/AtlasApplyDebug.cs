@@ -52,6 +52,20 @@ namespace HuskyLibs.CustomLightmapper.Bake
         [Tooltip("아틀라스 샘플링 필터. Point=텍셀 그대로(블록) / Bilinear=텍셀 보간(GI 노이즈·계단 시각적 완화).")]
         public FilterMode atlasFilter = FilterMode.Point;
 
+        [Header("Denoise (À-trous Joint Bilateral — Radiance/RadianceGI 전용, Seam Stitch 직전)")]
+        [Tooltip("몬테카를로 노이즈(그레인) 제거. 텍셀별 월드 노멀·위치·색 가이드의 에지 보존 필터 — 하드 엣지·차트 경계·그림자 경계는 보존하고 평탄면 노이즈만 평활(LightmapDenoise).")]
+        public bool denoise = true;
+        [Tooltip("À-trous 반복 수(step=1,2,4…). 3이면 유효 반경 ≈17텍셀. 클수록 매끈하지만 비용 증가.")]
+        [Range(1, 5)] public int denoiseIterations = 3;
+        [Tooltip("노멀 가중 지수 pow(max(0,n·n'),p). 클수록 각진 면 분리 강함(큐브 모서리 등 하드 엣지 보존). 16~64 권장.")]
+        [Range(1f, 128f)] public float denoiseNormalPower = 32f;
+        [Tooltip("월드 위치 가우시안 σ(텍셀 단위 — texelsPerWorldUnit 로 월드 변환). 아틀라스에서 인접해도 월드에서 먼 차트끼리 섞이지 않게 차단. 1~4 권장.")]
+        [Range(0.5f, 8f)] public float denoisePositionSigmaTexels = 2f;
+        [Tooltip("색 range σ(Linear RGB L2 거리). 작을수록 그림자 경계 같은 라이팅 엣지 보존 강함 — 너무 작으면 노이즈도 엣지로 인식해 평활이 약해짐. 0.15~0.35 권장.")]
+        [Range(0.01f, 1f)] public float denoiseColorSigma = 0.25f;
+        [Tooltip("Burst Job 병렬판(LightmapDenoiseBurstJob) 사용. 끄면 순수 C# 직렬판 — 결과 비교용.")]
+        public bool denoiseBurst = true;
+
         [Header("Seam Stitch (시임 스티칭, Dilation 직전)")]
         [Tooltip("Tier1(정점): 같은 원본 정점에서 갈라진 차트 경계 텍셀들을 그룹 평균 → 정점 불연속 제거.")]
         public bool seamStitchTier1 = true;
@@ -360,6 +374,20 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 for (int k = 0; k < slices[p].Length; k++) slices[p][k] = bgLin;
             }
 
+            // Denoise 가이드(텍셀별 월드 노멀·위치) — 라이팅 모드에서만 수집(BlitRegion 이 채움).
+            bool doDenoise = denoise && (mode == BakeMode.Radiance || mode == BakeMode.RadianceGI);
+            Vector3[][] guideN = null, guideP = null;
+            if (doDenoise)
+            {
+                guideN = new Vector3[pages][];
+                guideP = new Vector3[pages][];
+                for (int p = 0; p < pages; p++)
+                {
+                    guideN[p] = new Vector3[res * res];
+                    guideP[p] = new Vector3[res * res];
+                }
+            }
+
             EnsureMaterial();
 
             // Radiance 모드: 씬 전체(모든 인스턴스) 차폐자 + 광원 1회 구성 → 인스턴스 간 그림자 반영.
@@ -441,7 +469,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 Vector3[] giRad = (mode == BakeMode.RadianceGI)
                     ? (_gpuReady ? BakeGiLumelsGpu(lumel) : (_burstReady ? BakeGiLumelsBurst(lumel) : null))
                     : null;
-                BlitRegion(slices[page], validMask[page], res, ox, oy, sidePx, lumel, tint, giRad);
+                BlitRegion(slices[page], validMask[page], res, ox, oy, sidePx, lumel, tint, giRad,
+                           doDenoise ? guideN[page] : null, doDenoise ? guideP[page] : null);
 
                 // 시임 스티칭 입력 누적 — 블릿과 동일한 (ox,oy,sidePx,res) 매핑이라 텍셀이 정확히 정렬.
                 // 노멀 게이팅: 시임 양쪽 노멀이 seamMaxAngleDeg 이내(부드러운 시임)일 때만 스티칭 →
@@ -508,6 +537,27 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
 
 
+            // 3.3) Denoise — MC 노이즈(그레인)를 노멀·위치·색 가이드 에지 보존 필터로 평활.
+            //      Seam Stitch 전: 경계 텍셀 값을 먼저 안정화한 뒤 스티칭·확장해야 시임이 매끈하다.
+            //      가이드는 valid 텍셀에서만 유효 — 필터도 valid 만 읽고 씀(배경/거터 불변, dilation 소스 마스크 불변).
+            if (doDenoise)
+            {
+                var dq = new DenoiseSettings
+                {
+                    Iterations = denoiseIterations,
+                    NormalPower = denoiseNormalPower,
+                    PositionSigma = denoisePositionSigmaTexels / Mathf.Max(0.001f, texelsPerWorldUnit),
+                    ColorSigma = denoiseColorSigma,
+                };
+                for (int p = 0; p < pages; p++)
+                {
+                    if (denoiseBurst)
+                        LightmapDenoiseBurstJob.Denoise(slices[p], validMask[p], guideN[p], guideP[p], res, res, dq);
+                    else
+                        LightmapDenoise.Denoise(slices[p], validMask[p], guideN[p], guideP[p], res, res, dq);
+                }
+            }
+
             // 3.4) Seam Stitch — 차트 경계 정점(Tier1)/모서리(Tier2)의 불연속을 valid 텍셀 평균으로 제거.
             //      Dilation 보다 먼저: 경계값을 먼저 일치시킨 뒤 그 값을 거터로 확장해야 한다.
             int stitchT1 = 0, stitchT2 = 0;
@@ -572,8 +622,11 @@ namespace HuskyLibs.CustomLightmapper.Bake
             string stitchInfo = (seamStitchTier1 || seamStitchTier2)
                 ? $", stitch(T1={stitchT1},T2={stitchT2})"
                 : ", stitch=off";
+            string denoiseInfo = doDenoise
+                ? $", denoise={denoiseIterations}×({(denoiseBurst ? "Burst" : "C#")})"
+                : ", denoise=off";
             string occInfo = (occluders != null && occluders.Length > 0) ? $", occluders={occluders.Length}" : "";
-            Debug.Log($"[AtlasApply] {filters.Length} insts → atlas {res}×{res}×{pages}, util={alloc.Utilization:P1}, mode={mode}{occInfo}{stitchInfo}{dilateInfo}" +
+            Debug.Log($"[AtlasApply] {filters.Length} insts → atlas {res}×{res}×{pages}, util={alloc.Utilization:P1}, mode={mode}{occInfo}{denoiseInfo}{stitchInfo}{dilateInfo}" +
                       (alloc.Overflow ? "  ⚠ overflow(클램프됨)" : ""), this);
 
             // NativeArray 보유 차폐자/씬 해제(BlitRegion 은 위 루프에서 끝났으므로 안전)
@@ -587,7 +640,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
         // LumelMap 을 아틀라스 페이지 버퍼의 (ox,oy) 영역에 blit. valid 텍셀만, 모드별 색.
         // valid: 실제 칠한 텍셀을 true 로 표시 → 이후 dilation 의 소스/보존 마스크로 사용.
-        void BlitRegion(Color[] slice, bool[] valid, int res, int ox, int oy, int sidePx, LumelMap lm, Color tint, Vector3[] giRadiance = null)
+        void BlitRegion(Color[] slice, bool[] valid, int res, int ox, int oy, int sidePx, LumelMap lm, Color tint, Vector3[] giRadiance = null,
+                        Vector3[] guideNormal = null, Vector3[] guidePos = null)
         {
             for (int y = 0; y < sidePx; y++)
             {
@@ -649,6 +703,10 @@ namespace HuskyLibs.CustomLightmapper.Bake
                     int ai = ay * res + ax;
                     slice[ai] = (mode == BakeMode.Radiance || mode == BakeMode.RadianceGI) ? c : c.linear;
                     valid[ai] = true; // 칠한 텍셀 → dilation 소스
+
+                    // Denoise 가이드 — blit 과 동일 (li→ai) 매핑으로 텍셀별 월드 노멀·위치 수집.
+                    if (guideNormal != null) guideNormal[ai] = lm.WorldNormal[li];
+                    if (guidePos != null) guidePos[ai] = lm.WorldPos[li];
                 }
             }
         }

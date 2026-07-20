@@ -30,9 +30,10 @@ ResolveTargets()                    대상 MeshFilter 수집 (occluder 차집합
   │      RadianceGI  → BuildGiScene (InstancedRadianceScene + Burst/GPU 백엔드)
   ├─ 3) 인스턴스 루프:
   │      ParameterizationPipeline → DensityNormalizer → ShelfPacker
-  │      → UVAssembly.Assemble → TexelMapper.Map → BlitRegion
+  │      → UVAssembly.Assemble → TexelMapper.Map → BlitRegion(+디노이즈 가이드 수집)
   │      → 시임 스티칭 입력 누적(Tier1 텍셀그룹 / Tier2 세그먼트)
   │      → 렌더러에 uv2 메시 + ST(MaterialPropertyBlock) 적용
+  ├─ 3.3) Denoise (À-trous joint bilateral, Burst/C#) — Radiance/RadianceGI 전용, Seam Stitch 이전
   ├─ 3.4) Seam Stitch (Tier1 정점 / Tier2 모서리) — Dilation 이전
   ├─ 3.5) Dilation (Burst/C#) — 거터/배경 텍셀 확장
   ├─ 4) Texture2DArray 생성/갱신 + sharedMat 에 바인딩
@@ -73,6 +74,16 @@ ResolveTargets()                    대상 MeshFilter 수집 (occluder 차집합
 | `dilateIterations` | `int` (≥0) | `4` | Dilation 패스 수(=확장 링 수). `gutterTexels` 근처 권장 |
 | `dilateBurst` | `bool` | `true` | Burst Job 병렬판 사용. 끄면 순수 C# 직렬판(비교용) |
 | `atlasFilter` | `FilterMode` | `Point` | 아틀라스 샘플링 필터. Point=블록 / Bilinear=보간 |
+
+### Denoise (À-trous Joint Bilateral — Radiance/RadianceGI 전용, Seam Stitch 직전)
+| 필드 | 타입 | 기본값 | 설명 |
+|---|---|---|---|
+| `denoise` | `bool` | `true` | 몬테카를로 노이즈(그레인) 평활. 텍셀별 월드 노멀·위치·색 가이드의 에지 보존 필터(`LightmapDenoise`/`LightmapDenoiseBurstJob`) |
+| `denoiseIterations` | `int` (1~5) | `3` | À-trous 반복 수(step=1,2,4…). 3이면 유효 반경 ≈17텍셀 |
+| `denoiseNormalPower` | `float` (1~128) | `32` | 노멀 가중 지수 `pow(max(0,n·n'),p)`. 클수록 각진 면 분리 강함(하드 엣지 보존) |
+| `denoisePositionSigmaTexels` | `float` (0.5~8) | `2` | 월드 위치 가우시안 σ(텍셀 단위, `texelsPerWorldUnit` 로 월드 변환). 월드에서 먼 차트 간 bleed 차단 |
+| `denoiseColorSigma` | `float` (0.01~1) | `0.25` | 색 range σ(Linear RGB L2 거리). 작을수록 그림자 경계 등 라이팅 엣지 보존 강함. 휘도가 아닌 색 거리 — 단일 채널만 다른 엣지도 보존 |
+| `denoiseBurst` | `bool` | `true` | Burst Job 병렬판 사용. 끄면 순수 C# 직렬판(비교용) |
 
 ### Seam Stitch (시임 스티칭, Dilation 직전)
 | 필드 | 타입 | 기본값 | 설명 |
@@ -173,7 +184,7 @@ ResolveTargets()                    대상 MeshFilter 수집 (occluder 차집합
 
 | 메서드 | 반환 | 설명 |
 |---|---|---|
-| `BlitRegion(slice, valid, res, ox, oy, sidePx, lm, tint, giRadiance)` | `void` | LumelMap 을 아틀라스 페이지의 (ox,oy) 영역에 blit. valid 텍셀만, 모드별 색 산출 |
+| `BlitRegion(slice, valid, res, ox, oy, sidePx, lm, tint, giRadiance, guideNormal, guidePos)` | `void` | LumelMap 을 아틀라스 페이지의 (ox,oy) 영역에 blit. valid 텍셀만, 모드별 색 산출. guideNormal/guidePos 가 non-null 이면 디노이즈 가이드(월드 노멀·위치)도 동일 매핑으로 기록 |
 | `BakeGiLumelsBurst(lm)` | `Vector3[]` | valid lumel 을 NativeArray 로 모아 `BurstRadianceBaker.Bake` 병렬 처리 → li 인덱스 산란 |
 | `BakeGiLumelsGpu(lm)` | `Vector3[]` | Burst 미러. `DispatchRadianceGpu` 한 디스패치 + readback → li 인덱스 산란 |
 | `BuildGiScene(filters)` | `void` | 유니크 메시+알베도+인스턴스 → `InstancedRadianceScene` + (선택)Burst/GPU 백엔드 구성 |
@@ -226,5 +237,5 @@ ResolveTargets()                    대상 MeshFilter 수집 (occluder 차집합
 - **텍셀 시드**: 모든 백엔드(CPU/Burst/GPU)가 `seed + li * 2654435761u` 동일 → 교차검증 성립
 - **평가 원점**: `worldPos + worldNormal * surfaceBias` 로 통일
 - **색공간**: 아틀라스는 Linear 텍스처. Radiance/GI 는 이미 선형이라 그대로 저장, 디버그 표시색(sRGB)만 `.linear` 변환 → 프레임버퍼가 linear→sRGB 인코딩 1회 수행
-- **처리 순서**: Seam Stitch(경계값 일치) → Dilation(경계값 확장) 순서 필수
+- **처리 순서**: Denoise(노이즈 평활) → Seam Stitch(경계값 일치) → Dilation(경계값 확장) 순서 필수 — 경계값을 안정화한 뒤 스티칭하고, 그 값을 거터로 확장한다
 - **리소스 해제**: `BakeAndApply` 종료 시 occluder/GI 씬/GPU/Burst 리소스를 모두 Dispose
