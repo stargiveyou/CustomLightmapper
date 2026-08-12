@@ -33,18 +33,30 @@ namespace HuskyLibs.CustomLightmapper.Bake
         [ReadOnly] public NativeArray<int> blasNodeStart, blasNodeCount, blasTriIdxStart, blasTriStart;
 
 
-        // G3: 메시별 알베도(모드 A). 미생성이면 ClosestHit 가 Fallback(0.5) 반환.
+        // G3: 메시별 알베도(모드 A). **항상 할당된다** — 알베도를 안 넘긴 Create 도 fallback(0.5)로 채운다.
+        //   잡 안전 시스템은 중첩 구조체 안의 NativeArray 까지 '할당됨'을 요구한다
+        //   (미할당이면 스케줄 시 "DirectJob.scene.meshAlbedo has not been assigned or constructed").
+        //   값은 ClosestHit 의 기존 fallback(0.5)과 동일하므로 거동 변화 없음.
         [ReadOnly] public NativeArray<Vector3> meshAlbedo;
 
+        // α: 알파 컷아웃 any-hit 데이터. 항상 할당된다(꺼진 씬은 1원소 더미) — 잡 안전 시스템 요구.
+        //    alpha.enabled=false 면 BurstTwoLevelBVH 가 기존 early-exit 순회를 그대로 탄다.
+        public BurstAlpha alpha;
+
         public static BurstScene Create(TwoLevelBVH bvh, Vector3[] albedo, Allocator allocator)
+            => Create(bvh, albedo, null, allocator);
+
+        public static BurstScene Create(TwoLevelBVH bvh, Vector3[] albedo, AlphaSceneData alphaData, Allocator allocator)
         {
+            // Create(bvh, allocator) 가 이미 meshAlbedo 를 fallback(0.5)로 채워 뒀다 → 재할당 없이 덮어쓰기.
             var s = Create(bvh, allocator);
             int meshCount = bvh.BlasCount;
-            s.meshAlbedo = new NativeArray<Vector3>(meshCount, allocator);
             for (int i = 0; i < meshCount; i++)
             {
-                s.meshAlbedo[i] = (albedo != null && i < albedo.Length) ? albedo[i] : new Vector3(0.5f, 0.5f, 0.5f);
+                if (albedo != null && i < albedo.Length) s.meshAlbedo[i] = albedo[i];
             }
+            s.alpha.Dispose();                                  // Create(bvh,...) 가 만든 더미 해제
+            s.alpha = BurstAlpha.Create(alphaData, allocator);
             return s;
 
         }
@@ -103,6 +115,13 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 for (int i = 0; i < br.Length; i++) s.blasTris[tro + i] = br[i];
                 no += bn.Length; to += bt.Length; tro += br.Length;
             }
+
+            // 잡 스케줄 시 '미할당 컨테이너' 예외를 막기 위해 알베도·알파를 항상 할당한다(길이 최소 1).
+            //   meshAlbedo 는 ClosestHit 의 기존 fallback 과 같은 0.5 로 채운다 → 값 거동 불변.
+            s.meshAlbedo = new NativeArray<Vector3>(Mathf.Max(1, meshCount), allocator);
+            for (int i = 0; i < s.meshAlbedo.Length; i++) s.meshAlbedo[i] = new Vector3(0.5f, 0.5f, 0.5f);
+
+            s.alpha = BurstAlpha.CreateDisabled(allocator);     // 알파 미사용 기본값(잡 스케줄용 더미)
             return s;
         }
 
@@ -123,6 +142,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             if (blasTriIdxStart.IsCreated) blasTriIdxStart.Dispose();
             if (blasTriStart.IsCreated) blasTriStart.Dispose();
             if (meshAlbedo.IsCreated) meshAlbedo.Dispose();
+            alpha.Dispose();
         }
     }
 }

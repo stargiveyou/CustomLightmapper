@@ -64,19 +64,11 @@ namespace HuskyLibs.CustomLightmapper.Bake
             var naNrm = new NativeArray<Vector3>(nrm, Allocator.TempJob);
             var naVal = new NativeArray<bool>(n, Allocator.TempJob);
             for (int i = 0; i < n; i++) naVal[i] = true;
-            var naRad = new NativeArray<Vector3>(n, Allocator.TempJob);
 
-            var job = new BurstDirect.DirectJob
-            {
-                scene = scene,
-                Points = naPts,
-                Normals = naNrm,
-                Valid = naVal,
-                Sun = sun,
-                Radiance = naRad
-            };
+            // 잡을 직접 조립하지 않고 정식 진입점을 쓴다 — DirectJob 에 필드가 추가될 때마다
+            // 여기서 미할당 컨테이너 예외가 나던 문제를 구조적으로 없앤다(Compute 가 전부 채운다).
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            job.Schedule(n, 32).Complete();
+            var naRad = BurstDirect.Compute(scene, naPts, naNrm, naVal, sun, Allocator.TempJob, 32);
             sw.Stop();
 
             Stats(refR, naRad, n, 1e-3f, out float maxE, out float meanE, out int mism);

@@ -278,6 +278,83 @@ namespace HuskyLibs.CustomLightmapper.Bake
             }
             return false;
         }
+        // ── α 트랙: 알파 컷아웃 any-hit ────────────────────────────────────────
+        // 기존 Intersect/Occluded 는 손대지 않고 '복제 + 알파 판정'한 변형을 둔다.
+        // 호출측(TwoLevelBVH)이 alpha.Enabled && MeshCutout(mesh) 일 때만 이쪽으로 분기하므로,
+        // 컷아웃이 없는 씬은 기존 코드가 글자 그대로 실행된다(α 결정 ⑥ — 회귀 0).
+        //
+        // matBase 는 인스턴스의 머티리얼 슬롯 시작 오프셋. BLAS 는 인스턴스 간 공유되므로
+        // 머티리얼은 삼각형이 아니라 '인스턴스 + 서브메시'로 해석해야 한다(α 결정 ③).
+
+        /// <summary>알파 컷아웃을 존중하는 최근접 교차. 투명 히트는 best 를 갱신하지 않는다.</summary>
+        public Hit IntersectAlpha(Vector3 o, Vector3 d, float tmin, float tmax,
+                                  AlphaSceneData alpha, int mesh, int matBase)
+        {
+            Hit best = new Hit { Valid = false, T = tmax };
+            if (_nodeCount == 0) return best;
+            Vector3 invD = new Vector3(1f / d.x, 1f / d.y, 1f / d.z);
+
+            Span<int> stack = stackalloc int[64];
+            int sp = 0; stack[sp++] = 0;
+            while (sp > 0)
+            {
+                Node node = _nodes[stack[--sp]];
+                if (!RayAABB(o, invD, node.Min, node.Max, tmin, best.T))
+                    continue;
+                if (node.Count > 0)
+                {
+                    int end = node.LeftFirst + node.Count;
+                    for (int s = node.LeftFirst; s < end; s++)
+                    {
+                        int orig = _triIdx[s];
+                        if (RayGeometry.RayTriUV(o, d, _tris[orig], tmin, best.T, out float h, out float bu, out float bv))
+                        {
+                            // 투명이면 채택하지 않는다 → best.T 도 조이지 않아 뒤쪽 삼각형이 계속 후보로 남는다.
+                            if (!alpha.HitOpaque(matBase, mesh, orig, bu, bv)) continue;
+                            best.Valid = true;
+                            best.T = h;
+                            best.TriIndex = orig;
+                        }
+                    }
+                }
+                else
+                {
+                    stack[sp++] = node.LeftFirst;
+                    stack[sp++] = node.LeftFirst + 1;
+                }
+            }
+            return best;
+        }
+
+        /// <summary>알파 컷아웃을 존중하는 차폐 질의. 투명 히트를 만나면 순회를 계속한다.</summary>
+        public bool OccludedAlpha(Vector3 o, Vector3 d, float maxDist,
+                                  AlphaSceneData alpha, int mesh, int matBase)
+        {
+            if (_nodeCount == 0) return false;
+            Vector3 invD = new Vector3(1f / d.x, 1f / d.y, 1f / d.z);
+
+            Span<int> stack = stackalloc int[64];
+            int sp = 0; stack[sp++] = 0;
+            while (sp > 0)
+            {
+                Node node = _nodes[stack[--sp]];
+                if (!RayAABB(o, invD, node.Min, node.Max, 0f, maxDist)) continue;
+                if (node.Count > 0)
+                {
+                    int end = node.LeftFirst + node.Count;
+                    for (int s = node.LeftFirst; s < end; s++)
+                    {
+                        int orig = _triIdx[s];
+                        if (RayGeometry.RayTriUV(o, d, _tris[orig], 0f, maxDist, out _, out float bu, out float bv)
+                            && alpha.HitOpaque(matBase, mesh, orig, bu, bv))
+                            return true;    // 불투명 히트만 차폐로 인정. maxDist 는 원래 고정이라 가지치기 손실 없음.
+                    }
+                }
+                else { stack[sp++] = node.LeftFirst; stack[sp++] = node.LeftFirst + 1; }
+            }
+            return false;
+        }
+
         public void Dispose()
         {
             if (_nodes.IsCreated) _nodes.Dispose();

@@ -100,6 +100,31 @@ StructuredBuffer<int>           _BlasTriStart;
 
 int _TlasCount;
 
+// ---- α: 알파 컷아웃 any-hit (AlphaTypes.cs / BurstAlpha.cs 미러) ----
+// GpuScene.BindAlpha 로만 배선된다. _AlphaEnabled=0 이면 아래 순회가 알파 분기를 타지 않아
+// 기존(G4/G5/G6) 결과와 비트동일하다.
+struct GpuTriUV                // 24B : TriUV(C#) 와 1:1
+{
+    float2 uv0;
+    float2 uv1;
+    float2 uv2;
+};
+
+StructuredBuffer<GpuTriUV> _ATriUV;          // _AMeshTriStart[mesh] + 메시로컬삼각형
+StructuredBuffer<uint>     _ATriSubmesh;     // 동일 인덱싱 (byte → uint 승격)
+StructuredBuffer<uint>     _AMeshHasCutout;  // 메시별 게이트
+StructuredBuffer<int>      _AMeshTriStart;
+StructuredBuffer<int>      _AInstMatBase;    // 인스턴스별 머티리얼 슬롯 시작
+StructuredBuffer<int>      _AMatSlot;        // matSlot[base+submesh] = matId (-1 = 불투명)
+StructuredBuffer<uint>     _AMaskBits;       // 1bit/texel, LSB-first
+StructuredBuffer<int>      _AMaskWord;
+StructuredBuffer<int>      _AMaskW;          // 0 = 마스크 없음(불투명)
+StructuredBuffer<int>      _AMaskH;
+StructuredBuffer<float4>   _AMaskST;         // (tiling.xy, offset.xy)
+
+int _AlphaEnabled;
+int _AMatSlotCount;
+
 // ---- 텍셀 입력 ----
 StructuredBuffer<float3> _Points;
 StructuredBuffer<float3> _Normals;
@@ -125,6 +150,12 @@ float _AoMaxDist;
 float3 _SunDir;                                   // 진행 방향(정규화 안돼도 셰이더에서 normalize)
 float3 _SunColor;
 float  _SunIntensity;
+
+// 태양 원반 샘플링(RadianceCore.EvaluateDirectSampled 미러).
+//   _DirectSamples≤1 또는 _SunHalfAngle≤0 이면 기존 단발 경로 → 결과 비트동일.
+//   1차 직사광(CSDirect/CSRadiance)에만 적용. 바운스 NEE(EvalIndirect)는 1발 유지.
+int   _DirectSamples;
+float _SunHalfAngle;                              // 각지름/2 (라디안)
 
 // ---- 하늘(BurstSky) ----
 int    _SkyType;                                  // 0=uniform, 1=gradient
@@ -193,6 +224,107 @@ bool RayTri(float3 o, float3 d, GpuTri t, float tmin, float tmax, out float hitT
     return true;
 }
 
+// RayTri + barycentric — RayGeometry.RayTriUV(C#) 미러. 연산 순서가 RayTri 와 같아 hitT 는 비트동일.
+//   규약: bu↔v1, bv↔v2 (e1=v1-v0, e2=v2-v0) → w0 = 1-bu-bv ↔ v0.
+bool RayTriUV(float3 o, float3 d, GpuTri t, float tmin, float tmax, out float hitT, out float bu, out float bv)
+{
+    hitT = 0.0; bu = 0.0; bv = 0.0;
+    float3 e1 = t.v1 - t.v0;
+    float3 e2 = t.v2 - t.v0;
+
+    float3 p = cross(d, e2);
+    float det = dot(e1, p);
+    if (abs(det) < 1e-12) return false;
+
+    float inv = 1.0 / det;
+    float3 tv = o - t.v0;
+    float u = dot(tv, p) * inv;
+    if (u < 0.0 || u > 1.0) return false;
+
+    float3 q = cross(tv, e1);
+    float v = dot(d, q) * inv;
+    if (v < 0.0 || u + v > 1.0) return false;
+
+    float tt = dot(e2, q) * inv;
+    if (tt <= tmin || tt >= tmax) return false;
+
+    hitT = tt;
+    bu = u;
+    bv = v;
+    return true;
+}
+
+// ── α 판정 (AlphaMath / BurstAlpha 미러) ────────────────────────────────────
+// ⚠ precise: uu = u*st.x + st.z 가 mad 로 융합되면 CPU 와 마지막 비트가 갈려 텍셀 경계에서
+//   1텍셀 차이가 난다. precise 로 재결합·융합을 금지해 CPU/Burst 와 같은 값을 강제한다.
+int AlphaWrapFloor(float t, int n)
+{
+    precise float f = floor(t * n);
+    if (!(f > -2.1e9 && f < 2.1e9)) return 0;   // NaN/Inf/오버플로 → 0 (C# WrapFloor 와 동일)
+    int i = (int)f;
+    if (i >= 0 && i < n) return i;              // 빠른 경로: UV∈[0,1) 인 대다수 (X3556 정수 나머지 회피)
+    i = i % n;
+    if (i < 0) i += n;
+    return i;
+}
+
+int AlphaTexelBit(float u, float v, int w, int h, float4 st)
+{
+    precise float uu = u * st.x; uu = uu + st.z;   // 융합 금지(두 문장으로 분리)
+    precise float vv = v * st.y; vv = vv + st.w;
+    int x = AlphaWrapFloor(uu, w);
+    int y = AlphaWrapFloor(vv, h);
+    return y * w + x;
+}
+
+bool AlphaOpaque(int matId, float u, float v)
+{
+    bool result = true;
+    if (matId >= 0)
+    {
+        int w = _AMaskW[matId];
+        if (w != 0)
+        {
+            int bit = AlphaTexelBit(u, v, w, _AMaskH[matId], _AMaskST[matId]);
+            uint word = _AMaskBits[_AMaskWord[matId] + (bit >> 5)];
+            result = (word & (1u << (bit & 31))) != 0u;
+        }
+    }
+    return result;                                  // 단일 반환(fxc X4000 false-positive 회피)
+}
+
+int AlphaMatId(int matBase, int mesh, int localTri)
+{
+    int slot = matBase + (int)_ATriSubmesh[_AMeshTriStart[mesh] + localTri];
+    return (slot >= 0 && slot < _AMatSlotCount) ? _AMatSlot[slot] : -1;
+}
+
+// 히트한 삼각형이 불투명한가(= 차폐로 인정할 것인가).
+bool AlphaHitOpaque(int matBase, int mesh, int localTri, float bu, float bv)
+{
+    bool result = true;
+    int matId = AlphaMatId(matBase, mesh, localTri);
+    if (matId >= 0)
+    {
+        GpuTriUV t = _ATriUV[_AMeshTriStart[mesh] + localTri];
+        precise float w0 = 1.0 - bu - bv;
+        precise float uvx = t.uv0.x * w0 + t.uv1.x * bu + t.uv2.x * bv;
+        precise float uvy = t.uv0.y * w0 + t.uv1.y * bu + t.uv2.y * bv;
+        result = AlphaOpaque(matId, uvx, uvy);
+    }
+    return result;
+}
+
+// 이 메시가 알파 판정 대상인가(BLAS 단위 게이트).
+bool AlphaMeshCutout(int mesh)
+{
+    // HLSL 의 && 는 단축평가가 보장되지 않는다 → _AlphaEnabled=0 일 때 SRV 를 읽지 않도록 분기로 쓴다
+    // (BindAlpha 를 호출하지 않은 디스패치에서 미바인딩 SRV 접근을 확실히 피한다).
+    bool r = false;
+    if (_AlphaEnabled != 0) r = (_AMeshHasCutout[mesh] != 0u);
+    return r;
+}
+
 // MultiplyPoint3x4 / MultiplyVector (w2l) — G4 와 동일.
 float3 MulPoint(GpuInstance inst, float3 o)
 {
@@ -214,7 +346,10 @@ float3 MulNormal(GpuInstNormal nm, float3 localN)
                   dot(nm.n2wRow2.xyz, localN));
 }
 
-bool IntersectBlas(int mesh, float3 o, float3 d, float tmin, float t, out float hT, out int hTri)
+// α: alphaOn/matBase 를 매개변수로 받는다. CPU/Burst 는 순회 함수를 복제했지만 GPU 는
+//   복제 시 int stack[BVH_STACK] 가 하나 더 live 가 되어 X4714(레지스터 압박)가 재발한다.
+//   → 한 함수 안에서 분기. alphaOn=false 면 RayTriUV 가 RayTri 와 동일 연산이므로 결과 비트동일.
+bool IntersectBlas(int mesh, int matBase, bool alphaOn, float3 o, float3 d, float tmin, float t, out float hT, out int hTri)
 {
     hT = t; hTri = 0;
     if (_BlasNodeCount[mesh] == 0) return false;
@@ -238,12 +373,16 @@ bool IntersectBlas(int mesh, float3 o, float3 d, float tmin, float t, out float 
             for (int slot = node.leftFirst; slot < end; slot++)
             {
                 int orig = _BlasTriIdx[triIdxBase + slot];
-                float h;
-                if (RayTri(o, d, _BlasTris[triBase + orig], tmin, hT, h))
+                float h, bu, bv;
+                if (RayTriUV(o, d, _BlasTris[triBase + orig], tmin, hT, h, bu, bv))
                 {
-                    valid = true;
-                    hT = h;
-                    hTri = orig;
+                    // 투명이면 채택하지 않는다 → hT 도 조이지 않아 뒤쪽 삼각형이 후보로 남는다.
+                    if (!alphaOn || AlphaHitOpaque(matBase, mesh, orig, bu, bv))
+                    {
+                        valid = true;
+                        hT = h;
+                        hTri = orig;
+                    }
                 }
             }
         }
@@ -257,7 +396,7 @@ bool IntersectBlas(int mesh, float3 o, float3 d, float tmin, float t, out float 
     return valid;
 }
 
-bool OccludedBlas(int mesh, float3 o, float3 d, float maxDist)
+bool OccludedBlas(int mesh, int matBase, bool alphaOn, float3 o, float3 d, float maxDist)
 {
     if (_BlasNodeCount[mesh] == 0) return false;
     int nodeBase   = _BlasNodeStart[mesh];
@@ -277,8 +416,10 @@ bool OccludedBlas(int mesh, float3 o, float3 d, float maxDist)
             for (int s = node.leftFirst; s < end; s++)
             {
                 int orig = _BlasTriIdx[triIdxBase + s];
-                float h;
-                if (RayTri(o, d, _BlasTris[triBase + orig], 0.0, maxDist, h)) return true;
+                float h, bu, bv;
+                // 불투명 히트만 차폐로 인정. 투명이면 루프를 계속한다(any-hit).
+                if (RayTriUV(o, d, _BlasTris[triBase + orig], 0.0, maxDist, h, bu, bv)
+                    && (!alphaOn || AlphaHitOpaque(matBase, mesh, orig, bu, bv))) return true;
             }
         }
         else { stack[sp++] = node.leftFirst; stack[sp++] = node.leftFirst + 1; }
@@ -313,8 +454,11 @@ bool TlasClosest(float3 o, float3 d, float tmin, float tmax,
                 float3 lo = MulPoint(inst, o);
                 float3 ld = MulVector(inst, d);
 
+                bool alphaOn = AlphaMeshCutout(mesh);
+                int matBase = alphaOn ? _AInstMatBase[instIdx] : 0;
+
                 float hT; int hTri;
-                if (IntersectBlas(mesh, lo, ld, tmin, bestT, hT, hTri) && hT < bestT)
+                if (IntersectBlas(mesh, matBase, alphaOn, lo, ld, tmin, bestT, hT, hTri) && hT < bestT)
                 {
                     valid    = true;
                     bestT    = hT;
@@ -356,7 +500,10 @@ bool TlasOccluded(float3 o, float3 d, float maxDist)
                 int mesh = inst.meshIndex;
                 float3 lo = MulPoint(inst, o);
                 float3 ld = MulVector(inst, d);
-                if (OccludedBlas(mesh, lo, ld, maxDist)) return true;
+                // BLAS 가 '불투명 히트'만 true 로 돌려주므로 TLAS 층 조기 반환은 그대로 유효.
+                bool alphaOn = AlphaMeshCutout(mesh);
+                int matBase = alphaOn ? _AInstMatBase[instIdx] : 0;
+                if (OccludedBlas(mesh, matBase, alphaOn, lo, ld, maxDist)) return true;
             }
         }
         else
@@ -445,6 +592,68 @@ float3 DirectNEE(float3 hp, float3 hn)
     return _SunColor * _SunIntensity * ndl;
 }
 
+// ── 태양 원반 샘플링 (RadianceCore.SunBasis/SunConeRotation/SunConeDirection 미러) ──
+// RNG 없음: 인덱스만으로 정해지는 저불일치 수열(u1 층화 + 황금비 회전)이라
+// CPU/Burst 와 같은 방향셋을 쓴다. 텍셀별 위상은 시드로만 돌린다.
+void SunBasis(float3 L, out float3 t, out float3 b)
+{
+    float3 up = (abs(L.x) < 0.9) ? float3(1, 0, 0) : float3(0, 1, 0);
+    t = normalize(cross(L, up));
+    b = cross(L, t);
+}
+
+float SunConeRotation(uint seed)
+{
+    return (seed == 0u) ? 0.0 : float((seed * 2654435761u) >> 8 & 0xFFFFu) / 65536.0;
+}
+
+float3 SunConeDirection(float3 L, float3 t, float3 b, float cosHalf, int i, int n, float rot)
+{
+    float u1 = (float(i) + 0.5) / float(n);
+    float u2 = float(i) * 0.6180339887498949 + rot;
+    u2 -= floor(u2);
+
+    float cosT = 1.0 - u1 * (1.0 - cosHalf);        // 입체각 균등
+    float sinT = sqrt(max(0.0, 1.0 - cosT * cosT));
+    float phi  = 2.0 * PI * u2;
+
+    return normalize(t * (sinT * cos(phi)) + b * (sinT * sin(phi)) + L * cosT);
+}
+
+// 1차 직사광 — 태양 원반을 _DirectSamples 발로 샘플링(가시도 0~1 연속).
+//
+// ⚠ 구조 주의(GPU 한정): 하드/소프트를 **하나의 루프**로 합쳤다. 분기마다 DirectNEE 를 따로
+//   호출하면 TlasOccluded 가 두 번 인라인되어 순회 스택이 2벌 더 live → **X4714 재발**한다
+//   (v14.5 에서 해소한 레지스터 압박). 또 이른 return 을 없애 fxc X4000 false-positive 도 피한다.
+//   CPU/Burst 는 인라인 압박이 없어 EvaluateDirect 로 위임하는 구조를 유지한다.
+//
+// soft=false 일 때 N=1·d=L(정규화 재적용 없음)·o=p+n*1e-3 → DirectNEE 와 **비트동일**.
+float3 DirectNEESampled(float3 p, float3 n, uint seed)
+{
+    float3 L = -normalize(_SunDir);
+    bool soft = (_DirectSamples > 1 && _SunHalfAngle > 0.0);
+    int  N    = soft ? _DirectSamples : 1;
+
+    float3 t = float3(0, 0, 0), b = float3(0, 0, 0);
+    float cosHalf = 1.0, rot = 0.0;
+    if (soft)
+    {
+        SunBasis(L, t, b);
+        cosHalf = cos(_SunHalfAngle);
+        rot = SunConeRotation(seed);
+    }
+
+    float3 o = p + n * 1e-3;
+    float sum = 0.0;
+    [loop] for (int i = 0; i < N; i++)
+    {
+        float3 d = soft ? SunConeDirection(L, t, b, cosHalf, i, N, rot) : L;
+        float ndl = dot(d, n);
+        if (ndl > 0.0 && !TlasOccluded(o, d, 1e30)) sum += ndl;
+    }
+    return _SunColor * _SunIntensity * (sum / float(N));
+}
+
 // ============================================================================
 // EvalIndirect — BurstIndirect.IndirectJob 경로추적 루프 미러(π 상쇄·NEE·RR).
 //   CSIndirect / CSRadiance 공용(단일 진실원). RNG 상태 s 는 inout(호출측이 _Seeds[i] 로 초기화).
@@ -526,13 +735,8 @@ void CSDirect(uint3 id : SV_DispatchThreadID)
     if ((int)i >= _Count) return;
     if (_Valid[i] == 0) { _DirectOut[i] = float3(0, 0, 0); return; }
 
-    float3 n = _Normals[i];
-    float3 p = _Points[i];
-    float3 L = -normalize(_SunDir);
-    float ndl = dot(L, n);
-    if (ndl <= 0.0) { _DirectOut[i] = float3(0, 0, 0); return; }
-    if (TlasOccluded(p + n * 1e-3, L, 1e30)) { _DirectOut[i] = float3(0, 0, 0); return; }
-    _DirectOut[i] = _SunColor * _SunIntensity * ndl;
+    // _DirectSamples≤1 || _SunHalfAngle≤0 이면 내부에서 단발 경로(= 기존 결과 비트동일).
+    _DirectOut[i] = DirectNEESampled(_Points[i], _Normals[i], _Seeds[i]);
 }
 
 // ============================================================================
@@ -566,7 +770,8 @@ void CSRadiance(uint3 id : SV_DispatchThreadID)
     float3 p = _Points[i];
     float3 n = _Normals[i];
 
-    float3 direct = DirectNEE(p, n);                    // = CSDirect 본문(origin p, 그림자 p+n*1e-3)
+    // 1차 직사광만 원반 샘플링(_DirectSamples≤1 이면 DirectNEE 그대로 = 기존 비트동일).
+    float3 direct = DirectNEESampled(p, n, _Seeds[i]);
     uint s = RngInit(_Seeds[i]);
     float3 indirect = EvalIndirect(p, n, s);
 

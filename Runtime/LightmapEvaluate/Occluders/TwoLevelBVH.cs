@@ -51,6 +51,18 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
         const int TlasLeafMax = 2;
 
+        // ── α 트랙: 알파 컷아웃 any-hit ────────────────────────────────────────
+        // null 이거나 Enabled=false 면 아래 UseAlpha 가 항상 false → 순회가 기존 코드를 그대로 탄다.
+        // 인스턴스별 머티리얼 슬롯이 필요하므로 알파 판정은 TLAS 층에서 matBase 를 넘겨야 성립한다.
+        AlphaSceneData _alpha;
+
+        /// <summary>알파 컷아웃 씬을 붙인다. null/Disabled 를 넣으면 기존 거동으로 되돌아간다.</summary>
+        public void SetAlpha(AlphaSceneData alpha) => _alpha = (alpha != null && alpha.Enabled) ? alpha : null;
+        public AlphaSceneData Alpha => _alpha;
+
+        // 메시 단위 게이트: 컷아웃 서브메시가 없는 BLAS 는 early-exit 경로를 유지한다(성능).
+        bool UseAlpha(int mesh) => _alpha != null && _alpha.MeshCutout(mesh);
+
         // G0b: BurstScene POD 빌더용 읽기전용 접근(로직 무변경).
         public NativeArray<BVH.Node>.ReadOnly TlasRO => _tlas.AsReadOnly();
         public NativeArray<int>.ReadOnly InstIdxRO => _instIdx.AsReadOnly();
@@ -248,7 +260,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
                         Vector3 lo = rec.WorldToLocal.MultiplyPoint3x4(o);
                         Vector3 ld = rec.WorldToLocal.MultiplyVector(d);
 
-                        Hit hit = _blas[rec.Blas].Intersect(lo, ld, tmin, best.T);
+                        Hit hit = UseAlpha(rec.Blas)
+                            ? _blas[rec.Blas].IntersectAlpha(lo, ld, tmin, best.T, _alpha, rec.Blas, _alpha.InstMatBase[instIdx])
+                            : _blas[rec.Blas].Intersect(lo, ld, tmin, best.T);
                         if (hit.Valid && hit.T < best.T)
                         {
                             best.Valid = true;
@@ -289,7 +303,11 @@ namespace HuskyLibs.CustomLightmapper.Bake
                         InstanceRec rec = _inst[instIdx];
                         Vector3 lo = rec.WorldToLocal.MultiplyPoint3x4(o);
                         Vector3 ld = rec.WorldToLocal.MultiplyVector(d);
-                        if (_blas[rec.Blas].Occluded(lo, ld, maxDist))
+                        // BLAS 가 '불투명 히트'만 true 로 돌려주므로 TLAS 층 조기 반환은 그대로 유효하다.
+                        bool blocked = UseAlpha(rec.Blas)
+                            ? _blas[rec.Blas].OccludedAlpha(lo, ld, maxDist, _alpha, rec.Blas, _alpha.InstMatBase[instIdx])
+                            : _blas[rec.Blas].Occluded(lo, ld, maxDist);
+                        if (blocked)
                             return true;
                     }
                 }
@@ -330,7 +348,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
                         Vector3 lo = rec.WorldToLocal.MultiplyPoint3x4(o);
                         Vector3 ld = rec.WorldToLocal.MultiplyVector(d);
 
-                        Hit hit = _blas[rec.Blas].Intersect(lo, ld, tmin, best.T);
+                        Hit hit = UseAlpha(rec.Blas)
+                            ? _blas[rec.Blas].IntersectAlpha(lo, ld, tmin, best.T, _alpha, rec.Blas, _alpha.InstMatBase[instIdx])
+                            : _blas[rec.Blas].Intersect(lo, ld, tmin, best.T);
                         if (hit.Valid && hit.T < best.T)
                         {
                             best.Valid = true;

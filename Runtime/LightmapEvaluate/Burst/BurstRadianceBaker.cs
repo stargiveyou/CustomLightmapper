@@ -15,7 +15,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
         NativeArray<Vector3> points, NativeArray<Vector3> normals, NativeArray<bool> valid,
         NativeArray<uint> seeds, Allocator allocator)
         {
-            var direct = BurstDirect.Compute(scene, points, normals, valid, sun, allocator);
+            // 1차 직사광만 태양 원반 샘플링(q.DirectSamples). 바운스 NEE 는 BurstIndirect 안에서 1발 유지.
+            var direct = BurstDirect.Compute(scene, points, normals, valid, sun, q.DirectSamples, seeds, allocator);
             var ind = BurstIndirect.Compute(scene, sky, sun, q, points, normals, valid, seeds, allocator);
 
             int n = points.Length;

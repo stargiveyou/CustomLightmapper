@@ -58,6 +58,14 @@ namespace HuskyLibs.CustomLightmapper.Bake
             public const int Stride = 48;
         }
 
+        // α: 삼각형 UV0 3개. TriUV(C#) 와 1:1, stride 24 (3 × float2).
+        [StructLayout(LayoutKind.Sequential)]
+        public struct GpuTriUV                // 24B
+        {
+            public Vector2 uv0, uv1, uv2;
+            public const int Stride = 24;
+        }
+
         [StructLayout(LayoutKind.Sequential)]
         public struct GpuRay                  // 32B
         {
@@ -95,6 +103,22 @@ namespace HuskyLibs.CustomLightmapper.Bake
         public readonly ComputeBuffer InstNormals;   // 48B: instNormalMatrix 3행 (월드 노멀 변환)
         public readonly ComputeBuffer MeshAlbedo;    // 12B: 메시별 float3 알베도 (모드 A)
         public readonly int TlasCount;
+
+        // α(추가): 알파 컷아웃 any-hit. 순회/조명 버퍼와 별개 — BindAlpha 로만 배선한다.
+        //   G4 순회 커널(BvhTraverse.compute)은 이 버퍼들을 선언하지 않으므로 기존 검증이 그대로 산다.
+        public readonly ComputeBuffer ATriUV;
+        public readonly ComputeBuffer ATriSubmesh;
+        public readonly ComputeBuffer AMeshHasCutout;
+        public readonly ComputeBuffer AMeshTriStart;
+        public readonly ComputeBuffer AInstMatBase;
+        public readonly ComputeBuffer AMatSlot;
+        public readonly ComputeBuffer AMaskBits;
+        public readonly ComputeBuffer AMaskWord;
+        public readonly ComputeBuffer AMaskW;
+        public readonly ComputeBuffer AMaskH;
+        public readonly ComputeBuffer AMaskST;
+        public readonly int AlphaEnabled;            // 0/1 uniform
+        public readonly int AMatSlotCount;
 
         public GpuScene(in BurstScene s)
         {
@@ -164,6 +188,39 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 MeshAlbedo.SetData(arr);
             }
 
+            // α: 알파 컷아웃 데이터. 꺼진 씬은 BurstAlpha 가 이미 1원소 더미를 들고 있어 그대로 올린다.
+            {
+                AlphaEnabled = s.alpha.enabled ? 1 : 0;
+                AMatSlotCount = s.alpha.matSlot.IsCreated ? s.alpha.matSlot.Length : 0;
+
+                int nUv = s.alpha.triUV.IsCreated ? s.alpha.triUV.Length : 0;
+                var uvArr = new GpuTriUV[Mathf.Max(1, nUv)];
+                for (int i = 0; i < nUv; i++)
+                {
+                    TriUV t = s.alpha.triUV[i];
+                    uvArr[i] = new GpuTriUV { uv0 = t.UV0, uv1 = t.UV1, uv2 = t.UV2 };
+                }
+                ATriUV = new ComputeBuffer(Mathf.Max(1, nUv), GpuTriUV.Stride, ComputeBufferType.Structured);
+                ATriUV.SetData(uvArr);
+
+                ATriSubmesh    = MakeUIntFromBytes(s.alpha.triSubmesh);
+                AMeshHasCutout = MakeUIntFromBytes(s.alpha.meshHasCutout);
+                AMeshTriStart  = MakeIntBuffer(s.alpha.meshTriStart);
+                AInstMatBase   = MakeIntBuffer(s.alpha.instMatBase);
+                AMatSlot       = MakeIntBuffer(s.alpha.matSlot);
+                AMaskWord      = MakeIntBuffer(s.alpha.maskWord);
+                AMaskW         = MakeIntBuffer(s.alpha.maskW);
+                AMaskH         = MakeIntBuffer(s.alpha.maskH);
+
+                int nBits = s.alpha.maskBits.IsCreated ? s.alpha.maskBits.Length : 0;
+                AMaskBits = new ComputeBuffer(Mathf.Max(1, nBits), sizeof(uint), ComputeBufferType.Structured);
+                if (nBits > 0) AMaskBits.SetData(s.alpha.maskBits);
+
+                int nSt = s.alpha.maskST.IsCreated ? s.alpha.maskST.Length : 0;
+                AMaskST = new ComputeBuffer(Mathf.Max(1, nSt), 16, ComputeBufferType.Structured);
+                if (nSt > 0) AMaskST.SetData(s.alpha.maskST);
+            }
+
             // int 배열들 — NativeArray 직접 SetData(GC 없음)
             InstIdx        = MakeIntBuffer(s.instIdx);
             BlasTriIdx     = MakeIntBuffer(s.blasTriIdx);
@@ -189,9 +246,20 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
         static ComputeBuffer MakeIntBuffer(Unity.Collections.NativeArray<int> src)
         {
-            int n = Mathf.Max(1, src.Length);
+            int n = Mathf.Max(1, src.IsCreated ? src.Length : 0);
             var cb = new ComputeBuffer(n, sizeof(int), ComputeBufferType.Structured);
-            if (src.Length > 0) cb.SetData(src);
+            if (src.IsCreated && src.Length > 0) cb.SetData(src);
+            return cb;
+        }
+
+        // byte 배열 → StructuredBuffer&lt;uint&gt;. HLSL 에 byte SRV 가 없어 4B 로 승격한다(크기 작음).
+        static ComputeBuffer MakeUIntFromBytes(Unity.Collections.NativeArray<byte> src)
+        {
+            int n = src.IsCreated ? src.Length : 0;
+            var arr = new uint[Mathf.Max(1, n)];
+            for (int i = 0; i < n; i++) arr[i] = src[i];
+            var cb = new ComputeBuffer(Mathf.Max(1, n), sizeof(uint), ComputeBufferType.Structured);
+            cb.SetData(arr);
             return cb;
         }
 
@@ -219,6 +287,25 @@ namespace HuskyLibs.CustomLightmapper.Bake
             cs.SetBuffer(kernel, "_MeshAlbedo", MeshAlbedo);
         }
 
+        /// <summary>α: 알파 컷아웃 SRV + uniform 배선. <see cref="Bind"/> 이후 호출.
+        /// (G4 순회 커널은 이 버퍼를 선언하지 않으므로 호출하지 않는다.)</summary>
+        public void BindAlpha(ComputeShader cs, int kernel)
+        {
+            cs.SetBuffer(kernel, "_ATriUV", ATriUV);
+            cs.SetBuffer(kernel, "_ATriSubmesh", ATriSubmesh);
+            cs.SetBuffer(kernel, "_AMeshHasCutout", AMeshHasCutout);
+            cs.SetBuffer(kernel, "_AMeshTriStart", AMeshTriStart);
+            cs.SetBuffer(kernel, "_AInstMatBase", AInstMatBase);
+            cs.SetBuffer(kernel, "_AMatSlot", AMatSlot);
+            cs.SetBuffer(kernel, "_AMaskBits", AMaskBits);
+            cs.SetBuffer(kernel, "_AMaskWord", AMaskWord);
+            cs.SetBuffer(kernel, "_AMaskW", AMaskW);
+            cs.SetBuffer(kernel, "_AMaskH", AMaskH);
+            cs.SetBuffer(kernel, "_AMaskST", AMaskST);
+            cs.SetInt("_AlphaEnabled", AlphaEnabled);
+            cs.SetInt("_AMatSlotCount", AMatSlotCount);
+        }
+
         public void Dispose()
         {
             TlasNodes?.Dispose();
@@ -233,6 +320,17 @@ namespace HuskyLibs.CustomLightmapper.Bake
             BlasTriStart?.Dispose();
             InstNormals?.Dispose();
             MeshAlbedo?.Dispose();
+            ATriUV?.Dispose();
+            ATriSubmesh?.Dispose();
+            AMeshHasCutout?.Dispose();
+            AMeshTriStart?.Dispose();
+            AInstMatBase?.Dispose();
+            AMatSlot?.Dispose();
+            AMaskBits?.Dispose();
+            AMaskWord?.Dispose();
+            AMaskW?.Dispose();
+            AMaskH?.Dispose();
+            AMaskST?.Dispose();
         }
     }
 }

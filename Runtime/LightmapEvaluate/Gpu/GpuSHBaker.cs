@@ -38,6 +38,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             {
                 gpu.Bind(cs, kernel);           // 순회 SRV + _TlasCount
                 gpu.BindLighting(cs, kernel);   // _InstNormals, _MeshAlbedo
+                gpu.BindAlpha(cs, kernel);      // α: 알파 컷아웃(꺼진 씬은 _AlphaEnabled=0 → 무영향)
 
                 cs.SetBuffer(kernel, "_Points", ptsBuf);
                 cs.SetBuffer(kernel, "_Dirs", dirBuf);

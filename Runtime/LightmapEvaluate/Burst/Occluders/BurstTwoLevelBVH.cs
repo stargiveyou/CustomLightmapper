@@ -57,6 +57,85 @@ namespace HuskyLibs.CustomLightmapper.Bake
             return valid;
         }
 
+        // ── α 트랙: 알파 컷아웃 any-hit (IntersectBlas/OccludedBlas 복제 + 알파 판정) ────
+        // 호출측이 s.alpha.MeshCutout(mesh) 일 때만 분기하므로, 컷아웃 없는 씬은 위의 원본이
+        // 그대로 실행된다(α 결정 ⑥). matBase = 인스턴스의 머티리얼 슬롯 시작(α 결정 ③).
+
+        static bool IntersectBlasAlpha(in BurstScene s, int mesh, int matBase, Vector3 o, Vector3 d,
+                                       float tmin, float t, out float hT, out int hTri)
+        {
+            hT = t; hTri = 0;
+            bool valid = false;
+            if (s.blasNodeCount[mesh] == 0)
+                return false;
+            int triIdxBase = s.blasTriIdxStart[mesh];
+            int triBase = s.blasTriStart[mesh];
+            int nodeBase = s.blasNodeStart[mesh];
+            Vector3 invD = new Vector3(1.0f / d.x, 1f / d.y, 1f / d.z);
+
+            Span<int> stack = stackalloc int[64];
+            int sp = 0; stack[sp++] = 0;
+
+            while (sp > 0)
+            {
+                BVH.Node node = s.blasNodes[nodeBase + stack[--sp]];
+                if (!BVH.RayAABB(o, invD, node.Min, node.Max, tmin, hT)) continue;
+                if (node.Count > 0)
+                {
+                    int end = node.LeftFirst + node.Count;
+                    for (int slot = node.LeftFirst; slot < end; slot++)
+                    {
+                        int orig = s.blasTriIdx[triIdxBase + slot];
+                        if (RayGeometry.RayTriUV(o, d, s.blasTris[triBase + orig], tmin, hT, out float h, out float bu, out float bv))
+                        {
+                            // 투명이면 채택 안 함 → hT 도 조이지 않아 뒤쪽 삼각형이 후보로 남는다.
+                            if (!s.alpha.HitOpaque(matBase, mesh, orig, bu, bv)) continue;
+                            valid = true;
+                            hT = h;
+                            hTri = orig;
+                        }
+                    }
+                }
+                else
+                {
+                    int leftNode = node.LeftFirst;
+                    stack[sp++] = leftNode;
+                    stack[sp++] = leftNode + 1;
+                }
+            }
+            return valid;
+        }
+
+        static bool OccludedBlasAlpha(in BurstScene s, int mesh, int matBase, Vector3 o, Vector3 d, float maxDist)
+        {
+            int nodeBase = s.blasNodeStart[mesh];
+            if (s.blasNodeCount[mesh] == 0) return false;
+            int triIdxBase = s.blasTriIdxStart[mesh];
+            int triBase = s.blasTriStart[mesh];
+            Vector3 invD = new Vector3(1f / d.x, 1f / d.y, 1f / d.z);
+
+            Span<int> stack = stackalloc int[64];
+            int sp = 0; stack[sp++] = 0;
+            while (sp > 0)
+            {
+                BVH.Node node = s.blasNodes[nodeBase + stack[--sp]];
+                if (!BVH.RayAABB(o, invD, node.Min, node.Max, 0f, maxDist)) continue;
+                if (node.Count > 0)
+                {
+                    int end = node.LeftFirst + node.Count;
+                    for (int sIdx = node.LeftFirst; sIdx < end; sIdx++)
+                    {
+                        int orig = s.blasTriIdx[triIdxBase + sIdx];
+                        if (RayGeometry.RayTriUV(o, d, s.blasTris[triBase + orig], 0f, maxDist, out _, out float bu, out float bv)
+                            && s.alpha.HitOpaque(matBase, mesh, orig, bu, bv))
+                            return true;   // 불투명 히트만 차폐로 인정
+                    }
+                }
+                else { stack[sp++] = node.LeftFirst; stack[sp++] = node.LeftFirst + 1; }
+            }
+            return false;
+        }
+
         public static TwoLevelBVH.InstancedHit IntersectInstanced(in BurstScene s, Vector3 o, Vector3 d, float tmin, float tmax)
         {
             var best = new TwoLevelBVH.InstancedHit() { Valid = false, T = tmax };
@@ -83,7 +162,15 @@ namespace HuskyLibs.CustomLightmapper.Bake
                         Vector3 lo = w2l.MultiplyPoint3x4(o);
                         Vector3 ld = w2l.MultiplyVector(d);
 
-                        if (IntersectBlas(s, mesh, lo, ld, tmin, best.T, out float hT, out int hTri) && hT < best.T)
+                        // out 변수는 분기 밖에서 선언한다(삼항 안 인라인 선언은 확정대입 규칙이 모호해짐).
+                        float hT; int hTri;
+                        bool hitBlas;
+                        if (s.alpha.MeshCutout(mesh))
+                            hitBlas = IntersectBlasAlpha(s, mesh, s.alpha.instMatBase[instIdx], lo, ld, tmin, best.T, out hT, out hTri);
+                        else
+                            hitBlas = IntersectBlas(s, mesh, lo, ld, tmin, best.T, out hT, out hTri);
+
+                        if (hitBlas && hT < best.T)
                         {
                             best.Valid = true;
                             best.T = hT;
@@ -158,7 +245,11 @@ namespace HuskyLibs.CustomLightmapper.Bake
                         Vector3 lo = w2l.MultiplyPoint3x4(o);
                         Vector3 ld = w2l.MultiplyVector(d);
 
-                        if (OccludedBlas(s, mesh, lo, ld, maxDist))
+                        // BLAS 가 '불투명 히트'만 true 로 돌려주므로 TLAS 층 조기 반환은 그대로 유효.
+                        bool blocked = s.alpha.MeshCutout(mesh)
+                            ? OccludedBlasAlpha(s, mesh, s.alpha.instMatBase[instIdx], lo, ld, maxDist)
+                            : OccludedBlas(s, mesh, lo, ld, maxDist);
+                        if (blocked)
                         {
                             return true;
                         }

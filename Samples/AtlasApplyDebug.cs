@@ -103,6 +103,31 @@ namespace HuskyLibs.CustomLightmapper.Bake
         [Tooltip("머티리얼 색을 못 읽을 때 per-mesh 기본 알베도(Linear).")]
         public Color defaultAlbedo = new Color(0.6f, 0.6f, 0.6f);
 
+        [Header("Direct Shadow — 태양 원반 샘플링(소프트 그림자)")]
+        [Tooltip("텍셀당 그림자 레이 수. 1=이진 판정(기존, 잎 경계에 점묘 노이즈). 8~32 권장.")]
+        [Min(1)] public int directSamples = 1;
+        [Tooltip("태양 각지름(도). 0=하드 그림자. 실제 태양 0.53°, 부드럽게 하려면 1~3°.")]
+        [Range(0f, 10f)] public float sunAngularDiameterDeg = 0f;
+
+        [Header("Alpha Cutout (α) — 잎·펜스 등 컷아웃 차폐")]
+        [Tooltip("컷아웃 머티리얼의 알파를 차폐 판정에 반영한다. 끄면 쿼드 전체가 불투명 판(기존 거동).")]
+        public bool alphaCutoutShadows = true;
+        [Tooltip("머티리얼당 알파 마스크 해상도 상한. 그림자 실루엣 디테일의 상한을 결정한다.")]
+        [Min(8)] public int alphaMaskResolution = 256;
+        [Tooltip("알파 블렌딩(Transparent) 머티리얼 처리. Ignore=차폐 제외(유리·물 통짜 그림자 해소).")]
+        public AlphaMaskBuilder.TransparentPolicy alphaTransparentPolicy = AlphaMaskBuilder.TransparentPolicy.Ignore;
+        [Tooltip("자동 판별이 실패하는 머티리얼을 강제로 컷아웃 취급(에셋 참조 지정).")]
+        public Material[] alphaForceCutout;
+        [Tooltip("머티리얼/셰이더 이름 부분일치로 강제 컷아웃(대소문자 무시). 예: \"Tree_N_\", \"Leaf\". " +
+                 "임포터가 만든 임베드 머티리얼처럼 에셋 참조 지정이 안 통할 때 사용.")]
+        public string[] alphaForceCutoutNames;
+        [Tooltip("셰이더가 컷오프를 프로퍼티로 노출하지 않을 때 쓸 기본 임계값(SpeedTree 는 0.3333 자동).")]
+        [Range(0f, 1f)] public float alphaDefaultCutoff = 0.5f;
+
+        // α 런타임 상태(BuildGiScene 에서 구성 → CPU/Burst/GPU 세 백엔드가 공유)
+        AlphaSceneData _alphaData;
+        string _lastAlphaLog;   // 마지막 마스크 빌드 요약(AlphaDiagnose 가 함께 출력)
+
         // Radiance 모드 런타임 상태(BlitRegion 이 참조)
         public enum RadianceBackend { CPU, Burst, Gpu }
         [Tooltip("RadianceGI 베이크 경로. Gpu=컴퓨트셰이더(대형 씬 최고속), Burst=병렬(권장), CPU=기존.")]
@@ -191,6 +216,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 Direction = lightDirection.sqrMagnitude > 1e-8f ? lightDirection.normalized : Vector3.down,
                 Color = LinColor(lightColor),
                 Intensity = lightIntensity,
+                AngularDiameterDeg = sunAngularDiameterDeg,
             };
             Vector3 amb = LinColor(ambient);
             int res = Mathf.Clamp(atlasResolution, 4, 512); // 텍셀 해상도(인스턴스별). 비교는 점-단위라 작게 충분.
@@ -249,8 +275,10 @@ namespace HuskyLibs.CustomLightmapper.Bake
             // 유니크 메시(로컬) + per-mesh 알베도 + 인스턴스 → 공유 BVH 로 managed/Burst 동시 구성
             var meshToIdx = new System.Collections.Generic.Dictionary<Mesh, int>();
             var uniqueLocal = new System.Collections.Generic.List<Tri[]>();
+            var uniqueMeshes = new System.Collections.Generic.List<Mesh>();
             var meshAlbedo = new System.Collections.Generic.List<Vector3>();
             var giInsts = new System.Collections.Generic.List<TwoLevelBVH.Instance>();
+            var instMats = new System.Collections.Generic.List<Material[]>();
             foreach (var mf in filters)
             {
                 var mesh = mf.sharedMesh;
@@ -258,26 +286,31 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 if (!meshToIdx.TryGetValue(mesh, out int mi))
                 {
                     mi = uniqueLocal.Count; meshToIdx[mesh] = mi;
-                    uniqueLocal.Add(LocalTris(mesh)); meshAlbedo.Add(ReadAlbedo(mf));
+                    uniqueLocal.Add(LocalTris(mesh)); uniqueMeshes.Add(mesh); meshAlbedo.Add(ReadAlbedo(mf));
                 }
                 giInsts.Add(new TwoLevelBVH.Instance { MeshIndex = mi, LocalToWorld = mf.transform.localToWorldMatrix });
+                var rndA = mf.GetComponent<MeshRenderer>();
+                instMats.Add(rndA != null ? rndA.sharedMaterials : null);
             }
             if (giInsts.Count == 0) { Debug.LogWarning("[AtlasApply] GI DiffTest: R/W 가능한 메시 없음.", this); return; }
 
             var albedoArr = meshAlbedo.ToArray();
+            var alphaArr = BuildAlphaData(uniqueLocal, uniqueMeshes, giInsts, instMats);
             using var bvh = new TwoLevelBVH(uniqueLocal.ToArray(), giInsts.ToArray());
+            bvh.SetAlpha(alphaArr);
             using var cpuScene = new InstancedRadianceScene(uniqueLocal.ToArray(), albedoArr, giInsts.ToArray(), bvh); // 공유 BVH(모드 A)
-            var burstScene = BurstScene.Create(bvh, albedoArr, Allocator.Persistent);
+            var burstScene = BurstScene.Create(bvh, albedoArr, alphaArr, Allocator.Persistent);
 
             var sun = new DirectionalLight
             {
                 Direction = lightDirection.sqrMagnitude > 1e-8f ? lightDirection.normalized : Vector3.down,
                 Color = LinColor(lightColor),
                 Intensity = lightIntensity,
+                AngularDiameterDeg = sunAngularDiameterDeg,
             };
             ISky sky = new UniformSky(LinColor(skyColor));
             var burstSky = BurstSky.FromSky(sky);
-            var q = new BakeQualitySettings { AoSamples = aoSamples, IndirectSamples = indirectSamples, MaxBounces = maxBounces, RRStartDepth = 3, RayBias = Mathf.Max(1e-4f, surfaceBias) };
+            var q = new BakeQualitySettings { AoSamples = aoSamples, IndirectSamples = indirectSamples, MaxBounces = maxBounces, RRStartDepth = 3, RayBias = Mathf.Max(1e-4f, surfaceBias), DirectSamples = directSamples };
 
             int res = Mathf.Clamp(atlasResolution, 4, 256); // 비교는 점-단위라 작게 충분(GI 비쌈)
             const float thresh = 1f / 255f;
@@ -348,6 +381,13 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 return;
             }
 
+            // 베이크 시간 계측 — 단계별로 나눠야 α(알파 컷아웃)/원반 샘플링의 비용을 분리해서 볼 수 있다.
+            //   scene = 씬 구성(BVH 빌드 + 알파 마스크 굽기) / bake = 레이트레이싱 루프 / post = 디노이즈·스티치·디레이트
+            var swTotal = System.Diagnostics.Stopwatch.StartNew();
+            var swScene = new System.Diagnostics.Stopwatch();
+            var swBake = new System.Diagnostics.Stopwatch();
+            var swPost = new System.Diagnostics.Stopwatch();
+
             // 1) 인스턴스별 월드 표면적 → 할당(ST + 페이지)
             var insts = new LightmapInstance[filters.Length];
             for (int i = 0; i < filters.Length; i++)
@@ -392,6 +432,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
             // Radiance 모드: 씬 전체(모든 인스턴스) 차폐자 + 광원 1회 구성 → 인스턴스 간 그림자 반영.
             // 메시 스왑 전에 원본 sharedMesh 로 빌드(지오메트리는 uv2 메시와 동일 좌표).
+            swScene.Start();
             if (mode == BakeMode.Radiance)
             {
                 var occTris = BuildWorldTris(ResolveOccluderUnion(filters));
@@ -403,6 +444,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                     Direction = lightDirection.sqrMagnitude > 1e-8f ? lightDirection.normalized : Vector3.down,
                     Color = LinColor(lightColor),
                     Intensity = lightIntensity,
+                    AngularDiameterDeg = sunAngularDiameterDeg,
                 };
                 _ambientLin = LinColor(ambient);
                 Debug.LogWarning($"[AtlasApply] Radiance 베이크({occluderKind}, {occTris.Length} tris) — 느리면 atlasResolution/aoSamples 를 낮추세요.", this);
@@ -413,6 +455,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 BuildGiScene(ResolveOccluderUnion(filters));
                 Debug.LogWarning("[AtlasApply] RadianceGI 경로추적 베이크 — 매우 느림. atlasResolution↓(128~256)·indirectSamples↓(16~32)·maxBounces 1~2 권장.", this);
             }
+            swScene.Stop();
 
             var appliedF = new MeshFilter[filters.Length];
             var origMesh = new Mesh[filters.Length];
@@ -429,6 +472,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             }
 
             // 3) 인스턴스마다 파라미터화→조립→텍셀복원→영역 blit→메시/ST 적용
+            swBake.Start();
             for (int i = 0; i < filters.Length; i++)
             {
                 var mf = filters[i];
@@ -537,6 +581,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
 
 
+            swBake.Stop();
+            swPost.Start();
+
             // 3.3) Denoise — MC 노이즈(그레인)를 노멀·위치·색 가이드 에지 보존 필터로 평활.
             //      Seam Stitch 전: 경계 텍셀 값을 먼저 안정화한 뒤 스티칭·확장해야 시임이 매끈하다.
             //      가이드는 valid 텍셀에서만 유효 — 필터도 valid 만 읽고 씀(배경/거터 불변, dilation 소스 마스크 불변).
@@ -591,6 +638,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 }
             }
 
+            swPost.Stop();
+
             // 4) 아틀라스 텍스처 생성/갱신
             if (atlas == null || atlas.width != res || atlas.depth != pages)
             {
@@ -626,8 +675,25 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 ? $", denoise={denoiseIterations}×({(denoiseBurst ? "Burst" : "C#")})"
                 : ", denoise=off";
             string occInfo = (occluders != null && occluders.Length > 0) ? $", occluders={occluders.Length}" : "";
-            Debug.Log($"[AtlasApply] {filters.Length} insts → atlas {res}×{res}×{pages}, util={alloc.Utilization:P1}, mode={mode}{occInfo}{denoiseInfo}{stitchInfo}{dilateInfo}" +
-                      (alloc.Overflow ? "  ⚠ overflow(클램프됨)" : ""), this);
+            // α 상태를 완료 로그에 붙인다 — 알파가 실제로 켜졌는지 한 줄로 확인 가능해야 한다.
+            string alphaInfo = !alphaCutoutShadows ? ", alpha=OFF(토글)"
+                             : (_alphaData == null || !_alphaData.Enabled) ? ", alpha=DISABLED(컷아웃 머티리얼 0)"
+                             : $", alpha=ON(masks={_alphaData.MaskW.Length}, {_alphaData.MaskBits.Length * 4 / 1024}KB)";
+            // 직사광 샘플링 상태(원반 샘플링은 directSamples·각지름 둘 다 켜야 동작)
+            string directInfo = (directSamples > 1 && sunAngularDiameterDeg > 0f)
+                ? $", direct={directSamples}×(sun {sunAngularDiameterDeg:F2}°)"
+                : ", direct=1×(hard)";
+
+            swTotal.Stop();
+            // 시간: 총계 + 단계별. bake 가 레이트레이싱이므로 알파/원반 샘플링 비용은 여기서 본다.
+            string timeInfo =
+                $"\n  time: total={swTotal.Elapsed.TotalSeconds:F2}s" +
+                $" | scene(BVH+알파마스크)={swScene.Elapsed.TotalSeconds:F2}s" +
+                $" | bake(레이트레이싱)={swBake.Elapsed.TotalSeconds:F2}s" +
+                $" | post(denoise+stitch+dilate)={swPost.Elapsed.TotalSeconds:F2}s";
+
+            Debug.Log($"[AtlasApply] {filters.Length} insts → atlas {res}×{res}×{pages}, util={alloc.Utilization:P1}, mode={mode}{occInfo}{alphaInfo}{directInfo}{denoiseInfo}{stitchInfo}{dilateInfo}" +
+                      (alloc.Overflow ? "  ⚠ overflow(클램프됨)" : "") + timeInfo, this);
 
             // NativeArray 보유 차폐자/씬 해제(BlitRegion 은 위 루프에서 끝났으므로 안전)
             if (_occluder is System.IDisposable od) od.Dispose();
@@ -832,6 +898,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
             gpuScene.Bind(cs, kernel);          // 순회 SRV + _TlasCount
             gpuScene.BindLighting(cs, kernel);  // _InstNormals, _MeshAlbedo
+            gpuScene.BindAlpha(cs, kernel);     // α: 알파 컷아웃(꺼진 씬은 _AlphaEnabled=0 → 무영향)
             cs.SetBuffer(kernel, "_Points", io.Points);
             cs.SetBuffer(kernel, "_Normals", io.Normals);
             cs.SetBuffer(kernel, "_Valid", io.Valid);
@@ -844,6 +911,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
             cs.SetVector("_SunDir", sun.Direction);
             cs.SetVector("_SunColor", sun.Color);
             cs.SetFloat("_SunIntensity", sun.Intensity);
+            // 태양 원반 샘플링(1이면 셰이더가 기존 단발 경로를 탄다)
+            cs.SetInt("_DirectSamples", q.DirectSamples);
+            cs.SetFloat("_SunHalfAngle", sun.AngularDiameterDeg * 0.5f * Mathf.Deg2Rad);
             cs.SetInt("_SkyType", sky.Type);
             cs.SetVector("_SkyTop", sky.A);
             cs.SetVector("_SkyBottom", sky.B);
@@ -886,8 +956,10 @@ namespace HuskyLibs.CustomLightmapper.Bake
             // 유니크 메시(로컬) + per-mesh 알베도 + 인스턴스 → 공유 BVH.
             var meshToIdx = new System.Collections.Generic.Dictionary<Mesh, int>();
             var uniqueLocal = new System.Collections.Generic.List<Tri[]>();
+            var uniqueMeshes = new System.Collections.Generic.List<Mesh>();
             var meshAlbedo = new System.Collections.Generic.List<Vector3>();
             var giInsts = new System.Collections.Generic.List<TwoLevelBVH.Instance>();
+            var instMats = new System.Collections.Generic.List<Material[]>();
             foreach (var mf in filters)
             {
                 var mesh = mf.sharedMesh;
@@ -895,15 +967,19 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 if (!meshToIdx.TryGetValue(mesh, out int mi))
                 {
                     mi = uniqueLocal.Count; meshToIdx[mesh] = mi;
-                    uniqueLocal.Add(LocalTris(mesh)); meshAlbedo.Add(ReadAlbedo(mf));
+                    uniqueLocal.Add(LocalTris(mesh)); uniqueMeshes.Add(mesh); meshAlbedo.Add(ReadAlbedo(mf));
                 }
                 giInsts.Add(new TwoLevelBVH.Instance { MeshIndex = mi, LocalToWorld = mf.transform.localToWorldMatrix });
+                var rndG = mf.GetComponent<MeshRenderer>();
+                instMats.Add(rndG != null ? rndG.sharedMaterials : null);
             }
             if (giInsts.Count == 0) { Debug.LogWarning("[AtlasApply] Burst vs GPU Diff: R/W 가능한 메시 없음.", this); return; }
 
             var albedoArr = meshAlbedo.ToArray();
+            var alphaArr = BuildAlphaData(uniqueLocal, uniqueMeshes, giInsts, instMats);
             using var bvh = new TwoLevelBVH(uniqueLocal.ToArray(), giInsts.ToArray());
-            var burstScene = BurstScene.Create(bvh, albedoArr, Allocator.Persistent);
+            bvh.SetAlpha(alphaArr);
+            var burstScene = BurstScene.Create(bvh, albedoArr, alphaArr, Allocator.Persistent);
 
             var pathCS = LoadPathCompute();
             if (pathCS == null) { Debug.LogWarning("[AtlasApply] Burst vs GPU Diff: PathTrace.compute 로드 실패.", this); burstScene.Dispose(); return; }
@@ -917,10 +993,11 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 Direction = lightDirection.sqrMagnitude > 1e-8f ? lightDirection.normalized : Vector3.down,
                 Color = LinColor(lightColor),
                 Intensity = lightIntensity,
+                AngularDiameterDeg = sunAngularDiameterDeg,
             };
             ISky sky = new UniformSky(LinColor(skyColor));
             var burstSky = BurstSky.FromSky(sky);
-            var q = new BakeQualitySettings { AoSamples = aoSamples, IndirectSamples = indirectSamples, MaxBounces = maxBounces, RRStartDepth = 3, RayBias = Mathf.Max(1e-4f, surfaceBias) };
+            var q = new BakeQualitySettings { AoSamples = aoSamples, IndirectSamples = indirectSamples, MaxBounces = maxBounces, RRStartDepth = 3, RayBias = Mathf.Max(1e-4f, surfaceBias), DirectSamples = directSamples };
 
             int res = Mathf.Clamp(atlasResolution, 4, 256);
             const float thresh = 1f / 255f;
@@ -1034,8 +1111,10 @@ namespace HuskyLibs.CustomLightmapper.Bake
         {
             var meshToIdx = new System.Collections.Generic.Dictionary<Mesh, int>();
             var uniqueLocal = new System.Collections.Generic.List<Tri[]>();
+            var uniqueMeshes = new System.Collections.Generic.List<Mesh>();
             var meshAlbedo = new System.Collections.Generic.List<Vector3>();
             var giInsts = new System.Collections.Generic.List<TwoLevelBVH.Instance>();
+            var instMats = new System.Collections.Generic.List<Material[]>();
             foreach (var mf in filters)
             {
                 var mesh = mf.sharedMesh;
@@ -1045,9 +1124,12 @@ namespace HuskyLibs.CustomLightmapper.Bake
                     mi = uniqueLocal.Count;
                     meshToIdx[mesh] = mi;
                     uniqueLocal.Add(LocalTris(mesh));
+                    uniqueMeshes.Add(mesh);
                     meshAlbedo.Add(ReadAlbedo(mf));
                 }
                 giInsts.Add(new TwoLevelBVH.Instance { MeshIndex = mi, LocalToWorld = mf.transform.localToWorldMatrix });
+                var rnd = mf.GetComponent<MeshRenderer>();
+                instMats.Add(rnd != null ? rnd.sharedMaterials : null);
             }
 
             _giScene = new InstancedRadianceScene(uniqueLocal.ToArray(), meshAlbedo.ToArray(), giInsts.ToArray()); // change cpu vs burst
@@ -1055,11 +1137,16 @@ namespace HuskyLibs.CustomLightmapper.Bake
             _giBvh = ((InstancedRadianceScene)_giScene).Bvh;
             _giMeshAlbedo = meshAlbedo.ToArray();
 
+            // α: 알파 컷아웃 씬 구성 → CPU(TwoLevelBVH) / Burst(BurstScene) / GPU(GpuScene) 가 공유.
+            _alphaData = BuildAlphaData(uniqueLocal, uniqueMeshes, giInsts, instMats);
+            _giBvh.SetAlpha(_alphaData);
+
             _sun = new DirectionalLight
             {
                 Direction = lightDirection.sqrMagnitude > 1e-8f ? lightDirection.normalized : Vector3.down,
                 Color = LinColor(lightColor),
                 Intensity = lightIntensity,
+                AngularDiameterDeg = sunAngularDiameterDeg,
             };
             _sky = new UniformSky(LinColor(skyColor));
             _giQ = new BakeQualitySettings
@@ -1069,13 +1156,14 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 MaxBounces = maxBounces,
                 RRStartDepth = 3,
                 RayBias = Mathf.Max(1e-4f, surfaceBias),
+                DirectSamples = directSamples,
             };
 
             // Burst/Gpu 백엔드: 동일 BVH(_giBvh) + per-mesh 알베도 → POD 평탄화(BurstScene). 모든 인스턴스 blit 에서 재사용.
             //   Gpu 도 BurstScene 이 필요(GpuScene 이 생성자에서 이 SoA 를 ComputeBuffer 로 업로드). _burstSky 는 uniform 값 공급.
             if (radianceBackend == RadianceBackend.Burst || radianceBackend == RadianceBackend.Gpu)
             {
-                _burstScene = BurstScene.Create(_giBvh, _giMeshAlbedo, Allocator.Persistent);
+                _burstScene = BurstScene.Create(_giBvh, _giMeshAlbedo, _alphaData, Allocator.Persistent);
                 _burstSky = BurstSky.FromSky(_sky);
                 _burstReady = true;
             }
@@ -1117,6 +1205,152 @@ namespace HuskyLibs.CustomLightmapper.Bake
         static ComputeShader LoadPathCompute()
         {
             return Resources.Load<ComputeShader>("PathTrace");
+        }
+
+        /// <summary>
+        /// α: 유니크 메시·인스턴스로부터 알파 컷아웃 씬 데이터를 만든다.
+        /// 컷아웃 머티리얼이 없거나 토글이 꺼져 있으면 Disabled 를 돌려 세 백엔드가 기존 경로를 탄다.
+        /// </summary>
+        AlphaSceneData BuildAlphaData(System.Collections.Generic.List<Tri[]> uniqueLocal,
+                                      System.Collections.Generic.List<Mesh> uniqueMeshes,
+                                      System.Collections.Generic.List<TwoLevelBVH.Instance> insts,
+                                      System.Collections.Generic.List<Material[]> instMats)
+        {
+            if (!alphaCutoutShadows) return AlphaSceneData.Disabled;
+
+            var triCount = new int[uniqueLocal.Count];
+            for (int m = 0; m < uniqueLocal.Count; m++) triCount[m] = uniqueLocal[m] != null ? uniqueLocal[m].Length : 0;
+
+            var instMesh = new int[insts.Count];
+            for (int i = 0; i < insts.Count; i++) instMesh[i] = insts[i].MeshIndex;
+
+            var builder = new AlphaMaskBuilder
+            {
+                MaskResolution = alphaMaskResolution,
+                Transparent = alphaTransparentPolicy,
+                DefaultCutoff = alphaDefaultCutoff,
+                ForceCutout = (alphaForceCutout != null && alphaForceCutout.Length > 0)
+                    ? new System.Collections.Generic.HashSet<Material>(alphaForceCutout)
+                    : null,
+                ForceCutoutNames = alphaForceCutoutNames,
+            };
+            var data = builder.BuildScene(uniqueMeshes, triCount, instMesh, instMats, out string log);
+            _lastAlphaLog = log;                       // AlphaDiagnose 가 한 덩어리로 함께 출력
+            Debug.Log($"[AtlasApply] alpha: {log}", this);
+            return data;
+        }
+
+        /// <summary>
+        /// α 진단 — 알파 컷아웃이 **실제로 차폐 판정을 바꾸고 있는지** 수치로 확인한다.
+        /// 같은 레이 집합을 알파 ON/OFF 로 두 번 쏴서 결과가 달라진 개수를 센다.
+        /// 0 이면 알파가 아무 일도 안 하는 것 → 머티리얼 판별/UV/마스크 중 하나가 문제.
+        /// </summary>
+        [ContextMenu("Alpha Diagnose (알파 효과 측정)")]
+        public void AlphaDiagnose()
+        {
+            // 가장 흔한 함정부터 먼저 걸러낸다 — 토글이 꺼져 있으면 마스크 빌더가 아예 안 돈다.
+            if (!alphaCutoutShadows)
+            {
+                Debug.LogWarning("[AlphaDiag] ⚠ 인스펙터의 alphaCutoutShadows 가 **꺼져 있습니다**. " +
+                                 "이 상태로는 마스크를 굽지 않으므로 알파가 전혀 적용되지 않습니다. " +
+                                 "체크박스를 켜고 다시 실행하세요.", this);
+                return;
+            }
+
+            var filters = ResolveTargets();
+            if (filters.Length == 0) { Debug.LogWarning("[AlphaDiag] 대상 MeshFilter 없음.", this); return; }
+            var union = ResolveOccluderUnion(filters);
+
+            var meshToIdx = new System.Collections.Generic.Dictionary<Mesh, int>();
+            var uniqueLocal = new System.Collections.Generic.List<Tri[]>();
+            var uniqueMeshes = new System.Collections.Generic.List<Mesh>();
+            var insts = new System.Collections.Generic.List<TwoLevelBVH.Instance>();
+            var instMats = new System.Collections.Generic.List<Material[]>();
+            foreach (var mf in union)
+            {
+                var mesh = mf.sharedMesh;
+                if (mesh == null || !mesh.isReadable) continue;
+                if (!meshToIdx.TryGetValue(mesh, out int mi))
+                {
+                    mi = uniqueLocal.Count; meshToIdx[mesh] = mi;
+                    uniqueLocal.Add(LocalTris(mesh)); uniqueMeshes.Add(mesh);
+                }
+                insts.Add(new TwoLevelBVH.Instance { MeshIndex = mi, LocalToWorld = mf.transform.localToWorldMatrix });
+                var r = mf.GetComponent<MeshRenderer>();
+                instMats.Add(r != null ? r.sharedMaterials : null);
+            }
+            if (insts.Count == 0) { Debug.LogWarning("[AlphaDiag] R/W 가능한 메시 없음.", this); return; }
+
+            var alpha = BuildAlphaData(uniqueLocal, uniqueMeshes, insts, instMats);
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"=== α 진단 ===");
+            // 셰이더 이름 등 머티리얼별 사유가 여기에 있다. 비어 있으면 빌더가 안 돈 것.
+            sb.AppendLine($"[마스크 빌드] {(string.IsNullOrEmpty(_lastAlphaLog) ? "(빌드 안 됨 — alphaCutoutShadows 확인)" : _lastAlphaLog)}");
+            sb.AppendLine($"인스턴스 {insts.Count}, 유니크 메시 {uniqueMeshes.Count}, alpha.Enabled={alpha.Enabled}");
+            for (int m = 0; m < uniqueMeshes.Count; m++)
+            {
+                var msh = uniqueMeshes[m];
+                bool cut = alpha.Enabled && alpha.MeshCutout(m);
+                bool hasUv = msh != null && msh.uv != null && msh.uv.Length > 0;
+                sb.AppendLine($"  mesh[{m}] '{(msh != null ? msh.name : "null")}' tris={uniqueLocal[m].Length}, submesh={(msh != null ? msh.subMeshCount : 0)}, uv0={(hasUv ? "있음" : "**없음**")}, 컷아웃={(cut ? "예" : "아니오")}");
+            }
+
+            if (!alpha.Enabled)
+            {
+                sb.AppendLine("→ alpha DISABLED. 위 머티리얼 로그에서 '불투명 취급' 줄의 shader 이름을 확인하고,");
+                sb.AppendLine("   필요하면 인스펙터 alphaForceCutout 에 잎 머티리얼을 직접 지정하세요.");
+                Debug.Log(sb.ToString(), this);
+                return;
+            }
+
+            // 리시버 상단에 격자를 깔고 태양 방향으로 그림자 레이를 쏜다(= EvaluateDirect 와 같은 질의).
+            Bounds b = new Bounds();
+            bool first = true;
+            foreach (var mf in filters)
+            {
+                var r = mf.GetComponent<MeshRenderer>();
+                if (r == null) continue;
+                if (first) { b = r.bounds; first = false; } else b.Encapsulate(r.bounds);
+            }
+            if (first) { Debug.LogWarning("[AlphaDiag] 리시버 Renderer 없음.", this); return; }
+
+            using var bvh = new TwoLevelBVH(uniqueLocal.ToArray(), insts.ToArray());
+            Vector3 L = -(lightDirection.sqrMagnitude > 1e-8f ? lightDirection.normalized : Vector3.down);
+            Vector3 n = Vector3.up;
+
+            const int G = 200;
+            int rays = 0, occOn = 0, occOff = 0, changed = 0;
+            float y = b.max.y + 1e-3f;
+            for (int iy = 0; iy < G; iy++)
+            {
+                for (int ix = 0; ix < G; ix++)
+                {
+                    Vector3 p = new Vector3(
+                        Mathf.Lerp(b.min.x, b.max.x, (ix + 0.5f) / G), y,
+                        Mathf.Lerp(b.min.z, b.max.z, (iy + 0.5f) / G));
+                    Vector3 o = p + n * 1e-3f;
+                    rays++;
+
+                    bvh.SetAlpha(null);
+                    bool off = bvh.Occluded(o, L, 1e30f);
+                    bvh.SetAlpha(alpha);
+                    bool on = bvh.Occluded(o, L, 1e30f);
+
+                    if (off) occOff++;
+                    if (on) occOn++;
+                    if (off != on) changed++;
+                }
+            }
+
+            sb.AppendLine($"그림자 레이 {rays}발 (리시버 상단 {G}×{G} 격자, 태양 방향)");
+            sb.AppendLine($"  알파 OFF 차폐 = {occOff} ({100f * occOff / rays:F1}%)");
+            sb.AppendLine($"  알파 ON  차폐 = {occOn} ({100f * occOn / rays:F1}%)");
+            sb.AppendLine($"  → 알파로 뚫린 레이 = **{changed}** ({100f * changed / rays:F1}%)");
+            sb.AppendLine(changed == 0
+                ? "  ⚠ 0 이면 알파가 차폐 판정을 전혀 바꾸지 못하고 있다."
+                : "  ✔ 알파가 차폐를 실제로 통과시키고 있다. 그림자가 여전히 진하면 캐노피가 겹겹이라 물리적으로 맞는 결과일 수 있다.");
+            Debug.Log(sb.ToString(), this);
         }
 
         // 머티리얼 baseColor → Linear 알베도(≤1). URP _BaseColor / Built-in _Color, 없으면 기본값.
