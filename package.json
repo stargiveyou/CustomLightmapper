@@ -3,10 +3,10 @@
   "version": "0.14.0",
   "displayName": "Husky Custom Lightmapper",
   "description": "Burst/GPU 기반 커스텀 라이트맵 베이커. UV 파라미터화·차트 패킹·아틀라스 할당·경로추적 GI·SH 프로브 베이크를 포함한다.",
-  "unity": "6000.0",
+  "unity": "2021.3",
   "dependencies": {
     "com.unity.burst": "1.8.4",
-    "com.unity.collections": "2.1.0",
+    "com.unity.collections": "1.2.4",
     "com.unity.mathematics": "1.2.6"
   },
   "keywords": [
