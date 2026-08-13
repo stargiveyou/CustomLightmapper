@@ -78,8 +78,8 @@ indirect 셰이더: SH9를 표면 노멀로 평가 + 직사광(실시간) → �
             Cleanup();
 
             // 머티리얼(HLSL 셰이더)
-            var shader = Shader.Find("HuskyLibs/InstancedSH_URP");
-            if (shader == null) { Debug.LogError("[SHRenderDemo] 셰이더 'HuskyLibs/InstancedSH_URP' 없음"); return; }
+            var shader = Shader.Find("HuskyLibs/InstancedSH_BuiltIn");
+            if (shader == null) { Debug.LogError("[SHRenderDemo] 셰이더 'HuskyLibs/InstancedSH_BuiltIn' 없음"); return; }
             _mat = new Material(shader) { enableInstancing = true };
             _mat.SetFloat("_Exposure", exposure);
 

@@ -1,4 +1,4 @@
-// 커스텀 라이트매퍼 검증용 Unlit 셰이더 (URP)
+// 커스텀 라이트매퍼 검증용 Unlit 셰이더 (Built-In RP)
 // 개발문서 §8 계약: atlasUV = uv2 * _LightmapST.xy + _LightmapST.zw → Texture2DArray[_LightmapIndex] 샘플.
 // 라이팅 없음(검증 전용): 베이커가 구운 디버그 데이터(월드노멀/체커/인스턴스색)를 그대로 표면에 보여준다.
 // per-instance ST/Index 는 MaterialPropertyBlock 으로 주입(공유 머티리얼 1장).
@@ -14,56 +14,55 @@ Shader "CustomLightmapper/LightmapDebug"
 
     SubShader
     {
-        Tags { "RenderType"="Opaque" "RenderPipeline"="UniversalPipeline" }
+        Tags { "RenderType"="Opaque" "Queue"="Geometry" }
         LOD 100
 
         Pass
         {
             Name "LightmapDebugUnlit"
-            HLSLPROGRAM
+            CGPROGRAM
             #pragma vertex vert
             #pragma fragment frag
+            #pragma target 3.5                 // Texture2DArray 샘플링 최소 요구
 
-            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "UnityCG.cginc"
 
-            TEXTURE2D_ARRAY(_Lightmaps);
-            SAMPLER(sampler_Lightmaps);
+            UNITY_DECLARE_TEX2DARRAY(_Lightmaps);
 
-            CBUFFER_START(UnityPerMaterial)
-                float4 _LightmapST;
-                float  _LightmapIndex;
-                float  _ShowUV;
-            CBUFFER_END
+            // MaterialPropertyBlock 주입 대상 — BIRP 에선 CBUFFER 없이 전역 선언.
+            float4 _LightmapST;
+            float  _LightmapIndex;
+            float  _ShowUV;
 
-            struct Attributes
+            struct appdata
             {
-                float4 positionOS : POSITION;
-                float2 uv2        : TEXCOORD1;   // 조립 메시의 라이트맵 UV(채널1)
+                float4 vertex : POSITION;
+                float2 uv2    : TEXCOORD1;   // 조립 메시의 라이트맵 UV(채널1)
             };
 
-            struct Varyings
+            struct v2f
             {
-                float4 positionHCS : SV_POSITION;
-                float2 atlasUV     : TEXCOORD0;
+                float4 pos     : SV_POSITION;
+                float2 atlasUV : TEXCOORD0;
             };
 
-            Varyings vert (Attributes IN)
+            v2f vert (appdata v)
             {
-                Varyings OUT;
-                OUT.positionHCS = TransformObjectToHClip(IN.positionOS.xyz);
+                v2f o;
+                o.pos = UnityObjectToClipPos(v.vertex);
                 // §8 계약 그대로: uv2 를 인스턴스 영역으로 리맵
-                OUT.atlasUV = IN.uv2 * _LightmapST.xy + _LightmapST.zw;
-                return OUT;
+                o.atlasUV = v.uv2 * _LightmapST.xy + _LightmapST.zw;
+                return o;
             }
 
-            half4 frag (Varyings IN) : SV_Target
+            fixed4 frag (v2f i) : SV_Target
             {
                 if (_ShowUV > 0.5)
-                    return half4(IN.atlasUV, 0, 1);    // 아틀라스 좌표를 색으로(영역 위치 즉시 확인)
+                    return fixed4(i.atlasUV, 0, 1);    // 아틀라스 좌표를 색으로(영역 위치 즉시 확인)
 
-                return SAMPLE_TEXTURE2D_ARRAY(_Lightmaps, sampler_Lightmaps, IN.atlasUV, _LightmapIndex);
+                return UNITY_SAMPLE_TEX2DARRAY(_Lightmaps, float3(i.atlasUV, _LightmapIndex));
             }
-            ENDHLSL
+            ENDCG
         }
     }
     Fallback Off

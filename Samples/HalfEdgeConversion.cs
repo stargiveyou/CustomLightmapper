@@ -116,12 +116,12 @@ public class HalfEdgeConversion : MonoBehaviour
         {
             propertyBlock ??= new MaterialPropertyBlock();
 
-            // 사용자가 머티리얼을 지정하지 않았을 때만 URP 폴백 머티리얼을 만든다.
+            // 사용자가 머티리얼을 지정하지 않았을 때만 폴백 머티리얼을 만든다(Built-In RP 우선).
             if (drawMaterial == null && runtimeMaterial == null)
             {
-                var shader = Shader.Find("Universal Render Pipeline/Lit");
+                var shader = Shader.Find("Standard");
                 if (shader == null)
-                    shader = Shader.Find("Universal Render Pipeline/Unlit");
+                    shader = Shader.Find("Unlit/Color");
                 if (shader == null)
                     shader = Shader.Find("Sprites/Default"); // 최후의 폴백
 
