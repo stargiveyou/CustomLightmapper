@@ -9,6 +9,13 @@
     "com.unity.collections": "1.2.4",
     "com.unity.mathematics": "1.2.6"
   },
+  "samples": [
+    {
+      "displayName": "Debug & Verification Scenes",
+      "description": "베이크 디버거(AtlasApplyDebug·TexelMapperDebug 등)와 SH 렌더 데모. Package Manager 에서 Import 하면 Assets/ 로 복사된다.",
+      "path": "Samples~"
+    }
+  ],
   "keywords": [
     "lightmap",
     "baking",
