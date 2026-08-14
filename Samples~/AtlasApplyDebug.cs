@@ -21,6 +21,14 @@ namespace HuskyLibs.CustomLightmapper.Bake
         public enum BakeMode { PerInstanceColor, WorldNormal, Checker, Radiance, RadianceGI }
         public enum OccluderKind { BruteForce, BVH }
 
+        /// <summary>SSAA(텍셀 내부 슈퍼샘플링) 범위. Off = 기존 경로와 비트 동일.</summary>
+        public enum SsaaMode
+        {
+            Off,        // 텍셀당 1샘플(중앙) — 기존 거동
+            Adaptive,   // 1패스 후 라이팅 급변 텍셀만 S×S 재샘플(권장)
+            Full,       // 모든 valid 텍셀을 S×S 재샘플(레퍼런스/비교용, S² 배 비용)
+        }
+
         [Header("Input")]
         [Tooltip("비우면 자기 자신+자식의 MeshFilter 를 모두 수집.")]
         [SerializeField] MeshFilter[] targets;
@@ -109,6 +117,21 @@ namespace HuskyLibs.CustomLightmapper.Bake
         [Min(1)] public int directSamples = 1;
         [Tooltip("태양 각지름(도). 0=하드 그림자. 실제 태양 0.53°, 부드럽게 하려면 1~3°.")]
         [Range(0f, 10f)] public float sunAngularDiameterDeg = 0f;
+
+        [Header("SSAA — 텍셀 내부 슈퍼샘플링(그림자 경계 계단 제거)")]
+        [Tooltip("Off=텍셀당 1샘플(기존, 비트 동일) / Adaptive=라이팅 급변 텍셀만 S×S 재샘플(권장) / Full=전 텍셀 S×S(S²배 비용, 레퍼런스). " +
+                 "Radiance·RadianceGI 모드에서만 동작한다.")]
+        public SsaaMode ssaaMode = SsaaMode.Off;
+        [Tooltip("한 축 서브샘플 수 S. 텍셀당 S×S 개를 RGSS(회전격자) 위치에서 샘플해 평균. 2면 4단계, 3이면 9단계 계조.")]
+        [Range(2, 4)] public int ssaaFactor = 2;
+        [Tooltip("Adaptive 엣지 판정: 이웃 텍셀과의 상대 휘도차 임계. 낮을수록 더 많은 텍셀이 재샘플 대상(품질↑ 비용↑). 0.05~0.2 권장.")]
+        [Range(0.01f, 1f)] public float ssaaEdgeThreshold = 0.10f;
+        [Tooltip("Adaptive 엣지 판정에서 '같은 표면 이웃'으로 인정할 노멀 각도 상한. 이보다 각지면 정상 불연속으로 보고 비교하지 않는다.")]
+        [Range(1f, 180f)] public float ssaaEdgeNormalAngleDeg = 45f;
+        [Tooltip("검출된 엣지 마스크를 확장할 링 수. 1이면 계단 양쪽을 모두 재샘플(권장). 0이면 한쪽만 매끈해져 오히려 티난다.")]
+        [Range(0, 3)] public int ssaaEdgeDilate = 1;
+        [Tooltip("재샘플된 텍셀을 마젠타로 칠해 마스크를 눈으로 확인(라이팅 값 대신). 튜닝용 — 켜면 결과 아틀라스는 못 쓴다.")]
+        public bool ssaaDebugMask = false;
 
         [Header("Alpha Cutout (α) — 잎·펜스 등 컷아웃 차폐")]
         [Tooltip("컷아웃 머티리얼의 알파를 차폐 판정에 반영한다. 끄면 쿼드 전체가 불투명 판(기존 거동).")]
@@ -372,6 +395,10 @@ namespace HuskyLibs.CustomLightmapper.Bake
             if (ok) Debug.Log(msg, this); else Debug.LogWarning(msg, this);
         }
 
+        // SSAA 기하/로직 자체테스트(레이 없음, 즉시 실행). 서브샘플 위치·마스크·엣지 게이팅·시드 규약 확인.
+        [ContextMenu("SSAA Self-Tests")]
+        public void RunSsaaSelfTests() => Debug.Log(LightmapSSAATests.RunAll(), this);
+
         [ContextMenu("Bake & Apply")]
         public void BakeAndApply()
         {
@@ -472,6 +499,11 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 seamSegGroups[p] = new System.Collections.Generic.List<LightmapSeamStitch.Seg[]>();
             }
 
+            // SSAA 통계(완료 로그용): 재샘플된 텍셀 수 / 그 텍셀에서 쏜 서브샘플 수 / 전체 valid 텍셀 수.
+            //   레이 배수 = (baseTexels - ssaaTexels + ssaaSubSamples) / baseTexels — 실제 비용 증가율.
+            int ssaaTexels = 0;
+            long ssaaSubSamples = 0, ssaaBaseTexels = 0;
+
             // 3) 인스턴스마다 파라미터화→조립→텍셀복원→영역 blit→메시/ST 적용
             swBake.Start();
             for (int i = 0; i < filters.Length; i++)
@@ -508,13 +540,19 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
                 Color tint = Color.HSVToRGB((i * 0.6180339887f) % 1f, 0.65f, 1f); // 황금비 분산 → 인접 인스턴스 색 분리
 
-                // RadianceGI + Gpu/Burst 백엔드: 이 인스턴스의 valid lumel 들을 한 번에 베이크(li 인덱스로 산란).
+                // 라이팅 모드: 이 인스턴스의 valid lumel 을 한 번에 베이크(li 인덱스로 산란).
                 //   CPU/Burst/GPU 모두 동일 시드(seed + li*const)·동일 pts(worldPos+wn*surfaceBias) → 교차검증 가능.
-                //   null 이면 BlitRegion 이 인라인 CPU 로 폴백.
-                Vector3[] giRad = (mode == BakeMode.RadianceGI)
-                    ? (_gpuReady ? BakeGiLumelsGpu(lumel) : (_burstReady ? BakeGiLumelsBurst(lumel) : null))
-                    : null;
-                BlitRegion(slices[page], validMask[page], res, ox, oy, sidePx, lumel, tint, giRad,
+                //   ⚠ SSAA 가 1패스 결과를 보고 엣지를 찾으므로, Radiance 모드도 BlitRegion 인라인 평가가 아니라
+                //     여기서 선-베이크한다(값은 인라인 경로와 동일 — 같은 시드·같은 원점·같은 함수).
+                Vector3[] rad = BakeLumels(lumel);
+                if (rad != null)
+                {
+                    ssaaBaseTexels += CountValid(lumel);
+                    ApplySsaa(uv2mesh, mf.transform.localToWorldMatrix, lumel, sidePx, rad,
+                              ref ssaaTexels, ref ssaaSubSamples);
+                }
+
+                BlitRegion(slices[page], validMask[page], res, ox, oy, sidePx, lumel, tint, rad,
                            doDenoise ? guideN[page] : null, doDenoise ? guideP[page] : null);
 
                 // 시임 스티칭 입력 누적 — 블릿과 동일한 (ox,oy,sidePx,res) 매핑이라 텍셀이 정확히 정렬.
@@ -684,6 +722,19 @@ namespace HuskyLibs.CustomLightmapper.Bake
             string directInfo = (directSamples > 1 && sunAngularDiameterDeg > 0f)
                 ? $", direct={directSamples}×(sun {sunAngularDiameterDeg:F2}°)"
                 : ", direct=1×(hard)";
+            // SSAA: 재샘플 텍셀 비율과 실제 레이 배수. 배수 = (전체-엣지 + 서브샘플)/전체 — 적응형이 얼마나 싸게 먹혔는지.
+            string ssaaInfo;
+            if (ssaaMode == SsaaMode.Off || ssaaFactor < 2 || ssaaBaseTexels == 0)
+            {
+                ssaaInfo = ", ssaa=off";
+            }
+            else
+            {
+                double pct = 100.0 * ssaaTexels / ssaaBaseTexels;
+                double mult = (double)(ssaaBaseTexels - ssaaTexels + ssaaSubSamples) / ssaaBaseTexels;
+                ssaaInfo = $", ssaa={ssaaMode} {ssaaFactor}×{ssaaFactor}(텍셀 {ssaaTexels}/{ssaaBaseTexels}={pct:F1}%, rays ×{mult:F2})"
+                         + (ssaaDebugMask ? " ⚠DEBUG_MASK" : "");
+            }
 
             swTotal.Stop();
             // 시간: 총계 + 단계별. bake 가 레이트레이싱이므로 알파/원반 샘플링 비용은 여기서 본다.
@@ -693,7 +744,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 $" | bake(레이트레이싱)={swBake.Elapsed.TotalSeconds:F2}s" +
                 $" | post(denoise+stitch+dilate)={swPost.Elapsed.TotalSeconds:F2}s";
 
-            Debug.Log($"[AtlasApply] {filters.Length} insts → atlas {res}×{res}×{pages}, util={alloc.Utilization:P1}, mode={mode}{occInfo}{alphaInfo}{directInfo}{denoiseInfo}{stitchInfo}{dilateInfo}" +
+            Debug.Log($"[AtlasApply] {filters.Length} insts → atlas {res}×{res}×{pages}, util={alloc.Utilization:P1}, mode={mode}{occInfo}{alphaInfo}{directInfo}{ssaaInfo}{denoiseInfo}{stitchInfo}{dilateInfo}" +
                       (alloc.Overflow ? "  ⚠ overflow(클램프됨)" : "") + timeInfo, this);
 
             // NativeArray 보유 차폐자/씬 해제(BlitRegion 은 위 루프에서 끝났으므로 안전)
@@ -707,7 +758,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
         // LumelMap 을 아틀라스 페이지 버퍼의 (ox,oy) 영역에 blit. valid 텍셀만, 모드별 색.
         // valid: 실제 칠한 텍셀을 true 로 표시 → 이후 dilation 의 소스/보존 마스크로 사용.
-        void BlitRegion(Color[] slice, bool[] valid, int res, int ox, int oy, int sidePx, LumelMap lm, Color tint, Vector3[] giRadiance = null,
+        // radiance: BakeLumels(+SSAA) 가 미리 구운 조도(li 인덱스). null 이면 인라인 CPU 폴백.
+        void BlitRegion(Color[] slice, bool[] valid, int res, int ox, int oy, int sidePx, LumelMap lm, Color tint, Vector3[] radiance = null,
                         Vector3[] guideNormal = null, Vector3[] guidePos = null)
         {
             for (int y = 0; y < sidePx; y++)
@@ -735,27 +787,36 @@ namespace HuskyLibs.CustomLightmapper.Bake
                             break;
                         case BakeMode.Radiance:
                             {
-                                Vector3 wp = lm.WorldPos[li];
-                                Vector3 wn = lm.WorldNormal[li];
-                                // 텍셀별 결정적 시드 → 노이즈 재현 가능. 평가 원점은 표면에서 bias 만큼 띄움.
-                                uint s = seed + (uint)li * 2654435761u;
-                                Vector3 lin = RadianceCore.EvaluateRadiance(_occluder, wp + wn * surfaceBias, wn, _sun, _ambientLin, aoSamples, s);
-                                c = ToColor(lin);
-                                break;
-                            }
-                        case BakeMode.RadianceGI:
-                            {
-                                // Burst 백엔드면 미리 베이크된 giRadiance[li] 사용, 아니면 인라인 CPU(EvaluateRadiance).
+                                // BakeLumels(+SSAA) 가 구워 넘긴 값 우선. 없으면 인라인 CPU(동일 시드·동일 원점 → 같은 값).
                                 Vector3 lin;
-                                if (giRadiance != null)
+                                if (radiance != null)
                                 {
-                                    lin = giRadiance[li];
+                                    lin = radiance[li];
                                 }
                                 else
                                 {
                                     Vector3 wp = lm.WorldPos[li];
                                     Vector3 wn = lm.WorldNormal[li];
-                                    uint s = seed + (uint)li * 2654435761u;
+                                    // 텍셀별 결정적 시드 → 노이즈 재현 가능. 평가 원점은 표면에서 bias 만큼 띄움.
+                                    uint s = LightmapSSAA.TexelSeed(seed, li);
+                                    lin = RadianceCore.EvaluateRadiance(_occluder, wp + wn * surfaceBias, wn, _sun, _ambientLin, aoSamples, s);
+                                }
+                                c = ToColor(lin);
+                                break;
+                            }
+                        case BakeMode.RadianceGI:
+                            {
+                                // 미리 베이크된 radiance[li] 사용, 아니면 인라인 CPU(EvaluateRadiance).
+                                Vector3 lin;
+                                if (radiance != null)
+                                {
+                                    lin = radiance[li];
+                                }
+                                else
+                                {
+                                    Vector3 wp = lm.WorldPos[li];
+                                    Vector3 wn = lm.WorldNormal[li];
+                                    uint s = LightmapSSAA.TexelSeed(seed, li);
                                     // Direct + 경로추적 Indirect (2단 인스턴싱 씬, 하늘=sky). 알베도는 런타임 적용이라 여기선 조도.
                                     lin = RadianceCore.EvaluateRadiance(_giScene, wp + wn * surfaceBias, wn, _sun, _sky, _giQ, s);
                                 }
@@ -778,47 +839,24 @@ namespace HuskyLibs.CustomLightmapper.Bake
             }
         }
 
-        // RadianceGI Burst 베이크: LumelMap 의 valid lumel 을 NativeArray 로 모아 BurstRadianceBaker.Bake(Direct+Indirect)로
-        //   한 번에 병렬 처리 → li 인덱스로 산란한 Vector3[](조도) 반환. 시드 = seed + li*const(= BlitRegion CPU 규약과 동일).
-        Vector3[] BakeGiLumelsBurst(LumelMap lm)
+        static int CountValid(in LumelMap lm)
         {
-            int total = (lm.Valid != null) ? lm.Valid.Length : 0;
-            var result = new Vector3[total]; // invalid lumel = zero(BlitRegion 이 valid 만 칠함)
-            if (total == 0) return result;
-
-            var idx = new System.Collections.Generic.List<int>(total);
-            for (int li = 0; li < total; li++) if (lm.Valid[li]) idx.Add(li);
-            int n = idx.Count;
-            if (n == 0) return result;
-
-            var pts = new NativeArray<Vector3>(n, Allocator.TempJob);
-            var nrm = new NativeArray<Vector3>(n, Allocator.TempJob);
-            var val = new NativeArray<bool>(n, Allocator.TempJob);
-            var sds = new NativeArray<uint>(n, Allocator.TempJob);
-            for (int k = 0; k < n; k++)
-            {
-                int li = idx[k];
-                Vector3 wn = lm.WorldNormal[li];
-                pts[k] = lm.WorldPos[li] + wn * surfaceBias;   // BlitRegion 인라인 CPU 와 동일 원점
-                nrm[k] = wn;
-                val[k] = true;
-                sds[k] = seed + (uint)li * 2654435761u;        // CPU 와 동일 시드 → 백엔드 교차검증 가능
-            }
-
-            var rad = BurstRadianceBaker.Bake(_burstScene, _burstSky, _sun, _giQ, pts, nrm, val, sds, Allocator.TempJob);
-            for (int k = 0; k < n; k++) result[idx[k]] = rad[k];
-
-            pts.Dispose(); nrm.Dispose(); val.Dispose(); sds.Dispose(); rad.Dispose();
-            return result;
+            if (lm.Valid == null) return 0;
+            int c = 0;
+            for (int i = 0; i < lm.Valid.Length; i++) if (lm.Valid[i]) c++;
+            return c;
         }
 
-        // RadianceGI GPU 베이크: BakeGiLumelsBurst 미러. valid lumel 을 모아 CSRadiance(Direct+Indirect) 한 디스패치 →
-        //   Async 없이 GetData(1회 readback)로 li 인덱스 산란. pts=worldPos+wn*surfaceBias, seed=seed+li*const
-        //   (Burst/CPU 와 정확히 동일 — 교차검증 성립). null 대신 zero-filled(BlitRegion 이 valid 만 칠함).
-        Vector3[] BakeGiLumelsGpu(LumelMap lm)
+        // 라이팅 모드 텍셀 조도를 한 번에 베이크 → li 인덱스로 산란한 Vector3[] 반환(invalid = zero).
+        //   라이팅 모드가 아니면 null(BlitRegion 이 디버그 색을 칠한다).
+        //   시드 = LightmapSSAA.TexelSeed(seed, li) = 기존 seed + li*2654435761u 규약 그대로 →
+        //   기존 백엔드 교차검증(CPU/Burst/GPU Diff 메뉴)이 그대로 성립한다.
+        Vector3[] BakeLumels(in LumelMap lm)
         {
+            if (mode != BakeMode.Radiance && mode != BakeMode.RadianceGI) return null;
+
             int total = (lm.Valid != null) ? lm.Valid.Length : 0;
-            var result = new Vector3[total];
+            var result = new Vector3[total];   // invalid lumel = zero(BlitRegion 이 valid 만 칠함)
             if (total == 0) return result;
 
             var idx = new System.Collections.Generic.List<int>(total);
@@ -828,25 +866,155 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
             var pts = new Vector3[n];
             var nrm = new Vector3[n];
-            var seeds = new uint[n];
+            var sds = new uint[n];
             for (int k = 0; k < n; k++)
             {
                 int li = idx[k];
                 Vector3 wn = lm.WorldNormal[li];
-                pts[k] = lm.WorldPos[li] + wn * surfaceBias;   // BakeGiLumelsBurst 와 동일 원점
+                pts[k] = lm.WorldPos[li] + wn * surfaceBias;   // 세 백엔드 공통 평가 원점
                 nrm[k] = wn;
-                seeds[k] = seed + (uint)li * 2654435761u;       // Burst/CPU 와 동일 시드
+                sds[k] = LightmapSSAA.TexelSeed(seed, li);
             }
 
-            var rad = DispatchRadianceGpu(_gpuScene, _pathCS, _kRadiance, _sun, _burstSky, _giQ, pts, nrm, seeds, n, _gpuIo);
+            var rad = BakePoints(pts, nrm, sds, n);
             for (int k = 0; k < n; k++) result[idx[k]] = rad[k];
             return result;
+        }
+
+        // 임의 점 리스트 → 조도. 1패스(텍셀 중앙)와 SSAA 2패스(서브샘플)가 같은 진입점을 쓴다 —
+        //   덕분에 SSAA 가 백엔드 분기를 다시 짜지 않고 CPU/Burst/GPU 를 그대로 탄다.
+        //   ⚠ pts 는 이미 surfaceBias 가 더해진 평가 원점이어야 한다.
+        Vector3[] BakePoints(Vector3[] pts, Vector3[] nrm, uint[] seeds, int n)
+        {
+            var result = new Vector3[n];
+            if (n == 0) return result;
+
+            // Radiance: 차폐자 + ambient*AO (경로추적 없음)
+            if (mode == BakeMode.Radiance)
+            {
+                for (int k = 0; k < n; k++)
+                    result[k] = RadianceCore.EvaluateRadiance(_occluder, pts[k], nrm[k], _sun, _ambientLin, aoSamples, seeds[k]);
+                return result;
+            }
+
+            // RadianceGI: GPU → Burst → CPU 순으로 가용 백엔드
+            if (_gpuReady)
+                return DispatchRadianceGpu(_gpuScene, _pathCS, _kRadiance, _sun, _burstSky, _giQ, pts, nrm, seeds, n, _gpuIo);
+
+            if (_burstReady)
+            {
+                var p = new NativeArray<Vector3>(n, Allocator.TempJob);
+                var q = new NativeArray<Vector3>(n, Allocator.TempJob);
+                var v = new NativeArray<bool>(n, Allocator.TempJob);
+                var s = new NativeArray<uint>(n, Allocator.TempJob);
+                for (int k = 0; k < n; k++) { p[k] = pts[k]; q[k] = nrm[k]; v[k] = true; s[k] = seeds[k]; }
+
+                var rad = BurstRadianceBaker.Bake(_burstScene, _burstSky, _sun, _giQ, p, q, v, s, Allocator.TempJob);
+                for (int k = 0; k < n; k++) result[k] = rad[k];
+
+                p.Dispose(); q.Dispose(); v.Dispose(); s.Dispose(); rad.Dispose();
+                return result;
+            }
+
+            for (int k = 0; k < n; k++)
+                result[k] = RadianceCore.EvaluateRadiance(_giScene, pts[k], nrm[k], _sun, _sky, _giQ, seeds[k]);
+            return result;
+        }
+
+        // SSAA — 1패스 조도(rad)에서 라이팅이 급변하는 텍셀을 찾아(Full 이면 전 valid 텍셀) 그 텍셀만
+        //   S×S 서브샘플로 다시 굽고 평균으로 덮어쓴다.
+        //   아틀라스 해상도도 valid 마스크도 안 건드리므로 이후 denoise/stitch/dilate/ST 는 전부 그대로다.
+        //   1패스 값은 엣지 텍셀에서 버린다 — 짝수 S 의 서브샘플 격자에는 중앙점이 없어 재사용하면
+        //   가중치가 편향되고, 엣지는 전체의 몇 % 라 버리는 비용이 무시할 수준이다.
+        void ApplySsaa(Mesh uv2mesh, Matrix4x4 l2w, in LumelMap lm, int sidePx, Vector3[] rad,
+                       ref int edgeTexels, ref long subSamples)
+        {
+            if (ssaaMode == SsaaMode.Off || ssaaFactor < 2) return;
+            if (mode != BakeMode.Radiance && mode != BakeMode.RadianceGI) return;
+            if (rad == null || lm.Valid == null) return;
+
+            int S = Mathf.Clamp(ssaaFactor, 2, 4);
+            int spt = S * S;
+
+            bool[] mask;
+            if (ssaaMode == SsaaMode.Full)
+            {
+                mask = (bool[])lm.Valid.Clone();
+            }
+            else
+            {
+                // 이웃 인정 거리: 텍셀 1개 ≈ 1/texelsPerWorldUnit 월드 단위 → 4텍셀까지만 같은 표면으로 본다.
+                float maxDist = 4f / Mathf.Max(0.001f, texelsPerWorldUnit);
+                mask = LightmapSSAA.DetectEdges(lm, rad, sidePx, ssaaEdgeThreshold,
+                                                Mathf.Cos(ssaaEdgeNormalAngleDeg * Mathf.Deg2Rad),
+                                                maxDist, ssaaEdgeDilate, out _);
+            }
+
+            int slots = 0;
+            for (int i = 0; i < mask.Length; i++) if (mask[i]) slots++;
+            if (slots == 0) return;
+
+            // 메모리 가드: 서브샘플 저장 ≈ slots*S²*25B. Full + 큰 sidePx 조합이 수백 MB 로 튀는 것을 막는다.
+            long estBytes = (long)slots * spt * 25L;
+            if (estBytes > 512L * 1024 * 1024)
+            {
+                Debug.LogWarning($"[AtlasApply] SSAA 스킵 — 서브샘플 버퍼 추정 {estBytes / (1024 * 1024)}MB (>512MB). " +
+                                 "ssaaMode=Adaptive 로 낮추거나 ssaaFactor/atlasResolution 을 줄이세요.", this);
+                return;
+            }
+
+            var ss = TexelMapper.MapSubsamples(uv2mesh, sidePx, l2w, S, mask);
+            if (ss.SlotCount == 0) return;
+
+            // 유효 서브샘플만 압축해 한 번에 베이크(1패스와 같은 백엔드·같은 원점 규약).
+            int cap = ss.SlotCount * spt;
+            var pts = new Vector3[cap];
+            var nrm = new Vector3[cap];
+            var sds = new uint[cap];
+            int n = 0;
+            for (int slot = 0; slot < ss.SlotCount; slot++)
+            {
+                int li = ss.TexelOfSlot[slot];
+                int b = slot * spt;
+                for (int s = 0; s < spt; s++)
+                {
+                    if (!ss.Valid[b + s]) continue;
+                    Vector3 wn = ss.WorldNormal[b + s];
+                    pts[n] = ss.WorldPos[b + s] + wn * surfaceBias;
+                    nrm[n] = wn;
+                    sds[n] = LightmapSSAA.SubSeed(seed, li, s);   // 서브샘플마다 다른 MC 노이즈 → 평균이 AA+디노이즈 겸함
+                    n++;
+                }
+            }
+            if (n == 0) return;
+
+            var sub = BakePoints(pts, nrm, sds, n);
+
+            // 평균 → 텍셀 덮어쓰기. 유효 서브샘플 0인 텍셀(중앙만 아슬하게 걸린 얇은 삼각형)은 1패스 값 유지.
+            int cursor = 0;
+            for (int slot = 0; slot < ss.SlotCount; slot++)
+            {
+                int b = slot * spt;
+                Vector3 sum = Vector3.zero; int cnt = 0;
+                for (int s = 0; s < spt; s++)
+                {
+                    if (!ss.Valid[b + s]) continue;
+                    sum += sub[cursor++];
+                    cnt++;
+                }
+                int li = ss.TexelOfSlot[slot];
+                if (cnt > 0) rad[li] = sum / cnt;
+                if (ssaaDebugMask) rad[li] = new Vector3(1f, 0f, 1f);   // 마스크 가시화(마젠타)
+            }
+
+            edgeTexels += ss.SlotCount;
+            subSamples += n;
         }
 
         // 재사용 GPU I/O 버퍼 홀더(grow-on-demand). per-instance 반복 DispatchRadianceGpu 에서
         //   ComputeBuffer 5개(pts/nrm/valid/seed/radiance) 를 매번 생성/해제하던 것을 제거 — 요청 n 이
         //   현재 capacity 를 초과할 때만 다음 2^k 로 (재)할당, 그 이하는 앞 n개만 SetData/readback 재사용.
-        //   수명: BakeGiLumelsGpu 경로는 인스턴스 필드(_gpuIo, _gpuScene 과 동일 수명), Backend Diff 메뉴는 로컬(finally 해제).
+        //   수명: BakePoints(GPU) 경로는 인스턴스 필드(_gpuIo, _gpuScene 과 동일 수명), Backend Diff 메뉴는 로컬(finally 해제).
         sealed class GpuIoBuffers : System.IDisposable
         {
             public ComputeBuffer Points, Normals, Valid, Seeds, Radiance;
@@ -878,7 +1046,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             }
         }
 
-        // CSRadiance 디스패치 공통(BakeGiLumelsGpu·Backend Diff 재사용). 입력 pts/nrm/seeds 는 길이 n.
+        // CSRadiance 디스패치 공통(BakePoints·Backend Diff 재사용). 입력 pts/nrm/seeds 는 길이 n.
         //   버퍼는 재사용 홀더 io 로 grow-on-demand(초과 시에만 재할당). uniform 규약은 BurstRadianceBaker 정합.
         //   ⚠ 데이터 경로 불변: 앞 n개만 업로드/읽기 + Dispatch (n+63)/64 + _Count=n 가드 → 이전 GetData 판과 바이트 동일.
         static Vector3[] DispatchRadianceGpu(GpuScene gpuScene, ComputeShader cs, int kernel,

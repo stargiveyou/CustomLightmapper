@@ -15,7 +15,7 @@
 | # | 문서 | 내용 |
 |---|------|------|
 | 01 | [기획 단계별 정리](01_기획_단계별_정리.md) | 2-트랙 아키텍처, 공유 계약, 결정 ①~⑫, 마일스톤 A/C/G/SH 시간순 |
-| 02 | [A트랙 — UV 파라미터화 A1~A4](02_A트랙_UV파라미터화_A1-A4.md) | Half-Edge → 차트분할 → 평탄화 → 패킹 → uv2 → 텍셀/ST |
+| 02 | [A트랙 — UV 파라미터화 A1~A4](02_A트랙_UV파라미터화_A1-A4.md) | Half-Edge → 차트분할 → 평탄화 → 패킹 → uv2 → 텍셀/SSAA/ST |
 | 03 | [C1 — 가속구조 BVH](03_C1_가속구조_BVH.md) | 단일 BVH(Median/SAH) + 2단 TLAS/BLAS, IOccluder |
 | 04 | [C2 — 라이팅 RadianceCore](04_C2_라이팅_RadianceCore.md) | AO / Direct(NEE) / Indirect(경로추적+RR), Sky, 씬 |
 | 05 | [후처리 — 스티칭·디레이션·디노이즈](05_후처리_스티칭_디레이션_디노이즈.md) | 시임 Tier1/2, 노멀 게이팅, Dilation, À-trous 디노이즈 |
@@ -37,6 +37,7 @@
 | 2 | 메시 구조(클린업→Half-Edge) | ✅ | `HalfEdge.cs` (`WeldedHalfEdge` weld 내장) |
 | 3 | 파라미터화(분할→UV2→정규화→패킹→통합) | ✅ | 평면투영 한정 (LSCM/MVC 스텁) |
 | 4 | 텍셀 복원(uv2→worldPos/normal) | ✅ | `TexelMapper.cs` |
+| 4* | SSAA 텍셀 내부 슈퍼샘플링(그림자 계단 제거) | ✅ | `TexelMapper.MapSubsamples` / `LightmapSSAA.cs` |
 | 4' | per-instance ST 할당 | ✅ | `LightmapAllocator.cs` |
 | 5 | 가속구조 BVH | ✅ 검증 | `BVH.cs` / `TwoLevelBVH.cs` |
 | 6 | 라이팅(AO/Direct/Indirect) | ✅ 검증 | `RadianceCore.cs` |
