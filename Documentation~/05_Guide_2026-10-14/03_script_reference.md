@@ -149,7 +149,7 @@ tags: [custom-lightmapper, guide, reference]
 
 | 파일 | 줄 | 컨텍스트 메뉴 | 설명 |
 |---|---|---|---|
-| **`AtlasApplyDebug.cs`** | **1633** | Bake & Apply · Restore Originals · From DirectionalLight Component · Radiance Diff Test · RadianceGI Backend Diff (CPU vs Burst / Burst vs GPU) · SSAA Self-Tests · Alpha Diagnose | ★ **엔드투엔드 베이커**. 대상 해석(`ResolveTargets`/`ResolveOccluderUnion`) → 할당 → 인스턴스 루프(파라미터화·텍셀·`BakeLumels`/`BakePoints`) → SSAA 2패스 → Denoise → Seam Stitch → Dilation → `Texture2DArray` → 렌더러 적용. GPU I/O는 `GpuIoBuffers`(grow-on-demand) + AsyncGPUReadback. 5모드 · 3백엔드 |
+| **`AtlasApplyDebug.cs`** | **1633** | Bake & Apply · Restore Originals · From DirectionalLight Component · Radiance Diff Test · RadianceGI Backend Diff (CPU vs Burst / Burst vs GPU) · SSAA Self-Tests · Alpha Diagnose — *2026-10-26 병합: `Runtime/LightmapAllocator/` 로 이동, Diff 3종·SSAA Self-Tests 는 같은 이름의 Editor CONTEXT 메뉴(`AtlasApplyDiffTestsMenu`), 결과 저장(`AtlasBakeAsset`)·RGBAHalf 추가* | ★ **엔드투엔드 베이커**. 대상 해석(`ResolveTargets`/`ResolveOccluderUnion`) → 할당 → 인스턴스 루프(파라미터화·텍셀·`BakeLumels`/`BakePoints`) → SSAA 2패스 → Denoise → Seam Stitch → Dilation → `Texture2DArray` → 렌더러 적용. GPU I/O는 `GpuIoBuffers`(grow-on-demand) + AsyncGPUReadback. 5모드 · 3백엔드 |
 | `SHRenderDemo.cs` | 393 | Bake + Render SH · Load Real Templates · Capture Screenshot | SH 인스턴싱 실 드로우 데모(Burst/GPU 베이크 토글, 기울기 테스트) |
 | `SHBakeDemo.cs` | 110 | Bake SH (Demo) | SH-1~4 엔드투엔드(기즈모만) |
 | `SHDebugView.cs` | 134 | — | SH 대표점 기즈모(Point/Cross/Sphere) |

@@ -32,7 +32,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         };
 
         [ContextMenu("Run Self Tests")]
-        public void RunSelfTests() => Log(LightmapAllocator.RunSelfTests());
+        public void RunSelfTests() => Log(LightmapAllocatorTests.RunSelfTests());
 
         [ContextMenu("Run Full Tests")]
         public void RunFullTests() => Log(LightmapAllocatorTests.RunAll());

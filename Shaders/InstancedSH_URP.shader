@@ -5,6 +5,8 @@
 //   DrawMeshInstancedIndirect 의 SV_InstanceID 로 _InstanceSH(SHPacked 7×float4) 인덱싱.
 //   조명 = SH(간접+환경, BurstSHBaker) + 메인 라이트 실시간(SH 밖: 링잉·그림자 뭉개짐 방지).
 //   비균등 스케일 대응: 노멀은 역전치 (M⁻¹)ᵀ 로 변환(등록 TwoLevelBVH.NormalMatrix 규약과 일치).
+//   _HUSKY_VERTEX_AO(Track B B1-5, 기본 꺼짐): uv3 = (앞면, 뒷면) 템플릿 로컬 정점 AO 를 간접광(SH)에만 곱함.
+//     키워드 꺼짐이면 이전과 같은 코드 — uv3 없는 메시에 켜면 간접광 0 이 되므로 AO 메시(VertexAOBake)에만 사용.
 // ============================================================================
 Shader "HuskyLibs/InstancedSH_URP"
 {
@@ -13,6 +15,8 @@ Shader "HuskyLibs/InstancedSH_URP"
         _Color      ("Albedo", Color)          = (1, 1, 1, 1)
         _SHStrength ("SH Strength", Range(0,4)) = 1
         _Exposure   ("Exposure", Range(0,4))    = 1
+        [Toggle(_HUSKY_VERTEX_AO)] _UseVertexAO ("Vertex AO (uv3 — AO mesh only)", Float) = 0
+        _VertexAOStrength ("Vertex AO Strength", Range(0,1)) = 1
     }
     SubShader
     {
@@ -32,6 +36,7 @@ Shader "HuskyLibs/InstancedSH_URP"
             // URP 메인 라이트 그림자 키워드
             #pragma multi_compile _ _MAIN_LIGHT_SHADOWS _MAIN_LIGHT_SHADOWS_CASCADE
             #pragma multi_compile _ _SHADOWS_SOFT
+            #pragma shader_feature_local _HUSKY_VERTEX_AO
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
@@ -44,6 +49,7 @@ Shader "HuskyLibs/InstancedSH_URP"
                 float4 _Color;
                 float  _SHStrength;
                 float  _Exposure;
+                float  _VertexAOStrength;
             CBUFFER_END
 
             // (M⁻¹)ᵀ 상단 3x3 — 비균등 스케일에서도 노멀이 표면에 수직 유지.
@@ -62,7 +68,14 @@ Shader "HuskyLibs/InstancedSH_URP"
                 return float3x3(r0 * invDet, r1 * invDet, r2 * invDet);
             }
 
-            struct Attributes { float4 positionOS : POSITION; float3 normalOS : NORMAL; };
+            struct Attributes
+            {
+                float4 positionOS : POSITION;
+                float3 normalOS : NORMAL;
+            #if defined(_HUSKY_VERTEX_AO)
+                float2 vertexAO : TEXCOORD3;   // (앞면, 뒷면) — VertexAOBake
+            #endif
+            };
             struct Varyings
             {
                 float4 positionCS : SV_POSITION;
@@ -70,6 +83,9 @@ Shader "HuskyLibs/InstancedSH_URP"
                 float3 worldP     : TEXCOORD1;
                 nointerpolation uint iid : TEXCOORD2;
                 float3 upW        : TEXCOORD3;   // 인스턴스 로컬 up 의 월드 방향(2-프로브 보간 축)
+            #if defined(_HUSKY_VERTEX_AO)
+                float2 vertexAO   : TEXCOORD4;
+            #endif
             };
 
             Varyings vert(Attributes v, uint iid : SV_InstanceID)
@@ -87,6 +103,9 @@ Shader "HuskyLibs/InstancedSH_URP"
                 o.positionCS = TransformWorldToHClip(worldP);
                 o.iid = iid;
                 o.upW = upW;
+            #if defined(_HUSKY_VERTEX_AO)
+                o.vertexAO = v.vertexAO;
+            #endif
                 return o;
             }
 
@@ -103,6 +122,9 @@ Shader "HuskyLibs/InstancedSH_URP"
                 float3 upAxis = normalize(i.upW);
                 float3 shIrradiance = EvaluateInstanceSH2Axis(_InstanceSH, i.iid, n, upAxis) * _SHStrength;
                 float3 indirect = albedo * shIrradiance;
+            #if defined(_HUSKY_VERTEX_AO)
+                indirect *= lerp(1.0, isFront ? i.vertexAO.x : i.vertexAO.y, _VertexAOStrength);   // 템플릿 로컬 자기차폐(간접만)
+            #endif
 
                 // (2) 직사광: URP 메인 라이트 실시간(SH 밖) + 그림자
                 float4 shadowCoord = TransformWorldToShadowCoord(i.worldP);

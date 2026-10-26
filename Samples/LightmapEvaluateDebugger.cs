@@ -70,11 +70,20 @@ namespace HuskyLibs.CustomLightmapper.Bake
             sb.AppendLine(BurstSHBakerTests.RunAll());           // SH-2 BurstSHBaker per-instance SH9(빈씬·그라디언트·hit 반사)
             sb.AppendLine(SHPackedTests.RunAll());               // SH-3 SHPacked 정렬 패킹(7×float4) Pack↔Unpack 왕복
             sb.AppendLine(SHEvalProbeGpuTests.RunAll());         // SH-5 셰이더 SH 디코드 ≡ CPU SH9.Evaluate(실 StructuredBuffer 왕복·렌더 컨텍스트 필요)
+            sb.AppendLine(SHInstanceIndexGpuTests.RunAll());     // SH-5 인스턴스 오프셋 인덱싱(iid*7/iid*14) ≡ CPU — stride-16 평탄버퍼 다중 프로브(렌더 컨텍스트 필요)
             sb.AppendLine(GpuBvhCompareTests.RunAll());          // G4 GPU 2단 BVH 순회 ≡ BurstTwoLevelBVH(실 ComputeBuffer 디스패치·compute 지원 필요)
             sb.AppendLine(GpuRadianceCompareTests.RunAll());     // G5 GPU 경로추적(AO/Direct/Indirect) ≡ Burst(실 ComputeBuffer 디스패치·compute 지원 필요)
             sb.AppendLine(GpuSHBakeCompareTests.RunAll());        // SH-G GPU CSSHBake per-probe SH9 ≡ BurstSHBaker(동일 방향셋·compute 지원 필요)
             sb.AppendLine(AlphaCutoutTests.RunAll());             // α 알파 컷아웃 any-hit: RayTriUV≡RayTri, CPU 해석적, Burst≡CPU, OFF 회귀
             sb.AppendLine(AlphaGpuCompareTests.RunAll());         // α GPU 알파 any-hit ≡ Burst(CSDirect, 무작위 없음 → 정확 일치·compute 지원 필요)
+            sb.AppendLine(AtlasHdrOutputTests.RunAll());          // step8 최종 인코딩 RGBAHalf: 숨김 큐브 실베이크 HDR/LDR 대조(URP 셰이더 필요)
+            sb.AppendLine(InstanceSceneBakerTests.RunAll());      // SH 실사용 컴포넌트: 에셋 구조·코어 API 정합·다바운스 결정성·EXR·렌더러 구성
+            sb.AppendLine(AtlasBakeAssetTests.RunAll());          // step9 텍스처 결과 저장·적용: 에셋·ApplyFromAsset·Restore·원본 추적·EXR(URP 셰이더 필요)
+            sb.AppendLine(ProbeGridTests.RunAll());               // Track B B1-1 프로브 격자: 인덱싱·FromBounds·선형장 trilinear·베이크 계약·열린 바닥 해석해·GPU
+            sb.AppendLine(ProbeValidityTests.RunAll());           // Track B B1-2 유효성: 닫힌 박스·Unity 큐브(미러)·단면 플레인·dilation·valid 가중 샘플·지면 아래 층
+            sb.AppendLine(ProbeVolumeBakerTests.RunAll());        // Track B B1-3 볼륨 베이커: 에셋·직접 파이프라인 ≡·Excluded 토글·Texture3D·인스턴스 샘플·수렴·EXR·렌더러(+B1-4 폴백·픽셀 바인딩)
+            sb.AppendLine(ProbeVolumeGpuSampleTests.RunAll());    // Track B B1-4 픽셀 볼륨 샘플 GPU ≡ CPU 미러(내부·텍셀 중심·클램프·페이드·normalBias·투과, 렌더 컨텍스트 필요)
+            sb.AppendLine(VertexAOBakeTests.RunAll());            // Track B B1-5 템플릿 로컬 정점 AO: ≡ BurstAO 직접·고립 AO=1·천장 아래 AO≈0·양면·AO 메시·베이커 연동
             Debug.Log(sb.ToString(), this);
         }
 
@@ -99,6 +108,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
         [ContextMenu("Run SH GPU Decode Test (SH-5)")]
         public void RunSHGpuDecodeTest() => Debug.Log(SHEvalProbeGpuTests.RunAll(), this);
 
+        [ContextMenu("Run SH GPU Instance Index Test (SH-5)")]
+        public void RunSHGpuInstanceIndexTest() => Debug.Log(SHInstanceIndexGpuTests.RunAll(), this);
+
         [ContextMenu("Run GPU BVH Compare (G4)")]
         public void RunGpuBvhCompare() => Debug.Log(GpuBvhCompareTests.RunAll(), this);
 
@@ -113,6 +125,20 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
         [ContextMenu("Run Alpha GPU Compare (a)")]
         public void RunAlphaGpuCompare() => Debug.Log(AlphaGpuCompareTests.RunAll(), this);
+
+        [ContextMenu("Run Atlas HDR Output Test (step 8)")]
+        public void RunAtlasHdrOutputTest() => Debug.Log(AtlasHdrOutputTests.RunAll(), this);
+
+        [ContextMenu("Run Instance Scene Baker Test (SH)")]
+        public void RunInstanceSceneBakerTest() => Debug.Log(InstanceSceneBakerTests.RunAll(), this);
+
+        [ContextMenu("Run Atlas Bake Asset Test (step 9)")]
+        public void RunAtlasBakeAssetTest() => Debug.Log(AtlasBakeAssetTests.RunAll(), this);
+
+        [ContextMenu("Run Probe Volume Tests (Track B B1-1 ~ B1-5)")]
+        public void RunProbeVolumeTests() =>
+            Debug.Log(ProbeGridTests.RunAll() + "\n" + ProbeValidityTests.RunAll() + "\n" + ProbeVolumeBakerTests.RunAll()
+                      + "\n" + ProbeVolumeGpuSampleTests.RunAll() + "\n" + VertexAOBakeTests.RunAll(), this);
 
         [ContextMenu("Run BVH Mesh Test")]
         public void RunBVHMeshTest()

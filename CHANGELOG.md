@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Merged — UnityStudyProject 브랜치(v14.12~v15.10) 병합 (2026-10-26)
+패키지 0.14.0 이후 UnityStudyProject 에서 따로 진행된 작업을 패키지로 합침(3-way, 상세 `Documentation~/02_Development_And_Reference/커스텀_라이트매퍼_개발문서_v15.md` §12 v15.11).
+- **SH 트랙**: SH-2 다바운스(Burst `BurstSHBaker.BakeMultiBounce` + GPU `CSSHBakeMulti`), 1바운스 반사 규약을 물리 규약(ρ/π·E)으로 통일, 실사용 컴포넌트 `InstanceSceneBaker` + 결과 `InstanceSHBakeAsset`(SO) + EXR, 2-프로브 대표점 `TemplateInstanceSource.ComputeProbePoints`(씬·템플릿 단위), `SHInstanceIndexGpuTests`·`InstanceSceneBakerTests`·`BurstSHBakerTests` D~H.
+- **텍스처 라이트맵**: 최종 인코딩 RGBAHalf(`hdrOutput`), 결과 저장 `AtlasBakeAsset`(SO: 아틀라스·머티리얼·uv2 메시 + 엔트리) + 페이지 EXR, OnEnable 에셋 적용(`applyOnEnable`), 원본 추적(`OriginalOf`), `BakeOutputUtil`, `PathTraceShader` 로더, `AtlasHdrOutputTests`·`AtlasBakeAssetTests`.
+- **Track B 식생 프로브 볼륨(신규 `Runtime/ProbeVolume/`)**: `ProbeGrid`(균일 격자·trilinear·베이크 연결) · `BurstProbeValidity`(뒷면 비율 유효성·dilation) · `ProbeVolumeAsset`(SO + Texture3D×7 RGBAHalf + EXR) · `ProbeVolumeBaker`(볼륨 베이크·저장·인스턴스 적용·기즈모) · `ProbeVolumeShaderBinding` + `Shaders/HuskyProbeVolume.hlsl` + `Shaders/InstancedVegetation_URP.shader`(픽셀 볼륨 샘플·알파 클립·잎 투과) · `VertexAOBake`(템플릿 로컬 정점 AO, uv3). 테스트 `Tests/ProbeVolume/` 5종. 설계 `Documentation~/01_Planning_And_Design/커스텀_라이트매퍼_TrackB_식생프로브_설계.md`.
+- 셰이더: `InstancedSH_URP` 에 선택 키워드 `_HUSKY_VERTEX_AO`(기본 꺼짐), 검증용 `SHEvalInstance.shader`·`ProbeVolumeSampleTest.shader`.
+- 문서: 기획서·개발문서 v15 추가(+ v15.11 병합 기록 — 2026-08-18 로드맵을 v15 §10/§11 로 합침), v14 는 이력 보존, Track B 설계 추가.
+
+### Changed (병합)
+- **`AtlasApplyDebug` 를 `Samples/` → `Runtime/LightmapAllocator/`** 로 이동(텍스처 베이크 드라이버·결과 저장/런타임 적용 = 실사용 코드, GUID 유지). 내장 Diff 3종은 `Tests/AtlasApplyDiffTests` + `Editor/AtlasApplyDiffTestsMenu`(같은 CONTEXT 메뉴명)로, `SSAA Self-Tests` 메뉴도 Editor CONTEXT 메뉴로.
+- `LightmapAllocator.RunSelfTests` → `Tests/LightmapAllocatorTests.RunSelfTests`.
+- 베이크 결과 기본 저장 폴더: `Assets/CustomLightmapper/BakeOutput`(소비 프로젝트 Assets 하위).
+- `InstancedSHRenderer`: SH 버퍼 선택(null 허용 — 볼륨 셰이더용) + `Properties`(MPB) 공개.
+
 ### Added
 - **SSAA(텍셀 내부 슈퍼샘플링)** — 그림자 경계의 텍셀 계단 제거. 기존 래스터는 텍셀 정중앙 1점만 복원해 서브텍셀 커버리지 정보가 없었고, 태양 원반 샘플링(`DirectSamples`+`AngularDiameterDeg`)으로 반그림자를 만들어도 그 폭이 텍셀보다 작으면 다시 한 텍셀에 뭉개졌다.
   - `TexelMapper.MapSubsamples` + `LumelSubsamples`: 요청한 텍셀만 S×S 서브샘플로 재래스터(압축 슬롯 저장). `TexelMapper.SubOffset` 은 u=층화·v=황금비 저불일치 → 두 축 모두 S² 단계 계조(정규격자는 한 축이 S 단계뿐).

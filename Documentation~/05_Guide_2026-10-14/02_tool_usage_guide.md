@@ -66,7 +66,7 @@ tags: [custom-lightmapper, guide, usage]
 
 ## 2. AtlasApplyDebug — 메인 베이크 도구
 
-`Samples/AtlasApplyDebug.cs` · `[ExecuteAlways]` · 현재 유일한 엔드투엔드 베이크 진입점.
+`Runtime/LightmapAllocator/AtlasApplyDebug.cs`(2026-10-26 병합으로 Samples → Runtime) · `[ExecuteAlways]` · 텍스처 라이트맵 엔드투엔드 베이크 진입점(SH 는 `InstanceSceneBaker`, 식생 프로브 볼륨은 `ProbeVolumeBaker`).
 
 ### 2.1 컨텍스트 메뉴
 

@@ -1,4 +1,3 @@
-
 using UnityEngine;
 using System.Collections.Generic;
 using System;
@@ -70,6 +69,9 @@ indirect 셰이더: SH9를 표면 노멀로 평가 + 직사광(실시간) → �
         public enum ShBakeBackend { Burst, Gpu }
         [Header("SH 베이크 백엔드")]
         public ShBakeBackend shBakeBackend = ShBakeBackend.Burst;
+        [Tooltip("1 = 1바운스+앰비언트 근사. ≥2 = 경로추적 다바운스. 둘 다 텍스처 라이트맵과 같은 물리 규약(v15.3 통일), Burst/GPU 지원.")]
+        [Range(1, 8)] public int shBounces = 1;
+        public uint shSeed = 12345;
 
 
         [ContextMenu("Bake + Render SH")]
@@ -136,37 +138,23 @@ indirect 셰이더: SH9를 표면 노멀로 평가 + 직사광(실시간) → �
             // SH 베이크 백엔드 셋업. 기본 Burst(무변경). Gpu 는 검증된 GpuSHBaker(≡BurstSHBaker) 사용.
             // 불가 시(compute 미지원/셰이더 로드 실패/커널 미발견) Burst 폴백.
             GpuScene gpuScene = null; ComputeShader shCs = null; int kSH = -1; bool useGpu = false;
+            bool multiBounce = shBounces > 1;
+            var bounceQ = new BakeQualitySettings { MaxBounces = shBounces, RRStartDepth = 3, RayBias = 1e-4f }; // 다바운스 전용
             if (shBakeBackend == ShBakeBackend.Gpu && SystemInfo.supportsComputeShaders)
             {
                 shCs = Resources.Load<ComputeShader>("PathTrace"); // Shaders/Resources 배치 → 에디터·빌드 공통 로드
-                if (shCs != null) { kSH = shCs.FindKernel("CSSHBake"); if (kSH >= 0) { gpuScene = new GpuScene(bScene); useGpu = true; } }
+                if (shCs != null) { kSH = shCs.FindKernel(multiBounce ? "CSSHBakeMulti" : "CSSHBake"); if (kSH >= 0) { gpuScene = new GpuScene(bScene); useGpu = true; } }
             }
             if (shBakeBackend == ShBakeBackend.Gpu && !useGpu)
                 Debug.LogWarning("[SHRenderDemo] GPU SH 백엔드 사용 불가(compute 미지원/셰이더 로드/커널 미발견) → Burst 폴백.", this);
 
             var nInst = s.instances.Length;
 
-            //전 인스턴스 Bake — 상단/하단 2프로브(면별 수직음영). 상·하단 모두 anchorMode 대칭 적용
-            // (기존: 하단이 AABB min.y 고정이라 SurfaceNormalOffset 등에서 상·하 규칙 불일치 → 실 메시에서
-            //  하단 프로브가 지오메트리 안/지면 아래로 들어갈 수 있었음). 템플릿별 로컬 앵커를 1회 산출 후
-            //  인스턴스 M 으로 변환. 리프트는 liftRelativeToBounds 면 템플릿 높이 비례.
-            var topLocal = new Vector3[nTemplate]; var topWL = new float[nTemplate];
-            var botLocal = new Vector3[nTemplate]; var botWL = new float[nTemplate];
-            for (int t = 0; t < nTemplate; t++)
-            {
-                var b = meshes[t].bounds;
-                float lift = liftRelativeToBounds ? surfaceLift * b.size.y : surfaceLift;
-                TemplateInstanceSource.ComputeLocalAnchor(anchorMode, b, s.uniqueMeshes[t], lift, top: true, out topLocal[t], out topWL[t]);
-                TemplateInstanceSource.ComputeLocalAnchor(anchorMode, b, s.uniqueMeshes[t], lift, top: false, out botLocal[t], out botWL[t]);
-            }
-            var topPts = new NativeArray<Vector3>(nInst, Allocator.TempJob);
-            var botPts = new NativeArray<Vector3>(nInst, Allocator.TempJob);
-            for (int i = 0; i < nInst; i++)
-            {
-                int t = s.instances[i].MeshIndex;
-                topPts[i] = s.instances[i].LocalToWorld.MultiplyPoint3x4(topLocal[t]) + Vector3.up * topWL[t];
-                botPts[i] = s.instances[i].LocalToWorld.MultiplyPoint3x4(botLocal[t]) + Vector3.up * botWL[t];
-            }
+            //전 인스턴스 Bake — 상단/하단 2프로브(면별 수직음영). 상·하단 모두 anchorMode 대칭 적용.
+            // 배치 규칙은 코어 TemplateInstanceSource.ComputeProbePoints(InstanceSceneBaker 와 공용)로 단일화.
+            TemplateInstanceSource.ComputeProbePoints(s, meshes, anchorMode, surfaceLift, liftRelativeToBounds, out var topProbe, out var botProbe);
+            var topPts = new NativeArray<Vector3>(topProbe, Allocator.TempJob);
+            var botPts = new NativeArray<Vector3>(botProbe, Allocator.TempJob);
             // 양 백엔드 모두 SH9[] 산출 → 다운스트림 shTop[i]/shBot[i] 접근 무변경.
             SH9[] shTop, shBot;
             try
@@ -179,8 +167,23 @@ indirect 셰이더: SH9를 표면 노멀로 평가 + 직사광(실시간) → �
                     float shWeight = 4f * Mathf.PI / shDir;
                     Vector3[] topArr = topPts.ToArray();
                     Vector3[] botArr = botPts.ToArray();
-                    shTop = GpuSHBaker.Bake(gpuScene, shCs, kSH, sunDL, sky, topArr, dirs, shWeight);
-                    shBot = GpuSHBaker.Bake(gpuScene, shCs, kSH, sunDL, sky, botArr, dirs, shWeight);
+                    if (multiBounce)
+                    {
+                        // 다바운스 GPU(CSSHBakeMulti ≡ Burst SHPathJob). 상/하단 시드는 Burst 경로와 동일.
+                        shTop = GpuSHBaker.BakeMultiBounce(gpuScene, shCs, kSH, sunDL, sky, bounceQ, shSeed, topArr, dirs, shWeight);
+                        shBot = GpuSHBaker.BakeMultiBounce(gpuScene, shCs, kSH, sunDL, sky, bounceQ, shSeed ^ 0x5bd1e995u, botArr, dirs, shWeight);
+                    }
+                    else
+                    {
+                        shTop = GpuSHBaker.Bake(gpuScene, shCs, kSH, sunDL, sky, topArr, dirs, shWeight);
+                        shBot = GpuSHBaker.Bake(gpuScene, shCs, kSH, sunDL, sky, botArr, dirs, shWeight);
+                    }
+                }
+                else if (multiBounce)
+                {
+                    // 다바운스 경로추적(Burst). 상/하단은 시드를 달리해 프로브 간 노이즈 상관 제거.
+                    shTop = ToArray(BurstSHBaker.BakeMultiBounce(bScene, sky, sunDL, bounceQ, topPts, shDir, shSeed, Allocator.TempJob));
+                    shBot = ToArray(BurstSHBaker.BakeMultiBounce(bScene, sky, sunDL, bounceQ, botPts, shDir, shSeed ^ 0x5bd1e995u, Allocator.TempJob));
                 }
                 else
                 {

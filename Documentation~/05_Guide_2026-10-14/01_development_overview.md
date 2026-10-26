@@ -56,7 +56,7 @@ flowchart TD
   TM --> BV --> RD --> SS --> PP --> OUT
 ```
 
-> 실제 오케스트레이션은 `Samples/AtlasApplyDebug.cs`의 `BakeAndApply()`가 한다.
+> 실제 오케스트레이션은 `Runtime/LightmapAllocator/AtlasApplyDebug.cs`(2026-10-26 병합으로 Samples → Runtime)의 `BakeAndApply()`가 한다.
 > 아직 Runtime에 독립 "베이커 API"는 없고, 이 컴포넌트가 사실상의 베이커다.
 
 ---

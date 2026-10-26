@@ -17,6 +17,10 @@ namespace HuskyLibs.CustomLightmapper.Bake
     ///
     /// 잔여 발산원: 순회/닷곱의 fp 반올림, near-tie 히트 선택 경계(드묾) → max 는 가끔 스파이크, mean 은 타이트.
     ///
+    /// 다바운스(CSSHBakeMulti ≡ BurstSHBaker.BakeMultiBounce): 같은 방향셋·seed·q. RNG 비트동일, 코사인 샘플의
+    ///   sqrt/sin/cos 만 하드웨어 차이 → G5 Indirect 와 같은 통계 기준(mean). 닫힌 박스에선 경로가 빛을 못 만나
+    ///   전부 0 이 되므로 바닥 + 열린 씬을 따로 쓰고, 결과가 0 이 아닌지(비자명성) 함께 확인.
+    ///
     /// ⚠️ 렌더 컨텍스트 필요(에디터/플레이) — 헤드리스 CI 불가. compute 미지원 → SKIP.
     /// 호출: Debug.Log(GpuSHBakeCompareTests.RunAll());
     /// </summary>
@@ -25,6 +29,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         const int   DirCount   = 256;   // 피보나치 방향 수(Burst/GPU 공유)
         const float MeanGate   = 1e-3f; // PASS 게이트(기대 실측 ~1e-4)
         const float EpsCoeff   = 1e-4f; // over 카운트 임계
+        const float MultiMeanGate = 1e-3f; // 다바운스 PASS 게이트(경로 발산은 드문 near-tie 뿐 — G5 Indirect 실측 mean ~1e-9)
 
         static ComputeShader LoadCompute()
         {
@@ -75,21 +80,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             SH9[] gpuSH = GpuSHBaker.Bake(gpu, cs, kSH, sun, skyM, points, dirs, weight);
 
             // ── 대조: 프로브별 9계수(각 RGB 성분) |gpu-cpu| ──
-            double sum = 0; float maxErr = 0f; int over = 0; long samples = 0;
-            for (int i = 0; i < n; i++)
-            {
-                for (int k = 0; k < SH9.Count; k++)
-                {
-                    Vector3 dvec = Coeff(cpu[i], k) - Coeff(gpuSH[i], k);
-                    float ex = Mathf.Abs(dvec.x), ey = Mathf.Abs(dvec.y), ez = Mathf.Abs(dvec.z);
-                    float e = Mathf.Max(ex, Mathf.Max(ey, ez));
-                    if (e > maxErr) maxErr = e;
-                    sum += ex; sum += ey; sum += ez;
-                    samples += 3;
-                    if (e > EpsCoeff) over++;
-                }
-            }
-            float mean = samples > 0 ? (float)(sum / samples) : 0f;
+            Compare(cpu, gpuSH, n, out float mean, out float maxErr, out int over);
 
             Check(sb, ref pass, ref total,
                 $"SH-G CSSHBake ≡ Burst (n={n}, dirs={DirCount}, mean={mean:E2}, max={maxErr:E2}, over({EpsCoeff:E0})={over}/{n * SH9.Count})",
@@ -98,10 +89,57 @@ namespace HuskyLibs.CustomLightmapper.Bake
             sb.AppendLine($"  [info] TLAS nodes={bvh.TlasNodeCount}, inst={bvh.InstanceCount}, BLAS={bvh.BlasCount}");
             sb.AppendLine("  [info] 동일 방향셋+다항식 기저+G4 순회 ⇒ near-bit-identical. max 스파이크=near-tie 히트 경계(드묾).");
 
+            // ── 다바운스: CSSHBakeMulti ≡ BurstSHBaker.BakeMultiBounce (바닥 + 열린 씬) ──
+            int kMulti = cs.FindKernel("CSSHBakeMulti");
+            if (kMulti < 0) Check(sb, ref pass, ref total, "다바운스 커널(CSSHBakeMulti) 미발견", false);
+            else
+            {
+                BuildOpenScene(out var oMeshes, out var oAlbedo, out var oInsts);
+                using var oBvh = new TwoLevelBVH(oMeshes, oInsts, Allocator.TempJob, BVH.BuildQuality.SAH);
+                using var oScene = BurstScene.Create(oBvh, oAlbedo, Allocator.TempJob);
+                using var oGpu = new GpuScene(oScene);
+
+                var q = new BakeQualitySettings { MaxBounces = 4, RRStartDepth = 3, RayBias = 1e-4f };   // b+1=3 에서 RR 경로도 통과
+                const uint seed = 12345u;
+                var cpuM = BurstSHBaker.BakeMultiBounce(oScene, skyM, sun, q, naPts, DirCount, seed, Allocator.TempJob);
+                SH9[] gpuM = GpuSHBaker.BakeMultiBounce(oGpu, cs, kMulti, sun, skyM, q, seed, points, dirs, weight);
+
+                Compare(cpuM, gpuM, n, out float meanM, out float maxM, out int overM);
+                float c0Mean = 0f;
+                for (int i = 0; i < n; i++) c0Mean += cpuM[i].c0.magnitude;
+                c0Mean /= Mathf.Max(1, n);
+
+                Check(sb, ref pass, ref total,
+                    $"SH-2 다바운스 CSSHBakeMulti ≈ Burst (bounces={q.MaxBounces}, RR≥{q.RRStartDepth}, mean={meanM:E2}, max={maxM:E2}, over({EpsCoeff:E0})={overM}/{n * SH9.Count})",
+                    meanM < MultiMeanGate);
+                Check(sb, ref pass, ref total, $"SH-2 다바운스 비자명성 (평균 |c0|={c0Mean:0.000} > 0.01)", c0Mean > 0.01f);
+                cpuM.Dispose();
+            }
+
             naPts.Dispose(); naDirs.Dispose(); cpu.Dispose();
 
             sb.AppendLine($"--- {pass}/{total} PASS ---");
             return sb.ToString();
+        }
+
+        // 프로브별 9계수(각 RGB 성분) |gpu-cpu| → mean / max / over(EpsCoeff).
+        static void Compare(NativeArray<SH9> cpu, SH9[] gpu, int n, out float mean, out float maxErr, out int over)
+        {
+            double sum = 0; maxErr = 0f; over = 0; long samples = 0;
+            for (int i = 0; i < n; i++)
+            {
+                for (int k = 0; k < SH9.Count; k++)
+                {
+                    Vector3 dvec = Coeff(cpu[i], k) - Coeff(gpu[i], k);
+                    float ex = Mathf.Abs(dvec.x), ey = Mathf.Abs(dvec.y), ez = Mathf.Abs(dvec.z);
+                    float e = Mathf.Max(ex, Mathf.Max(ey, ez));
+                    if (e > maxErr) maxErr = e;
+                    sum += ex; sum += ey; sum += ez;
+                    samples += 3;
+                    if (e > EpsCoeff) over++;
+                }
+            }
+            mean = samples > 0 ? (float)(sum / samples) : 0f;
         }
 
         // SH9 의 k 번째 계수(0..8) → Vector3. 필드가 개별 멤버라 스위치로 접근.
@@ -148,6 +186,24 @@ namespace HuskyLibs.CustomLightmapper.Bake
                     new Vector3(0.6f + (float)rng.NextDouble(), 0.6f + (float)rng.NextDouble(), 0.6f + (float)rng.NextDouble()));
                 list.Add(new TwoLevelBVH.Instance { MeshIndex = 1, LocalToWorld = trs });
             }
+            insts = list.ToArray();
+        }
+
+        // 다바운스용 열린 씬: 큰 바닥(y=-3) + 회전·비균등 박스 5개(BuildScene 과 같은 난수열). 태양·하늘이 경로에 닿음.
+        static void BuildOpenScene(out Tri[][] meshes, out Vector3[] albedo, out TwoLevelBVH.Instance[] insts)
+        {
+            BuildScene(out var boxMeshes, out var boxAlbedo, out var boxInsts);   // [0]=enclosing 박스(제외), [1]=내부 박스
+            const float h = 20f, y = -3f;
+            var floor = new[]
+            {
+                new Tri { V0 = new Vector3(-h, y, -h), V1 = new Vector3(-h, y, h), V2 = new Vector3(h, y, h) },
+                new Tri { V0 = new Vector3(-h, y, -h), V1 = new Vector3(h, y, h),  V2 = new Vector3(h, y, -h) },
+            };
+            meshes = new[] { floor, boxMeshes[1] };
+            albedo = new[] { new Vector3(0.6f, 0.6f, 0.6f), boxAlbedo[1] };
+            var list = new List<TwoLevelBVH.Instance> { new TwoLevelBVH.Instance { MeshIndex = 0, LocalToWorld = Matrix4x4.identity } };
+            for (int i = 1; i < boxInsts.Length; i++)
+                list.Add(new TwoLevelBVH.Instance { MeshIndex = 1, LocalToWorld = boxInsts[i].LocalToWorld });
             insts = list.ToArray();
         }
 

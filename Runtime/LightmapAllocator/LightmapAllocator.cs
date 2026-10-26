@@ -141,61 +141,6 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
             return new AllocationResult { Instances = outLM, PageCount = pages, Resolution = r, Utilization = util, Overflow = overflow };
         }
-
-
-        public static string RunSelfTests()
-        {
-            var sb = new System.Text.StringBuilder();
-            sb.AppendLine("=== A4 per-instance ST Self-Tests ===");
-
-            // 단위 큐브 area=6, 스케일 1/2/0.5 → 월드면적 6/24/1.5 → 변 비율 1:2:0.5
-            var insts = new[]
-            {
-                new LightmapInstance { InstanceId = 1, WorldArea = 6f },
-                new LightmapInstance { InstanceId = 2, WorldArea = 24f },
-                new LightmapInstance { InstanceId = 3, WorldArea = 1.5f },
-            };
-            var r = Allocate(insts, AllocationSettings.Default);
-            float s1 = Find(r, 1).ScaleOffset.x, s2 = Find(r, 2).ScaleOffset.x, s05 = Find(r, 3).ScaleOffset.x;
-            bool ratio = Mathf.Abs(s2 / s1 - 2f) < 0.05f && Mathf.Abs(s05 / s1 - 0.5f) < 0.05f;
-            bool ok = ratio && StInRange(r) && NoOverlap(r) && r.PageCount == 1;
-            sb.AppendLine($"[{(ok ? "PASS" : "FAIL")}] 3 cubes(1/2/0.5): pages={r.PageCount}, util={r.Utilization:P1}, sideRatio(2:1:0.5)={ratio}, ST∈[0,1]={StInRange(r)}, noOverlap={NoOverlap(r)}");
-
-            // 페이지 오버플로: 단위 큐브 200개
-            var many = new LightmapInstance[200];
-            for (int i = 0; i < 200; i++) many[i] = new LightmapInstance { InstanceId = i, WorldArea = 6f };
-            var r2 = Allocate(many, AllocationSettings.Default);
-            bool ok2 = r2.PageCount > 1 && StInRange(r2) && NoOverlap(r2);
-            sb.AppendLine($"[{(ok2 ? "PASS" : "FAIL")}] 200 cubes: pages={r2.PageCount}, util={r2.Utilization:P1}, ST∈[0,1]={StInRange(r2)}, noOverlap={NoOverlap(r2)}");
-            return sb.ToString();
-        }
-
-        private static InstanceLM Find(AllocationResult r, int id)
-        { foreach (var lm in r.Instances) if (lm.InstanceId == id) return lm; return default; }
-
-        private static bool StInRange(AllocationResult r)
-        {
-            foreach (var lm in r.Instances)
-            {
-                var st = lm.ScaleOffset;
-                if (st.z < -1e-4f || st.z + st.x > 1 + 1e-4f || st.w < -1e-4f || st.w + st.y > 1 + 1e-4f) return false;
-            }
-            return true;
-        }
-
-        private static bool NoOverlap(AllocationResult r)
-        {
-            var a = r.Instances;
-            for (int i = 0; i < a.Length; i++)
-                for (int j = i + 1; j < a.Length; j++)
-                {
-                    if (a[i].LightmapIndex != a[j].LightmapIndex) continue;
-                    Vector4 A = a[i].ScaleOffset, B = a[j].ScaleOffset;
-                    bool sep = A.z + A.x <= B.z || B.z + B.x <= A.z || A.w + A.y <= B.w || B.w + B.y <= A.w;
-                    if (!sep) return false;
-                }
-            return true;
-        }
     }
 
 }

@@ -59,6 +59,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
         public bool dilateBurst = true;
         [Tooltip("아틀라스 샘플링 필터. Point=텍셀 그대로(블록) / Bilinear=텍셀 보간(GI 노이즈·계단 시각적 완화).")]
         public FilterMode atlasFilter = FilterMode.Point;
+        [Tooltip("최종 인코딩(결정 ①): Radiance/RadianceGI 아틀라스를 RGBAHalf 선형 HDR(무클램프)로 저장 — 1 을 넘는 직사광도 보존되고 스티칭·dilation 이 클램프 전 값을 평균. 끄면 RGBA32 + 0~1 클램프(LDR, 구 동작). 매핑 검증 모드는 항상 RGBA32.")]
+        public bool hdrOutput = true;
 
         [Header("Denoise (À-trous Joint Bilateral — Radiance/RadianceGI 전용, Seam Stitch 직전)")]
         [Tooltip("몬테카를로 노이즈(그레인) 제거. 텍셀별 월드 노멀·위치·색 가이드의 에지 보존 필터 — 하드 엣지·차트 경계·그림자 경계는 보존하고 평탄면 노이즈만 평활(LightmapDenoise).")]
@@ -155,6 +157,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
         public enum RadianceBackend { CPU, Burst, Gpu }
         [Tooltip("RadianceGI 베이크 경로. Gpu=컴퓨트셰이더(대형 씬 최고속), Burst=병렬(권장), CPU=기존.")]
         public RadianceBackend radianceBackend = RadianceBackend.CPU;
+        [Tooltip("Gpu 백엔드용 PathTrace.compute. 비우면 Resources → (에디터) 프로젝트 경로에서 찾음. 플레이어 빌드에서 GPU 베이크 시 지정.")]
+        public ComputeShader pathTraceShader;
 
 
 
@@ -200,6 +204,18 @@ namespace HuskyLibs.CustomLightmapper.Bake
         bool _gpuReady;
         GpuIoBuffers _gpuIo;   // 재사용 GPU I/O 버퍼(_gpuScene 과 동일 수명). per-instance Dispatch 의 5×N alloc/dispose 제거.
 
+        [Header("Bake Result (저장 · 런타임 로드)")]
+        [Tooltip("베이크 결과 에셋(SO). applyOnEnable 이면 OnEnable 에 이걸로 적용 — 플레이/빌드에서 베이크 없이 동작.")]
+        public AtlasBakeAsset bakeAsset;
+        [Tooltip("라이팅 모드(Radiance/RadianceGI) 베이크 후 자동 저장(SO + EXR 페이지). 에디터 전용. 매핑 검증 모드는 저장 안 함.")]
+        public bool saveBakeResult = true;
+        [Tooltip("에셋·EXR 저장 폴더(Assets/ 하위).")]
+        public string outputFolder = "Assets/CustomLightmapper/BakeOutput";   // 소비 프로젝트 Assets/ 하위(패키지 폴더 밖)
+        [Tooltip("페이지별 EXR 사본도 저장(half float, 선형).")]
+        public bool exportExr = true;
+        [Tooltip("OnEnable 에 bakeAsset 적용(메시·머티리얼 + ST/페이지 MPB). MPB 는 씬에 저장되지 않아 로드마다 다시 적용해야 함.")]
+        public bool applyOnEnable = true;
+
         [Header("Result (read-only)")]
         [SerializeField] int instanceCount;
         [SerializeField] int pageCount;
@@ -207,6 +223,17 @@ namespace HuskyLibs.CustomLightmapper.Bake
         [SerializeField] bool overflow;
         [SerializeField] Texture2DArray atlas;
         [SerializeField] Material sharedMat;
+
+        // 이번 베이크의 아틀라스 인코딩(BakeAndApply 에서 1회 결정 → BlitRegion·아틀라스 생성이 공유)
+        bool _hdrAtlas;
+
+        // 마지막 베이크의 인스턴스 기록(저장용 — 세션 런타임 상태, 직렬화 안 함)
+        struct BakeRecord { public MeshFilter filter; public Mesh source; public Material sourceMat; public Mesh uv2; public Vector4 st; public int page; }
+        readonly System.Collections.Generic.List<BakeRecord> _lastBake = new System.Collections.Generic.List<BakeRecord>();
+
+        // 검증(Tests 어셈블리)용 결과 접근 — 베이크 결과 아틀라스·적용 머티리얼(둘 다 DontSave 런타임 객체)
+        internal Texture2DArray Atlas => atlas;
+        internal Material SharedMaterial => sharedMat;
 
         // 원복용 — 적용한 렌더러와 그 원본 메시/머티리얼
         [SerializeField] MeshFilter[] _appliedFilters;
@@ -220,183 +247,6 @@ namespace HuskyLibs.CustomLightmapper.Bake
             GutterTexels = Mathf.Max(0, gutterTexels),
             MaxPages = Mathf.Max(1, maxPages),
         };
-
-        // 머티리얼 차등 테스트: 같은 텍셀 점에서 BruteForce vs BVH 로 구운 radiance 픽셀 차이 측정.
-        // 같은 seed → AO 샘플 방향 동일 → BVH≡brute 면 차이=0 이어야 한다(베이크에 쓰이는 실제 레이로 검증).
-        // 0 이 아니면 = 그 텍셀/AO 샘플에서 BVH 차폐가 brute 와 어긋남(랜덤 퍼즈가 놓친 엣지 포함).
-        [ContextMenu("Radiance Diff Test (BruteForce vs BVH)")]
-        public void RadianceDiffTest()
-        {
-            var filters = ResolveTargets();
-            if (filters.Length == 0) { Debug.LogWarning("[AtlasApply] DiffTest: 대상 MeshFilter 없음.", this); return; }
-
-            var tris = BuildWorldTris(filters);
-            var brute = new BruteForceOccluder(tris);
-            using var bvh = new BVH(tris, Unity.Collections.Allocator.Persistent, bvhQuality);
-
-            var sun = new DirectionalLight
-            {
-                Direction = lightDirection.sqrMagnitude > 1e-8f ? lightDirection.normalized : Vector3.down,
-                Color = LinColor(lightColor),
-                Intensity = lightIntensity,
-                AngularDiameterDeg = sunAngularDiameterDeg,
-            };
-            Vector3 amb = LinColor(ambient);
-            int res = Mathf.Clamp(atlasResolution, 4, 512); // 텍셀 해상도(인스턴스별). 비교는 점-단위라 작게 충분.
-
-            const float thresh = 1f / 255f;                 // 8-bit 1 LSB
-            double maxDiff = 0, sumDiff = 0; long nTexel = 0, over = 0;
-
-            foreach (var mf in filters)
-            {
-                var srcMesh = mf.sharedMesh;
-                if (srcMesh == null || !srcMesh.isReadable) continue;
-
-                Mesh uv2mesh; LumelMap lumel;
-                try
-                {
-                    var pr = ParameterizationPipeline.Run(srcMesh, segmentation);
-                    if (pr.Charts == null || pr.Charts.Length == 0) continue;
-                    DensityNormalizer.Normalize(pr.Charts);
-                    ShelfPacker.Pack(pr.Charts, chartGutter);
-                    (uv2mesh, _) = UVAssembly.Assemble(pr.Charts, srcMesh);
-                    lumel = TexelMapper.Map(uv2mesh, res, mf.transform.localToWorldMatrix);
-                }
-                catch (System.Exception e) { Debug.LogError($"[DiffTest] '{mf.name}' 실패: {e.Message}", mf); continue; }
-
-                for (int li = 0; li < lumel.Valid.Length; li++)
-                {
-                    if (!lumel.Valid[li]) continue;
-                    Vector3 wn = lumel.WorldNormal[li];
-                    Vector3 o = lumel.WorldPos[li] + wn * surfaceBias;
-                    uint s = seed + (uint)li * 2654435761u;  // BlitRegion 과 동일 시드 규약
-                    Vector3 rb = RadianceCore.EvaluateRadiance(brute, o, wn, sun, amb, aoSamples, s);
-                    Vector3 rv = RadianceCore.EvaluateRadiance(bvh, o, wn, sun, amb, aoSamples, s);
-                    float d = Mathf.Max(Mathf.Abs(rb.x - rv.x), Mathf.Max(Mathf.Abs(rb.y - rv.y), Mathf.Abs(rb.z - rv.z)));
-                    if (d > maxDiff) maxDiff = d;
-                    sumDiff += d; nTexel++;
-                    if (d > thresh) over++;
-                }
-            }
-
-            if (nTexel == 0) { Debug.LogWarning("[AtlasApply] DiffTest: 유효 텍셀 0(R/W·차트 확인).", this); return; }
-            bool ok = maxDiff <= thresh;
-            string msg = $"[RadianceDiff] BruteForce vs BVH({bvhQuality}): texels={nTexel}, " +
-                         $"maxDiff={maxDiff:F6}, meanDiff={sumDiff / nTexel:F7}, over(1/255)={over} ({100.0 * over / nTexel:F3}%) → {(ok ? "MATCH ✅" : "DIFF ❌")}";
-            if (ok) Debug.Log(msg, this); else Debug.LogWarning(msg, this);
-        }
-
-        // RadianceGI 백엔드 교차검증: 같은 BVH·per-mesh 알베도·시드(seed+li*const)로 CPU(EvaluateRadiance) 와
-        //   Burst(BurstRadianceBaker.Bake=Direct+Indirect) 를 텍셀별 비교. 동일 RNG/BVH 재사용이라 ε 내 일치해야 함
-        //   (FMA 경계/히트 반전만 드물게 1/255 초과). 실제 베이크에 쓰이는 경로로 백엔드 동등성 검증.
-        [ContextMenu("RadianceGI Backend Diff (CPU vs Burst)")]
-        public void RadianceGiBackendDiffTest()
-        {
-            var filters = ResolveTargets();
-            if (filters.Length == 0) { Debug.LogWarning("[AtlasApply] GI DiffTest: 대상 MeshFilter 없음.", this); return; }
-
-            // 유니크 메시(로컬) + per-mesh 알베도 + 인스턴스 → 공유 BVH 로 managed/Burst 동시 구성
-            var meshToIdx = new System.Collections.Generic.Dictionary<Mesh, int>();
-            var uniqueLocal = new System.Collections.Generic.List<Tri[]>();
-            var uniqueMeshes = new System.Collections.Generic.List<Mesh>();
-            var meshAlbedo = new System.Collections.Generic.List<Vector3>();
-            var giInsts = new System.Collections.Generic.List<TwoLevelBVH.Instance>();
-            var instMats = new System.Collections.Generic.List<Material[]>();
-            foreach (var mf in filters)
-            {
-                var mesh = mf.sharedMesh;
-                if (mesh == null || !mesh.isReadable) continue;
-                if (!meshToIdx.TryGetValue(mesh, out int mi))
-                {
-                    mi = uniqueLocal.Count; meshToIdx[mesh] = mi;
-                    uniqueLocal.Add(LocalTris(mesh)); uniqueMeshes.Add(mesh); meshAlbedo.Add(ReadAlbedo(mf));
-                }
-                giInsts.Add(new TwoLevelBVH.Instance { MeshIndex = mi, LocalToWorld = mf.transform.localToWorldMatrix });
-                var rndA = mf.GetComponent<MeshRenderer>();
-                instMats.Add(rndA != null ? rndA.sharedMaterials : null);
-            }
-            if (giInsts.Count == 0) { Debug.LogWarning("[AtlasApply] GI DiffTest: R/W 가능한 메시 없음.", this); return; }
-
-            var albedoArr = meshAlbedo.ToArray();
-            var alphaArr = BuildAlphaData(uniqueLocal, uniqueMeshes, giInsts, instMats);
-            using var bvh = new TwoLevelBVH(uniqueLocal.ToArray(), giInsts.ToArray());
-            bvh.SetAlpha(alphaArr);
-            using var cpuScene = new InstancedRadianceScene(uniqueLocal.ToArray(), albedoArr, giInsts.ToArray(), bvh); // 공유 BVH(모드 A)
-            var burstScene = BurstScene.Create(bvh, albedoArr, alphaArr, Allocator.Persistent);
-
-            var sun = new DirectionalLight
-            {
-                Direction = lightDirection.sqrMagnitude > 1e-8f ? lightDirection.normalized : Vector3.down,
-                Color = LinColor(lightColor),
-                Intensity = lightIntensity,
-                AngularDiameterDeg = sunAngularDiameterDeg,
-            };
-            ISky sky = new UniformSky(LinColor(skyColor));
-            var burstSky = BurstSky.FromSky(sky);
-            var q = new BakeQualitySettings { AoSamples = aoSamples, IndirectSamples = indirectSamples, MaxBounces = maxBounces, RRStartDepth = 3, RayBias = Mathf.Max(1e-4f, surfaceBias), DirectSamples = directSamples };
-
-            int res = Mathf.Clamp(atlasResolution, 4, 256); // 비교는 점-단위라 작게 충분(GI 비쌈)
-            const float thresh = 1f / 255f;
-            double maxDiff = 0, sumDiff = 0; long nTexel = 0, over = 0;
-
-            foreach (var mf in filters)
-            {
-                var srcMesh = mf.sharedMesh;
-                if (srcMesh == null || !srcMesh.isReadable) continue;
-
-                Mesh uv2mesh; LumelMap lumel;
-                try
-                {
-                    var pr = ParameterizationPipeline.Run(srcMesh, segmentation);
-                    if (pr.Charts == null || pr.Charts.Length == 0) continue;
-                    DensityNormalizer.Normalize(pr.Charts);
-                    ShelfPacker.Pack(pr.Charts, chartGutter);
-                    (uv2mesh, _) = UVAssembly.Assemble(pr.Charts, srcMesh);
-                    lumel = TexelMapper.Map(uv2mesh, res, mf.transform.localToWorldMatrix);
-                }
-                catch (System.Exception e) { Debug.LogError($"[GI DiffTest] '{mf.name}' 실패: {e.Message}", mf); continue; }
-
-                var idx = new System.Collections.Generic.List<int>(lumel.Valid.Length);
-                for (int li = 0; li < lumel.Valid.Length; li++) if (lumel.Valid[li]) idx.Add(li);
-                int n = idx.Count; if (n == 0) continue;
-
-                var pts = new NativeArray<Vector3>(n, Allocator.TempJob);
-                var nrm = new NativeArray<Vector3>(n, Allocator.TempJob);
-                var val = new NativeArray<bool>(n, Allocator.TempJob);
-                var sds = new NativeArray<uint>(n, Allocator.TempJob);
-                var cpu = new Vector3[n];
-                for (int k = 0; k < n; k++)
-                {
-                    int li = idx[k];
-                    Vector3 wn = lumel.WorldNormal[li];
-                    Vector3 o = lumel.WorldPos[li] + wn * surfaceBias;
-                    uint s = seed + (uint)li * 2654435761u;
-                    pts[k] = o; nrm[k] = wn; val[k] = true; sds[k] = s;
-                    cpu[k] = RadianceCore.EvaluateRadiance(cpuScene, o, wn, sun, sky, q, s); // Direct + Indirect
-                }
-                var burst = BurstRadianceBaker.Bake(burstScene, burstSky, sun, q, pts, nrm, val, sds, Allocator.TempJob);
-                for (int k = 0; k < n; k++)
-                {
-                    Vector3 a = cpu[k], b = burst[k];
-                    float d = Mathf.Max(Mathf.Abs(a.x - b.x), Mathf.Max(Mathf.Abs(a.y - b.y), Mathf.Abs(a.z - b.z)));
-                    if (d > maxDiff) maxDiff = d; sumDiff += d; nTexel++;
-                    if (d > thresh) over++;
-                }
-                pts.Dispose(); nrm.Dispose(); val.Dispose(); sds.Dispose(); burst.Dispose();
-            }
-            burstScene.Dispose();
-
-            if (nTexel == 0) { Debug.LogWarning("[AtlasApply] GI DiffTest: 유효 텍셀 0(R/W·차트 확인).", this); return; }
-            double overPct = 100.0 * over / nTexel;
-            bool ok = overPct < 1.0; // FMA 경계 제외 → 1/255 초과 1% 미만이면 동등
-            string msg = $"[RadianceGI Backend Diff] CPU vs Burst: texels={nTexel}, spp={indirectSamples}, bnc={maxBounces}, " +
-                         $"maxDiff={maxDiff:F6}, meanDiff={sumDiff / nTexel:F7}, over(1/255)={over} ({overPct:F3}%) → {(ok ? "MATCH ✅" : "DIFF ❌")}";
-            if (ok) Debug.Log(msg, this); else Debug.LogWarning(msg, this);
-        }
-
-        // SSAA 기하/로직 자체테스트(레이 없음, 즉시 실행). 서브샘플 위치·마스크·엣지 게이팅·시드 규약 확인.
-        [ContextMenu("SSAA Self-Tests")]
-        public void RunSsaaSelfTests() => Debug.Log(LightmapSSAATests.RunAll(), this);
 
         [ContextMenu("Bake & Apply")]
         public void BakeAndApply()
@@ -415,6 +265,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             var swBake = new System.Diagnostics.Stopwatch();
             var swPost = new System.Diagnostics.Stopwatch();
 
+            _lastBake.Clear();
             // 1) 인스턴스별 월드 표면적 → 할당(ST + 페이지)
             var insts = new LightmapInstance[filters.Length];
             for (int i = 0; i < filters.Length; i++)
@@ -428,6 +279,14 @@ namespace HuskyLibs.CustomLightmapper.Bake
             var alloc = LightmapAllocator.Allocate(insts, settings);
             int res = settings.AtlasResolution;
             int pages = Mathf.Max(1, alloc.PageCount);
+
+            // 최종 인코딩(1회 결정): 라이팅 모드 + hdrOutput → RGBAHalf 선형 HDR. 미지원 플랫폼은 RGBA32 폴백.
+            _hdrAtlas = hdrOutput && (mode == BakeMode.Radiance || mode == BakeMode.RadianceGI);
+            if (_hdrAtlas && !SystemInfo.SupportsTextureFormat(TextureFormat.RGBAHalf))
+            {
+                Debug.LogWarning("[AtlasApply] RGBAHalf 미지원 플랫폼 — RGBA32(0~1 클램프)로 폴백.", this);
+                _hdrAtlas = false;
+            }
 
             // 2) 페이지별 픽셀 버퍼를 배경색으로 초기화 (Linear 아틀라스라 표시색을 linear 로 저장)
             //    validMask: blit 로 실제 칠해진 텍셀 표시 → dilation 의 소스/보존 기준.
@@ -508,7 +367,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
             for (int i = 0; i < filters.Length; i++)
             {
                 var mf = filters[i];
-                var src = mf.sharedMesh;
+                // 이전 베이크/에셋 적용으로 uv2 메시·라이트맵 머티리얼이 들어가 있어도 진짜 원본 기준으로 처리(재베이크·복원·저장 정합)
+                OriginalOf(mf, out var src, out var srcMat);
                 Vector4 st = alloc.Instances[i].ScaleOffset;
                 int page = Mathf.Clamp(alloc.Instances[i].LightmapIndex, 0, pages - 1);
 
@@ -602,7 +462,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 var rnd = mf.GetComponent<MeshRenderer>();
                 appliedF[i] = mf;
                 origMesh[i] = src;
-                origMat[i] = rnd != null ? rnd.sharedMaterial : null;
+                origMat[i] = srcMat;
+                _lastBake.Add(new BakeRecord { filter = mf, source = src, sourceMat = srcMat, uv2 = uv2mesh, st = st, page = page });
 
                 mf.sharedMesh = uv2mesh;
                 if (rnd != null)
@@ -678,11 +539,17 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
             swPost.Stop();
 
-            // 4) 아틀라스 텍스처 생성/갱신
-            if (atlas == null || atlas.width != res || atlas.depth != pages)
+            // 4) 아틀라스 텍스처 생성/갱신 — 라이팅 모드는 RGBAHalf(8B/texel, 1024² 페이지 8MB), 그 외 RGBA32
+            var atlasFormat = _hdrAtlas ? TextureFormat.RGBAHalf : TextureFormat.RGBA32;
+            if (atlas == null || atlas.width != res || atlas.depth != pages || atlas.format != atlasFormat)
             {
+                // 교체 시 이전 런타임 아틀라스 해제(DontSave 로 만든 것만 — 에셋은 건드리지 않음)
+                if (atlas != null && (atlas.hideFlags & HideFlags.DontSave) != 0)
+                {
+                    if (Application.isPlaying) Destroy(atlas); else DestroyImmediate(atlas);
+                }
                 // linear:true — 아틀라스에 선형값 저장(샘플 시 sRGB 디코드 없음). 셰이더 출력 시 프레임버퍼가 한 번만 sRGB 인코딩.
-                atlas = new Texture2DArray(res, res, pages, TextureFormat.RGBA32, false, true)
+                atlas = new Texture2DArray(res, res, pages, atlasFormat, false, true)
                 {
                     name = "LightmapDebug_Atlas",
                     wrapMode = TextureWrapMode.Clamp,
@@ -743,7 +610,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 $" | bake(레이트레이싱)={swBake.Elapsed.TotalSeconds:F2}s" +
                 $" | post(denoise+stitch+dilate)={swPost.Elapsed.TotalSeconds:F2}s";
 
-            Debug.Log($"[AtlasApply] {filters.Length} insts → atlas {res}×{res}×{pages}, util={alloc.Utilization:P1}, mode={mode}{occInfo}{alphaInfo}{directInfo}{ssaaInfo}{denoiseInfo}{stitchInfo}{dilateInfo}" +
+            Debug.Log($"[AtlasApply] {filters.Length} insts → atlas {res}×{res}×{pages} {atlasFormat}, util={alloc.Utilization:P1}, mode={mode}{occInfo}{alphaInfo}{directInfo}{ssaaInfo}{denoiseInfo}{stitchInfo}{dilateInfo}" +
                       (alloc.Overflow ? "  ⚠ overflow(클램프됨)" : "") + timeInfo, this);
 
             // NativeArray 보유 차폐자/씬 해제(BlitRegion 은 위 루프에서 끝났으므로 안전)
@@ -753,6 +620,10 @@ namespace HuskyLibs.CustomLightmapper.Bake
             _giScene = null;
             if (_gpuReady) { _gpuScene.Dispose(); _gpuScene = null; _gpuIo?.Dispose(); _gpuIo = null; _gpuReady = false; _pathCS = null; _kRadiance = -1; }
             if (_burstReady) { _burstScene.Dispose(); _burstReady = false; }
+
+#if UNITY_EDITOR
+            if (saveBakeResult && (mode == BakeMode.Radiance || mode == BakeMode.RadianceGI)) SaveBakeResult();
+#endif
         }
 
         // LumelMap 을 아틀라스 페이지 버퍼의 (ox,oy) 영역에 blit. valid 텍셀만, 모드별 색.
@@ -800,7 +671,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                                     uint s = LightmapSSAA.TexelSeed(seed, li);
                                     lin = RadianceCore.EvaluateRadiance(_occluder, wp + wn * surfaceBias, wn, _sun, _ambientLin, aoSamples, s);
                                 }
-                                c = ToColor(lin);
+                                c = _hdrAtlas ? ToHdrColor(lin) : ToColor(lin);
                                 break;
                             }
                         case BakeMode.RadianceGI:
@@ -819,7 +690,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                                     // Direct + 경로추적 Indirect (2단 인스턴싱 씬, 하늘=sky). 알베도는 런타임 적용이라 여기선 조도.
                                     lin = RadianceCore.EvaluateRadiance(_giScene, wp + wn * surfaceBias, wn, _sun, _sky, _giQ, s);
                                 }
-                                c = ToColor(lin);
+                                c = _hdrAtlas ? ToHdrColor(lin) : ToColor(lin);
                                 break;
                             }
                         default: // PerInstanceColor
@@ -1014,7 +885,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         //   ComputeBuffer 5개(pts/nrm/valid/seed/radiance) 를 매번 생성/해제하던 것을 제거 — 요청 n 이
         //   현재 capacity 를 초과할 때만 다음 2^k 로 (재)할당, 그 이하는 앞 n개만 SetData/readback 재사용.
         //   수명: BakePoints(GPU) 경로는 인스턴스 필드(_gpuIo, _gpuScene 과 동일 수명), Backend Diff 메뉴는 로컬(finally 해제).
-        sealed class GpuIoBuffers : System.IDisposable
+        internal sealed class GpuIoBuffers : System.IDisposable
         {
             public ComputeBuffer Points, Normals, Valid, Seeds, Radiance;
             public uint[] ValidScratch;   // 항상 1u — 재할당 시 1회만 채움(매 호출 new uint[n] GC 제거)
@@ -1048,7 +919,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         // CSRadiance 디스패치 공통(BakePoints·Backend Diff 재사용). 입력 pts/nrm/seeds 는 길이 n.
         //   버퍼는 재사용 홀더 io 로 grow-on-demand(초과 시에만 재할당). uniform 규약은 BurstRadianceBaker 정합.
         //   ⚠ 데이터 경로 불변: 앞 n개만 업로드/읽기 + Dispatch (n+63)/64 + _Count=n 가드 → 이전 GetData 판과 바이트 동일.
-        static Vector3[] DispatchRadianceGpu(GpuScene gpuScene, ComputeShader cs, int kernel,
+        internal static Vector3[] DispatchRadianceGpu(GpuScene gpuScene, ComputeShader cs, int kernel,
             DirectionalLight sun, BurstSky sky, BakeQualitySettings q,
             Vector3[] pts, Vector3[] nrm, uint[] seeds, int n, GpuIoBuffers io)
         {
@@ -1109,141 +980,210 @@ namespace HuskyLibs.CustomLightmapper.Bake
             return result;
         }
 
-        // RadianceGI 백엔드 교차검증(Burst vs GPU): 같은 씬·같은 시드(seed+li*const)·같은 pts 로
-        //   Burst BurstRadianceBaker.Bake vs GPU CSRadiance 텍셀 대조 → mean/max/over 로그(mean≈1e-9 기대, G5 수준).
-        //   + Stopwatch 로 Burst vs GPU 베이크 시간 로그(대형 씬 이득 확인). GetData/.Complete 동기라 벽시계 비교 공정.
-        [ContextMenu("RadianceGI Backend Diff (Burst vs GPU)")]
-        public void RadianceGiBackendDiffTestGpu()
+        // ───────────────────── 원본 추적 · 결과 저장 · 에셋 적용 ─────────────────────
+
+        // 현재 적용 상태와 무관한 '진짜 원본'(메시·머티리얼). 이전 베이크/에셋 적용으로 바뀐 렌더러면 보관해 둔 원본을 돌려준다.
+        void OriginalOf(MeshFilter mf, out Mesh mesh, out Material mat)
         {
-            if (!SystemInfo.supportsComputeShaders)
-            { Debug.LogWarning("[AtlasApply] Burst vs GPU Diff: compute shader 미지원 플랫폼 — SKIP.", this); return; }
-
-            var filters = ResolveTargets();
-            if (filters.Length == 0) { Debug.LogWarning("[AtlasApply] Burst vs GPU Diff: 대상 MeshFilter 없음.", this); return; }
-
-            // 유니크 메시(로컬) + per-mesh 알베도 + 인스턴스 → 공유 BVH.
-            var meshToIdx = new System.Collections.Generic.Dictionary<Mesh, int>();
-            var uniqueLocal = new System.Collections.Generic.List<Tri[]>();
-            var uniqueMeshes = new System.Collections.Generic.List<Mesh>();
-            var meshAlbedo = new System.Collections.Generic.List<Vector3>();
-            var giInsts = new System.Collections.Generic.List<TwoLevelBVH.Instance>();
-            var instMats = new System.Collections.Generic.List<Material[]>();
-            foreach (var mf in filters)
-            {
-                var mesh = mf.sharedMesh;
-                if (mesh == null || !mesh.isReadable) continue;
-                if (!meshToIdx.TryGetValue(mesh, out int mi))
-                {
-                    mi = uniqueLocal.Count; meshToIdx[mesh] = mi;
-                    uniqueLocal.Add(LocalTris(mesh)); uniqueMeshes.Add(mesh); meshAlbedo.Add(ReadAlbedo(mf));
-                }
-                giInsts.Add(new TwoLevelBVH.Instance { MeshIndex = mi, LocalToWorld = mf.transform.localToWorldMatrix });
-                var rndG = mf.GetComponent<MeshRenderer>();
-                instMats.Add(rndG != null ? rndG.sharedMaterials : null);
-            }
-            if (giInsts.Count == 0) { Debug.LogWarning("[AtlasApply] Burst vs GPU Diff: R/W 가능한 메시 없음.", this); return; }
-
-            var albedoArr = meshAlbedo.ToArray();
-            var alphaArr = BuildAlphaData(uniqueLocal, uniqueMeshes, giInsts, instMats);
-            using var bvh = new TwoLevelBVH(uniqueLocal.ToArray(), giInsts.ToArray());
-            bvh.SetAlpha(alphaArr);
-            var burstScene = BurstScene.Create(bvh, albedoArr, alphaArr, Allocator.Persistent);
-
-            var pathCS = LoadPathCompute();
-            if (pathCS == null) { Debug.LogWarning("[AtlasApply] Burst vs GPU Diff: PathTrace.compute 로드 실패.", this); burstScene.Dispose(); return; }
-            int kRad = pathCS.FindKernel("CSRadiance");
-            if (kRad < 0) { Debug.LogWarning("[AtlasApply] Burst vs GPU Diff: CSRadiance 커널 미발견.", this); burstScene.Dispose(); return; }
-            var gpuScene = new GpuScene(burstScene);
-            var gpuIo = new GpuIoBuffers();   // 메뉴 로컬 재사용 홀더(루프 내내 재할당 0회, 아래서 해제)
-
-            var sun = new DirectionalLight
-            {
-                Direction = lightDirection.sqrMagnitude > 1e-8f ? lightDirection.normalized : Vector3.down,
-                Color = LinColor(lightColor),
-                Intensity = lightIntensity,
-                AngularDiameterDeg = sunAngularDiameterDeg,
-            };
-            ISky sky = new UniformSky(LinColor(skyColor));
-            var burstSky = BurstSky.FromSky(sky);
-            var q = new BakeQualitySettings { AoSamples = aoSamples, IndirectSamples = indirectSamples, MaxBounces = maxBounces, RRStartDepth = 3, RayBias = Mathf.Max(1e-4f, surfaceBias), DirectSamples = directSamples };
-
-            int res = Mathf.Clamp(atlasResolution, 4, 256);
-            const float thresh = 1f / 255f;
-            double maxDiff = 0, sumDiff = 0; long nTexel = 0, over = 0;
-            var swBurst = new System.Diagnostics.Stopwatch();
-            var swGpu = new System.Diagnostics.Stopwatch();
-
-            foreach (var mf in filters)
-            {
-                var srcMesh = mf.sharedMesh;
-                if (srcMesh == null || !srcMesh.isReadable) continue;
-
-                Mesh uv2mesh; LumelMap lumel;
-                try
-                {
-                    var pr = ParameterizationPipeline.Run(srcMesh, segmentation);
-                    if (pr.Charts == null || pr.Charts.Length == 0) continue;
-                    DensityNormalizer.Normalize(pr.Charts);
-                    ShelfPacker.Pack(pr.Charts, chartGutter);
-                    (uv2mesh, _) = UVAssembly.Assemble(pr.Charts, srcMesh);
-                    lumel = TexelMapper.Map(uv2mesh, res, mf.transform.localToWorldMatrix);
-                }
-                catch (System.Exception e) { Debug.LogError($"[Burst vs GPU Diff] '{mf.name}' 실패: {e.Message}", mf); continue; }
-
-                var idx = new System.Collections.Generic.List<int>(lumel.Valid.Length);
-                for (int li = 0; li < lumel.Valid.Length; li++) if (lumel.Valid[li]) idx.Add(li);
-                int n = idx.Count; if (n == 0) continue;
-
-                // 동일 pts/nrm/seed (Burst=NativeArray, GPU=managed).
-                var pts = new NativeArray<Vector3>(n, Allocator.TempJob);
-                var nrm = new NativeArray<Vector3>(n, Allocator.TempJob);
-                var val = new NativeArray<bool>(n, Allocator.TempJob);
-                var sds = new NativeArray<uint>(n, Allocator.TempJob);
-                var mPts = new Vector3[n];
-                var mNrm = new Vector3[n];
-                var mSds = new uint[n];
-                for (int k = 0; k < n; k++)
-                {
-                    int li = idx[k];
-                    Vector3 wn = lumel.WorldNormal[li];
-                    Vector3 o = lumel.WorldPos[li] + wn * surfaceBias;
-                    uint s = seed + (uint)li * 2654435761u;
-                    pts[k] = o; nrm[k] = wn; val[k] = true; sds[k] = s;
-                    mPts[k] = o; mNrm[k] = wn; mSds[k] = s;
-                }
-
-                swBurst.Start();
-                var burst = BurstRadianceBaker.Bake(burstScene, burstSky, sun, q, pts, nrm, val, sds, Allocator.TempJob);
-                swBurst.Stop();
-
-                swGpu.Start();
-                var gpu = DispatchRadianceGpu(gpuScene, pathCS, kRad, sun, burstSky, q, mPts, mNrm, mSds, n, gpuIo);
-                swGpu.Stop();
-
-                for (int k = 0; k < n; k++)
-                {
-                    Vector3 a = burst[k], b = gpu[k];
-                    float d = Mathf.Max(Mathf.Abs(a.x - b.x), Mathf.Max(Mathf.Abs(a.y - b.y), Mathf.Abs(a.z - b.z)));
-                    if (d > maxDiff) maxDiff = d; sumDiff += d; nTexel++;
-                    if (d > thresh) over++;
-                }
-                pts.Dispose(); nrm.Dispose(); val.Dispose(); sds.Dispose(); burst.Dispose();
-            }
-
-            gpuScene.Dispose();
-            gpuIo.Dispose();       // 메뉴 로컬 재사용 홀더 해제(ComputeBuffer 5개) — 영구 필드 _gpuIo 와 분리, 일회성.
-            burstScene.Dispose();
-
-            if (nTexel == 0) { Debug.LogWarning("[AtlasApply] Burst vs GPU Diff: 유효 텍셀 0(R/W·차트 확인).", this); return; }
-            double overPct = 100.0 * over / nTexel;
-            bool ok = overPct < 1.0; // 초월함수(sqrt/sin/cos) 발산 → MC 잡음. 1/255 초과 1% 미만이면 동등(G5 수준)
-            string msg = $"[RadianceGI Backend Diff] Burst vs GPU: texels={nTexel}, spp={indirectSamples}, bnc={maxBounces}, " +
-                         $"maxDiff={maxDiff:F6}, meanDiff={sumDiff / nTexel:F7}, over(1/255)={over} ({overPct:F3}%) → {(ok ? "MATCH ✅" : "DIFF ❌")}";
-            if (ok) Debug.Log(msg, this); else Debug.LogWarning(msg, this);
-            Debug.Log($"[RadianceGI Backend Diff] 시간: Burst={swBurst.Elapsed.TotalMilliseconds:F1}ms, GPU={swGpu.Elapsed.TotalMilliseconds:F1}ms " +
-                      $"(GPU/Burst={(swBurst.Elapsed.TotalMilliseconds > 0 ? swGpu.Elapsed.TotalMilliseconds / swBurst.Elapsed.TotalMilliseconds : 0):F2}×) " +
-                      $"— GPU 는 버퍼 생성/GetData 동기 포함. 대형 씬·고spp 에서 이득.", this);
+            var rnd = mf.GetComponent<MeshRenderer>();
+            mesh = mf.sharedMesh;
+            mat = rnd != null ? rnd.sharedMaterial : null;
+            if (_appliedFilters == null) return;
+            int k = System.Array.IndexOf(_appliedFilters, mf);
+            if (k < 0) return;
+            if (_originalMeshes != null && k < _originalMeshes.Length && _originalMeshes[k] != null) mesh = _originalMeshes[k];
+            if (_originalMats != null && k < _originalMats.Length && _originalMats[k] != null) mat = _originalMats[k];
         }
+
+        void OnEnable()
+        {
+            if (applyOnEnable && bakeAsset != null) ApplyFromAsset();
+        }
+
+        /// <summary>저장된 베이크 결과 적용(베이크 없음): 대상 MeshFilter 에 uv2 메시·라이트맵 머티리얼 + ST/페이지 MPB. 원본은 Restore 용으로 보관.</summary>
+        [ContextMenu("Apply From Bake Asset")]
+        public void ApplyFromAsset()
+        {
+            if (bakeAsset == null) { Debug.LogWarning("[AtlasApply] bakeAsset 없음.", this); return; }
+            if (!bakeAsset.Validate(out string err)) { Debug.LogWarning($"[AtlasApply] bakeAsset '{bakeAsset.name}' 적용 불가: {err}", this); return; }
+
+            var applied = new System.Collections.Generic.List<MeshFilter>();
+            var oMesh = new System.Collections.Generic.List<Mesh>();
+            var oMat = new System.Collections.Generic.List<Material>();
+            int missing = 0;
+            foreach (var e in bakeAsset.entries)
+            {
+                var mf = ResolvePath(e.path);
+                if (mf == null) { missing++; continue; }
+                var rnd = mf.GetComponent<MeshRenderer>();
+                applied.Add(mf); oMesh.Add(e.sourceMesh); oMat.Add(e.sourceMaterial);
+                mf.sharedMesh = e.uv2Mesh;
+                if (rnd != null)
+                {
+                    rnd.sharedMaterial = bakeAsset.material;
+                    var mpb = new MaterialPropertyBlock();
+                    rnd.GetPropertyBlock(mpb);
+                    mpb.SetVector("_LightmapST", e.scaleOffset);
+                    mpb.SetFloat("_LightmapIndex", e.page);
+                    rnd.SetPropertyBlock(mpb);
+                }
+            }
+            _appliedFilters = applied.ToArray();
+            _originalMeshes = oMesh.ToArray();
+            _originalMats = oMat.ToArray();
+            if (missing > 0)
+                Debug.LogWarning($"[AtlasApply] bakeAsset 적용: {applied.Count}개 적용, {missing}개 대상 못 찾음(경로 변경/이름 중복 확인).", this);
+        }
+
+        /// <summary>
+        /// 마지막 베이크(이 세션)로 결과 에셋 객체를 만든다(디스크 저장 없음). 아틀라스·머티리얼·uv2 메시는 저장 가능한 사본(DontSave 아님).
+        /// uv2 메시는 원본 메시당 1개(파라미터화가 결정적이라 같은 원본 = 같은 uv2). 마지막 베이크가 없으면 null.
+        /// </summary>
+        internal AtlasBakeAsset BuildBakeAsset()
+        {
+            if (_lastBake.Count == 0 || atlas == null)
+            { Debug.LogWarning("[AtlasApply] 저장할 베이크 없음 — 먼저 'Bake & Apply'.", this); return null; }
+            var shader = Shader.Find("CustomLightmapper/LightmapDebug");
+            if (shader == null) { Debug.LogError("[AtlasApply] 셰이더 'CustomLightmapper/LightmapDebug' 없음 — 저장 불가.", this); return null; }
+
+            var asset = ScriptableObject.CreateInstance<AtlasBakeAsset>();
+            var arr = new Texture2DArray(atlas.width, atlas.height, atlas.depth, atlas.format, false, true)
+            {
+                name = "Atlas",
+                wrapMode = TextureWrapMode.Clamp,
+                filterMode = atlas.filterMode,
+            };
+            for (int p = 0; p < atlas.depth; p++) arr.SetPixels(atlas.GetPixels(p), p);
+            arr.Apply(false);
+            asset.atlas = arr;
+
+            asset.material = new Material(shader) { name = "LightmapAtlas_Mat" };
+            asset.material.SetTexture("_Lightmaps", arr);
+
+            var uv2BySource = new System.Collections.Generic.Dictionary<Mesh, Mesh>();
+            var entries = new AtlasBakeAsset.Entry[_lastBake.Count];
+            for (int i = 0; i < _lastBake.Count; i++)
+            {
+                var r = _lastBake[i];
+                if (!uv2BySource.TryGetValue(r.source, out var saved))
+                {
+                    saved = Instantiate(r.uv2);
+                    saved.name = (r.source != null ? r.source.name : "Mesh") + "_uv2";
+                    saved.hideFlags = HideFlags.None;
+                    uv2BySource[r.source] = saved;
+                }
+                entries[i] = new AtlasBakeAsset.Entry
+                {
+                    path = PathOf(r.filter.transform),
+                    sourceMesh = r.source,
+                    sourceMaterial = r.sourceMat,
+                    uv2Mesh = saved,
+                    scaleOffset = r.st,
+                    page = r.page,
+                };
+            }
+            asset.entries = entries;
+            asset.mode = mode.ToString();
+            asset.resolution = atlas.width;
+            asset.pageCount = atlas.depth;
+            asset.bakedAtUtc = System.DateTime.UtcNow.ToString("o");
+            return asset;
+        }
+
+        // 베이커 하위면 상대 경로, 아니면 '/' 로 시작하는 씬 절대 경로(이름 기반)
+        string PathOf(Transform t)
+        {
+            var parts = new System.Collections.Generic.List<string>();
+            var cur = t;
+            while (cur != null && cur != transform) { parts.Add(cur.name); cur = cur.parent; }
+            if (cur == transform) { parts.Reverse(); return string.Join("/", parts); }
+            parts.Clear();
+            for (cur = t; cur != null; cur = cur.parent) parts.Add(cur.name);
+            parts.Reverse();
+            return "/" + string.Join("/", parts);
+        }
+
+        MeshFilter ResolvePath(string path)
+        {
+            Transform t;
+            if (string.IsNullOrEmpty(path)) t = transform;
+            else if (path[0] == '/') { var go = GameObject.Find(path); t = go != null ? go.transform : null; }
+            else t = transform.Find(path);
+            return t != null ? t.GetComponent<MeshFilter>() : null;
+        }
+
+#if UNITY_EDITOR
+        /// <summary>
+        /// 결과 저장(SO + 페이지 EXR) → 렌더러를 저장된 uv2 메시·머티리얼로 교체(씬 저장 시 참조 유지) → bakeAsset 지정.
+        /// 기존 bakeAsset 이 있으면 같은 파일(GUID 유지)에 서브에셋을 갈아 끼운다.
+        /// </summary>
+        [ContextMenu("Save Bake Result (SO + EXR)")]
+        public void SaveBakeResult()
+        {
+            var built = BuildBakeAsset();
+            if (built == null) return;
+
+            string path = bakeAsset != null ? UnityEditor.AssetDatabase.GetAssetPath(bakeAsset) : null;
+            AtlasBakeAsset target;
+            if (!string.IsNullOrEmpty(path))
+            {
+                // 기존 파일 재사용: 이전 서브에셋 제거 후 내용 교체(메인 에셋 GUID → 씬 참조 유지)
+                target = bakeAsset;
+                foreach (var sub in UnityEditor.AssetDatabase.LoadAllAssetRepresentationsAtPath(path))
+                {
+                    if (sub == null) continue;
+                    UnityEditor.AssetDatabase.RemoveObjectFromAsset(sub);
+                    DestroyImmediate(sub, true);
+                }
+                UnityEditor.EditorUtility.CopySerialized(built, target);
+                DestroyImmediate(built);
+            }
+            else
+            {
+                if (!BakeOutputUtil.EnsureFolder(outputFolder))
+                { Debug.LogError($"[AtlasApply] outputFolder '{outputFolder}' 는 Assets/ 하위여야 함 — 저장 생략.", this); return; }
+                string baseName = BakeOutputUtil.SanitizeFileName($"{gameObject.scene.name}_{name}_Atlas");
+                path = UnityEditor.AssetDatabase.GenerateUniqueAssetPath($"{outputFolder}/{baseName}.asset");
+                UnityEditor.AssetDatabase.CreateAsset(built, path);
+                target = built;
+            }
+
+            // 서브에셋: 아틀라스·머티리얼·uv2 메시(고유)
+            UnityEditor.AssetDatabase.AddObjectToAsset(target.atlas, target);
+            UnityEditor.AssetDatabase.AddObjectToAsset(target.material, target);
+            var added = new System.Collections.Generic.HashSet<Mesh>();
+            foreach (var e in target.entries)
+                if (added.Add(e.uv2Mesh)) UnityEditor.AssetDatabase.AddObjectToAsset(e.uv2Mesh, target);
+
+            // 페이지별 EXR 사본(half, 선형)
+            if (exportExr)
+            {
+                target.pagesExr = new Texture2D[target.pageCount];
+                for (int p = 0; p < target.pageCount; p++)
+                {
+                    string exrPath = path.Substring(0, path.Length - ".asset".Length) + $"_page{p}.exr";
+                    var exr = BakeOutputUtil.EncodeExr(target.atlas.GetPixels(p), target.resolution, target.resolution, fullFloat: false);
+                    target.pagesExr[p] = BakeOutputUtil.WriteExrAsset(exrPath, exr, atlasFilter);
+                }
+            }
+            else target.pagesExr = new Texture2D[0];
+
+            UnityEditor.EditorUtility.SetDirty(target);
+            UnityEditor.AssetDatabase.SaveAssets();
+
+            // 렌더러를 저장된 객체로 교체(런타임 DontSave 메시·머티리얼은 씬에 저장되지 않음)
+            bakeAsset = target;
+            ApplyFromAsset();
+            foreach (var mf in _appliedFilters)
+            {
+                UnityEditor.EditorUtility.SetDirty(mf);
+                var rnd = mf.GetComponent<MeshRenderer>();
+                if (rnd != null) UnityEditor.EditorUtility.SetDirty(rnd);
+            }
+            UnityEditor.EditorUtility.SetDirty(this);
+            Debug.Log($"[AtlasApply] 베이크 결과 저장: {path} (엔트리 {target.entries.Length}, uv2 메시 {added.Count}, 페이지 {target.pageCount}{(exportExr ? " + EXR" : "")})", this);
+        }
+#endif
 
         void EnsureMaterial()
         {
@@ -1285,7 +1225,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             var instMats = new System.Collections.Generic.List<Material[]>();
             foreach (var mf in filters)
             {
-                var mesh = mf.sharedMesh;
+                OriginalOf(mf, out var mesh, out _);   // 원본 메시로 dedupe(적용된 uv2 메시는 인스턴스마다 달라 dedupe 가 깨짐)
                 if (mesh == null || !mesh.isReadable) continue;
                 if (!meshToIdx.TryGetValue(mesh, out int mi))
                 {
@@ -1345,7 +1285,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 }
                 else
                 {
-                    _pathCS = LoadPathCompute();
+                    _pathCS = PathTraceShader.Resolve(pathTraceShader);
                     if (_pathCS == null)
                     {
                         Debug.LogWarning("[AtlasApply] PathTrace.compute 로드 실패 — RadianceGI GPU 백엔드 → Burst 폴백.", this);
@@ -1369,17 +1309,15 @@ namespace HuskyLibs.CustomLightmapper.Bake
             }
         }
 
-        // PathTrace.compute 로드: Shaders/Resources 배치 → 에디터·빌드·패키지 어디서든 Resources.Load 로 동작.
-        static ComputeShader LoadPathCompute()
-        {
-            return Resources.Load<ComputeShader>("PathTrace");
-        }
+        // PathTrace.compute 로드(인스턴스 필드 없이 — 교차검증 메뉴용). 셰이더가 Resources 밖이라 기존 Resources.Load 만으론
+        // 항상 null → GPU 백엔드가 Burst 로 폴백되던 문제를 PathTraceShader(에디터 경로 폴백)로 해소.
+        internal static ComputeShader LoadPathCompute() => PathTraceShader.Resolve();
 
         /// <summary>
         /// α: 유니크 메시·인스턴스로부터 알파 컷아웃 씬 데이터를 만든다.
         /// 컷아웃 머티리얼이 없거나 토글이 꺼져 있으면 Disabled 를 돌려 세 백엔드가 기존 경로를 탄다.
         /// </summary>
-        AlphaSceneData BuildAlphaData(System.Collections.Generic.List<Tri[]> uniqueLocal,
+        internal AlphaSceneData BuildAlphaData(System.Collections.Generic.List<Tri[]> uniqueLocal,
                                       System.Collections.Generic.List<Mesh> uniqueMeshes,
                                       System.Collections.Generic.List<TwoLevelBVH.Instance> insts,
                                       System.Collections.Generic.List<Material[]> instMats)
@@ -1522,10 +1460,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
         }
 
         // 머티리얼 baseColor → Linear 알베도(≤1). URP _BaseColor / Built-in _Color, 없으면 기본값.
-        Vector3 ReadAlbedo(MeshFilter mf)
+        internal Vector3 ReadAlbedo(MeshFilter mf)
         {
-            var r = mf.GetComponent<MeshRenderer>();
-            var m = r?.sharedMaterial;
+            OriginalOf(mf, out _, out var m);   // 라이트맵 머티리얼이 적용돼 있어도 원본 알베도
             Color col = defaultAlbedo;
             if (m != null && m.HasProperty("_BaseColor")) col = m.GetColor("_BaseColor");
             else if (m != null && m.HasProperty("_Color")) col = m.GetColor("_Color");
@@ -1534,7 +1471,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         }
 
         // 변환 없는 로컬 Tri[] (BLAS 입력용).
-        static Tri[] LocalTris(Mesh mesh)
+        internal static Tri[] LocalTris(Mesh mesh)
         {
             var v = mesh.vertices;
             var t = mesh.triangles;
@@ -1545,7 +1482,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         }
 
         // 모든 타깃 메시의 삼각형을 월드 공간 Tri[] 로 평탄화(차폐자 입력).
-        static Tri[] BuildWorldTris(MeshFilter[] filters)
+        internal static Tri[] BuildWorldTris(MeshFilter[] filters)
         {
             var tris = new System.Collections.Generic.List<Tri>();
             foreach (var mf in filters)
@@ -1583,14 +1520,18 @@ namespace HuskyLibs.CustomLightmapper.Bake
         }
 
         // 인스펙터 광원색(sRGB/감마) → Linear Vector3. 베이크는 Linear 전제라 .linear 필수.
-        static Vector3 LinColor(Color c) { var l = c.linear; return new Vector3(l.r, l.g, l.b); }
+        internal static Vector3 LinColor(Color c) { var l = c.linear; return new Vector3(l.r, l.g, l.b); }
 
-        // 선형 RGB → 아틀라스 저장값. 아틀라스가 Linear 텍스처라 인코딩 없이 클램프만(LDR).
+        // 선형 RGB → RGBA32 아틀라스 저장값(hdrOutput 끔/미지원 폴백). Linear 텍스처라 인코딩 없이 클램프만(LDR).
         // 셰이더 출력 시 프레임버퍼가 linear→sRGB 인코딩을 정확히 1회 수행.
         static Color ToColor(Vector3 lin) => new Color(
             Mathf.Clamp01(lin.x), Mathf.Clamp01(lin.y), Mathf.Clamp01(lin.z), 1f);
 
-        MeshFilter[] ResolveTargets()
+        // 선형 RGB → RGBAHalf 아틀라스 저장값(최종 인코딩). 무클램프(음수만 0) — half 최대 65504 는 조도 범위에 충분.
+        static Color ToHdrColor(Vector3 lin) => new Color(
+            Mathf.Max(0f, lin.x), Mathf.Max(0f, lin.y), Mathf.Max(0f, lin.z), 1f);
+
+        internal MeshFilter[] ResolveTargets()
         {
             var list = new System.Collections.Generic.List<MeshFilter>();
             if (targets != null && targets.Length > 0)
