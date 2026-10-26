@@ -61,7 +61,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         }
 
         [MenuItem("Husky/Tool/Custom Lightmapper/Run Allocator Self-Tests")]
-        private static void SelfTests() => Debug.Log(LightmapAllocator.RunSelfTests());
+        private static void SelfTests() => Debug.Log(LightmapAllocatorTests.RunSelfTests());
 
         private static Texture2D BakePageOccupancy(AllocationResult res, int page, int size)
         {

@@ -163,6 +163,62 @@ namespace HuskyLibs.CustomLightmapper
             }
         }
 
+        /// <summary>
+        /// 2-프로브(상/하) 월드 대표점 — 템플릿별 로컬 앵커를 1회 산출(<see cref="ComputeLocalAnchor"/> top/bottom 대칭) 후
+        /// 인스턴스 M 으로 변환 + (WorldUpLift) 월드 여백. <paramref name="liftRelativeToBounds"/> 면 리프트 = surfaceLift × 템플릿 높이.
+        /// 반환 순서 = <c>s.instances</c> 순서(= SH 버퍼·행렬 버퍼·SV_InstanceID 순서).
+        /// </summary>
+        public static void ComputeProbePoints(in MatrixInstanceScene s, Mesh[] templates, AnchorMode mode, float surfaceLift,
+                                              bool liftRelativeToBounds, out Vector3[] top, out Vector3[] bottom)
+        {
+            int T = templates.Length;
+            var topLocal = new Vector3[T]; var topWL = new float[T];
+            var botLocal = new Vector3[T]; var botWL = new float[T];
+            for (int t = 0; t < T; t++)
+                ComputeLocalProbeAnchors(templates[t], s.uniqueMeshes[t], mode, surfaceLift, liftRelativeToBounds,
+                                         out topLocal[t], out topWL[t], out botLocal[t], out botWL[t]);
+            int n = s.instances.Length;
+            top = new Vector3[n];
+            bottom = new Vector3[n];
+            for (int i = 0; i < n; i++)
+            {
+                int t = s.instances[i].MeshIndex;
+                var m = s.instances[i].LocalToWorld;
+                top[i] = m.MultiplyPoint3x4(topLocal[t]) + Vector3.up * topWL[t];
+                bottom[i] = m.MultiplyPoint3x4(botLocal[t]) + Vector3.up * botWL[t];
+            }
+        }
+
+        /// <summary>
+        /// 단일 템플릿 2-프로브 월드 대표점 — BVH·씬 없이(Track B 볼륨 샘플처럼 배치만 바뀌는 경우). 씬 버전과 같은 산술(비트 동일).
+        /// <paramref name="localTris"/> 는 SurfaceNormalOffset 에서만 쓰임(null 이면 AABB 중심 기준 — 호출측이 다른 모드로 대체 권장).
+        /// </summary>
+        public static void ComputeProbePoints(Mesh template, Tri[] localTris, Matrix4x4[] matrices, AnchorMode mode, float surfaceLift,
+                                              bool liftRelativeToBounds, out Vector3[] top, out Vector3[] bottom)
+        {
+            ComputeLocalProbeAnchors(template, localTris, mode, surfaceLift, liftRelativeToBounds,
+                                     out var topLocal, out float topWL, out var botLocal, out float botWL);
+            int n = matrices.Length;
+            top = new Vector3[n];
+            bottom = new Vector3[n];
+            for (int i = 0; i < n; i++)
+            {
+                var m = matrices[i];
+                top[i] = m.MultiplyPoint3x4(topLocal) + Vector3.up * topWL;
+                bottom[i] = m.MultiplyPoint3x4(botLocal) + Vector3.up * botWL;
+            }
+        }
+
+        /// <summary>템플릿 1개의 상/하 로컬 앵커(+WorldUpLift 월드 여백). 리프트 = surfaceLift(× 템플릿 높이 if relative).</summary>
+        public static void ComputeLocalProbeAnchors(Mesh template, Tri[] localTris, AnchorMode mode, float surfaceLift, bool liftRelativeToBounds,
+                                                    out Vector3 topLocal, out float topWorldLift, out Vector3 bottomLocal, out float bottomWorldLift)
+        {
+            var b = template.bounds;
+            float lift = liftRelativeToBounds ? surfaceLift * b.size.y : surfaceLift;
+            ComputeLocalAnchor(mode, b, localTris, lift, top: true, out topLocal, out topWorldLift);
+            ComputeLocalAnchor(mode, b, localTris, lift, top: false, out bottomLocal, out bottomWorldLift);
+        }
+
         /// <summary>Mesh → 로컬 Tri[] (전 submesh 병합; 모드 A 알베도라 submesh 구분 불필요).</summary>
         public static Tri[] MeshToLocalTris(Mesh m)
         {

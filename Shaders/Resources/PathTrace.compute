@@ -18,6 +18,8 @@
 //                = BurstRadianceBaker.Bake(=Direct+Indirect) 정합. AtlasApplyDebug GPU 백엔드용.
 //   CSSHBake   : per-probe SH9 → _ShOut[i] (GpuSH9=9×float3)  구면 입사조도 SH9 프로젝션
 //                = BurstSHBaker.SHJob 정합(SH-G). RNG 없음(고정 피보나치 _Dirs) → 결정적.
+//   CSSHBakeMulti : per-probe SH9 다바운스(경로추적) → _ShOut[i]
+//                = BurstSHBaker.SHPathJob 정합. 방향당 경로 1개, (프로브,방향) 해시 시드(_ShSeed 기반).
 //
 // 시드 규약(G6-2): 호출측이 StructuredBuffer<uint> _Seeds 로 per-lumel 시드를 명시 공급.
 //   RngInit(_Seeds[i]) — Burst 의 seed=seed+li*const 와 1:1(디스패치 인덱스 기반 _BaseSeed 폐기).
@@ -29,7 +31,8 @@
 //   CPU(Mathf)와 미세하게 다르다 → Indirect/AO 는 per-texel 비트동일 불가, 통계(mean/ε)로 검증.
 //   Direct 는 무작위 없음 → 타이트 일치 기대.
 //
-// dxc 검증: #pragma kernel 3줄 제거 후 `dxc -T cs_5_0 -E <Kernel>` 로 커널별 컴파일.
+// dxc 검증: #pragma kernel 줄 제거 후 `dxc -T cs_5_0 -E <Kernel>` 로 커널별 컴파일.
+//   (glslang 대안: `glslangValidator -D -S comp -e <Kernel> -V` — HLSL→SPIR-V, 구문·타입 검사용)
 // ============================================================================
 
 #pragma kernel CSAO
@@ -37,6 +40,7 @@
 #pragma kernel CSIndirect
 #pragma kernel CSRadiance
 #pragma kernel CSSHBake
+#pragma kernel CSSHBakeMulti
 
 #define PI    3.14159265358979323846
 #define INF   3.402823466e38          // float.MaxValue (ClosestHit tmax 초기값)
@@ -137,6 +141,7 @@ int  _Count;
 StructuredBuffer<float3> _Dirs;                   // 구면 균등 방향셋(공유, 정규화 완료)
 int   _DirCount;                                  // = _Dirs.Length
 float _ShWeight;                                  // = 4π/N (몬테카를로 균등 가중)
+uint  _ShSeed;                                    // CSSHBakeMulti: 프로브 시드 = _ShSeed + i·2654435761u (BurstSHBaker.SHPathJob.Seed)
 
 // ---- 품질 파라미터 (BakeQualitySettings) ----
 int   _AoSamples;
@@ -805,8 +810,8 @@ void ShBasis(float3 d, out float y0, out float y1, out float y2, out float y3,
     y8 = k2c * (x * x - y * y);
 }
 
-// SH-G 입사조도 — BurstSHBaker.Incoming 미러.
-//   hit  : albedo ⊙ (DirectAt(hp,hn) + AmbientAt(hn))  , DirectAt=DirectNEE , AmbientAt=SkyRadiance(hn)
+// SH-G 입사 radiance — BurstSHBaker.Incoming 미러(반사 규약 ρ/π·E, v15.3 통일).
+//   hit  : albedo ⊙ (DirectAt(hp,hn)/π + AmbientAt(hn)) , DirectAt=DirectNEE , AmbientAt=SkyRadiance(hn)
 //   miss : SkyRadiance(d)
 //   ⚠ tmin=1e-4(BurstSHBaker 규약) — ClosestHitNA 에 명시 전달.
 float3 ShIncoming(float3 p, float3 d)
@@ -815,7 +820,7 @@ float3 ShIncoming(float3 p, float3 d)
     float3 result = SkyRadiance(d);                         // 미스 기본값(하늘)
     if (ClosestHitNA(p, d, 1e-4, hp, hn, alb))
     {
-        float3 irr = DirectNEE(hp, hn) + SkyRadiance(hn);   // 태양(그림자 포함) + 하늘 앰비언트
+        float3 irr = DirectNEE(hp, hn) / PI + SkyRadiance(hn);   // ρ/π·(태양(그림자 포함) + π·하늘 앰비언트)
         result = alb * irr;
     }
     return result;                                          // 단일 반환(fxc X4000 false-positive 회피)
@@ -846,6 +851,101 @@ void CSSHBake(uint3 id : SV_DispatchThreadID)
         ShBasis(d, y0, y1, y2, y3, y4, y5, y6, y7, y8);
 
         // c_k += L · y_k · weight (채널별 RGB)
+        c0 += L * y0 * _ShWeight;
+        c1 += L * y1 * _ShWeight;
+        c2 += L * y2 * _ShWeight;
+        c3 += L * y3 * _ShWeight;
+        c4 += L * y4 * _ShWeight;
+        c5 += L * y5 * _ShWeight;
+        c6 += L * y6 * _ShWeight;
+        c7 += L * y7 * _ShWeight;
+        c8 += L * y8 * _ShWeight;
+    }
+
+    GpuSH9 sh;
+    sh.c0 = c0; sh.c1 = c1; sh.c2 = c2; sh.c3 = c3;
+    sh.c4 = c4; sh.c5 = c5; sh.c6 = c6; sh.c7 = c7; sh.c8 = c8;
+    _ShOut[i] = sh;
+}
+
+// ============================================================================
+// SH-2 다바운스(GPU) — BurstSHBaker.SHPathJob 미러. 방향 d 마다 경로 1개:
+//   미스 → Sky(d) / 히트 → ρ/π·(E_direct + E_indirect) (이후 코사인 샘플·바운스별 NEE·RR).
+//   EvalIndirect 와 같은 식으로 π·L 을 누적(히트: tp⊙ρ⊙E_direct, 미스: tp⊙Sky·π)한 뒤 1/π.
+//   첫 레이 tmin=1e-4(대표점은 표면 아님, CSSHBake 와 동일), 이후 o=hp+hn·_RayBias·tmin=0(EvalIndirect 와 동일).
+// ============================================================================
+
+// lowbias32 정수 해시 — BurstSHBaker.SHPathJob.Hash 와 비트동일(uint 곱 mod 2^32).
+uint Lowbias32(uint x)
+{
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+float3 ShIncomingPath(float3 p, float3 d, inout uint s)
+{
+    float3 acc = float3(0, 0, 0);
+    float3 tp  = float3(1, 1, 1);
+    float3 dir = d;
+    float3 o   = p;
+    float  tmin = 1e-4;
+
+    // 바운스 루프: b+1>=_MaxBounces 또는 미스 또는 RR 로 반드시 종료(캡은 안전장치).
+    [loop] for (int b = 0; b < 1024; b++)
+    {
+        float3 hp, hn, alb;
+        if (!ClosestHitNA(o, dir, tmin, hp, hn, alb))
+        {
+            acc += tp * SkyRadiance(dir) * PI;          // 미스: 하늘(π)
+            break;
+        }
+
+        acc += tp * (alb * DirectNEE(hp, hn));
+        tp = tp * alb;                                  // throughput *= ρ
+
+        if (b + 1 >= _MaxBounces) break;
+
+        if (b + 1 >= _RRStartDepth)
+        {
+            float pSurv = clamp(max(tp.x, max(tp.y, tp.z)), 0.05, 1.0);
+            if (RngNext(s) > pSurv) break;
+            tp /= pSurv;
+        }
+
+        dir = CosineHemisphere(hn, s);
+        o = hp + hn * _RayBias;
+        tmin = 0.0;
+    }
+    return acc / PI;
+}
+
+// ============================================================================
+// CSSHBakeMulti — 스레드=프로브. 방향 k 마다 독립 RNG(Lowbias32(probeSeed ^ Lowbias32(k+1)))로
+//   L=ShIncomingPath → SH9 기저 누적. 방향별 독립 시드라 바운스 수만 바꾸면 같은 경로 접두(Burst 와 동일 계약).
+// ============================================================================
+[numthreads(64, 1, 1)]
+void CSSHBakeMulti(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if ((int)i >= _Count) return;
+
+    float3 p = _Points[i];
+    uint probeSeed = _ShSeed + i * 2654435761u;
+
+    float3 c0 = float3(0, 0, 0), c1 = float3(0, 0, 0), c2 = float3(0, 0, 0), c3 = float3(0, 0, 0);
+    float3 c4 = float3(0, 0, 0), c5 = float3(0, 0, 0), c6 = float3(0, 0, 0), c7 = float3(0, 0, 0), c8 = float3(0, 0, 0);
+
+    [loop] for (int k = 0; k < _DirCount; k++)
+    {
+        uint s = RngInit(Lowbias32(probeSeed ^ Lowbias32((uint)k + 1u)));
+        float3 d = _Dirs[k];
+        float3 L = ShIncomingPath(p, d, s);
+
+        float y0, y1, y2, y3, y4, y5, y6, y7, y8;
+        ShBasis(d, y0, y1, y2, y3, y4, y5, y6, y7, y8);
+
         c0 += L * y0 * _ShWeight;
         c1 += L * y1 * _ShWeight;
         c2 += L * y2 * _ShWeight;

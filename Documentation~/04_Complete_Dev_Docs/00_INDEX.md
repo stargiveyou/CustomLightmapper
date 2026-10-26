@@ -2,7 +2,8 @@
 
 > 패키지: `com.huskylibs.customlightmapper` v0.14.0 (UPM embedded)
 > 정리 기준일: 2026-08-18 · 기준 커밋: `5a727ff` (SSAA) / `4553f0c` (α 컷아웃) / `6206368` (A-trous denoise)
-> 원 문서: `01_Planning_And_Design/커스텀_라이트매퍼_기획서_v14.md` · `02_Development_And_Reference/커스텀_라이트매퍼_개발문서_v14.md`
+> 원 문서: `01_Planning_And_Design/커스텀_라이트매퍼_기획서_v15.md` · `02_Development_And_Reference/커스텀_라이트매퍼_개발문서_v15.md`(2026-10-26 UnityStudyProject 브랜치 병합 후 최신 — v14 는 이력 보존)
+> Track B(식생 프로브 볼륨) 설계·진행: `01_Planning_And_Design/커스텀_라이트매퍼_TrackB_식생프로브_설계.md` — 이 폴더(01~10)는 2026-08-18 스냅샷이라 병합분(SH 다바운스·RGBAHalf·결과 저장·Track B B1-1~5)은 v15 문서가 기준.
 
 이 폴더는 **기획 단계별 결정**과 **실제 개발 완료된 코드**를 1:1로 대응시켜 정리한 문서 묶음이다.
 기존 01~03 문서가 "시간순 변경 이력"이라면, 여기는 **"현재 트리에 실제로 존재하는 소스 기준의 완료 스냅샷"** 이다.
@@ -42,7 +43,7 @@
 | 5 | 가속구조 BVH | ✅ 검증 | `BVH.cs` / `TwoLevelBVH.cs` |
 | 6 | 라이팅(AO/Direct/Indirect) | ✅ 검증 | `RadianceCore.cs` |
 | 6.5 | GI 베이크 연결 | ✅ | `AtlasApplyDebug.RadianceGI` |
-| 7 | 프로브 베이크(Track B) | ◐ | SH 인스턴싱 경로만 완료, 범용 프로브 격자 미착수 |
+| 7 | 프로브 베이크(Track B) | ◕ | SH 인스턴싱 + 공간 프로브 볼륨(B1-1~5: 격자·유효성·저장·픽셀 셰이더·정점 AO) — v15 문서·`Runtime/ProbeVolume/` |
 | 8 | 후처리(디노이즈/스티칭/디레이션/RGBAHalf) | ✅ | `Denoise/` `LightmapStitch/` `Diliation/` |
 | 9 | 출력·런타임 적용 | ✅ | `LightmapDebug.shader` / `InstancedSH_URP.shader` |
 
@@ -72,7 +73,7 @@
 | α0~α8 | 알파 컷아웃 Any-Hit 셰도우(CPU/Burst/GPU) | ✅ 완료·검증 |
 | SSAA | 텍셀 내부 슈퍼샘플링(Adaptive/Full) | ✅ 완료·검증 |
 | C0 | 씬 수집·분류 (알파 마스크는 완료) | 🔧 설계 완료 · 구현 미착수 |
-| B1 | 범용 프로브 격자 / 정점 베이크 | ✗ 미착수 |
+| B1 | 범용 프로브 격자 / 정점 베이크 | ◕ B1-1~5 구현(격자·유효성·저장·픽셀 셰이더·정점 AO, v15.7~10 병합) · B1-6 알파 잎 차폐 남음 |
 | — | LSCM / MVC 솔버 본체 | ✗ 스텁 |
 | — | Point / Spot / Area 광원 | ✗ 미착수 |
 
@@ -80,15 +81,15 @@
 
 ## 다음 단계 (2026-08-18)
 
-우선순위와 작업 단위는 **[개발문서 v14 §10](../02_Development_And_Reference/커스텀_라이트매퍼_개발문서_v14.md)** 이 기준이다.
+우선순위와 작업 단위는 **[개발문서 v15 §10](../02_Development_And_Reference/커스텀_라이트매퍼_개발문서_v15.md)** 이 기준이다(2026-10-26 병합 반영).
 
 | 순위 | 항목 | 왜 |
 |---|---|---|
 | 1 | **C0 — 씬 수집·분류** 🔧설계완료 | 파이프라인 9단계 중 유일한 미구현 단계. 실 씬을 그대로 굽는 진입점이 없다. → [설계](../01_Planning_And_Design/커스텀_라이트매퍼_C0_씬수집_설계.md) · [개발문서](../02_Development_And_Reference/커스텀_라이트매퍼_C0_SceneCollector_개발문서.md) |
-| 2 | **B1 — 범용 프로브 격자 / 정점 베이크** | Track B 미착수. 레이 엔진·`BakePoints` 재사용으로 샘플 지점 공급만 교체 |
+| 2 | **B1-6 — Track B 알파 잎 차폐** | B1-1~5 완료(v15.7~10). 남은 것: 패키지 α any-hit(`AlphaSceneData`)를 프로브 볼륨 베이크·유효성·정점 AO 씬에 연결 → [Track B 설계](../01_Planning_And_Design/커스텀_라이트매퍼_TrackB_식생프로브_설계.md) |
 | 3 | LSCM / MVC 솔버 본체 | 리스크 표에서 유일하게 미해소 — 곡면 차트가 평면투영만 받음 |
 | 4 | Point / Spot / Area 광원 | `ILight.Sample` 계약 확정 후 3백엔드 미러링 |
-| 5 | SH-2 다바운스 · `iid*7` 인덱싱 검증 | SH 트랙 잔여 |
+| 5 | ~~SH-2 다바운스 · `iid*7` 인덱싱 검증~~ | ✅ 완료(v14.12·v14.14·v15.2 — 병합으로 반영). SH 트랙 잔여는 실씬 노출 튜닝 |
 | 6 | G6-3b 단일 글로벌 디스패치 · 타일/적응 샘플링 | GPU 추가 가속(현재 7.2×) |
 | — | ~~지형 QuadTree 라이트맵~~ | **2026-08-18 로드맵 제외**. `AtlasApplyDebug.occluders` 는 occluder 전용 기능으로 존치 |
 | 보류 | BIRP 포팅 | 2026-07-09 결정 — SH 트랙 URP 확정 |

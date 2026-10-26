@@ -18,7 +18,7 @@ Burst/GPU 기반 커스텀 라이트맵 베이커. UV 파라미터화 → 차트
 
 | 어셈블리 | 위치 | 플랫폼 | 내용 |
 |---|---|---|---|
-| `HuskyLibs.CustomLightmapper` | `Runtime/` | 전체 | 순수 베이크 로직 (배포 대상) |
+| `HuskyLibs.CustomLightmapper` | `Runtime/` | 전체 | 순수 베이크 로직 + 실사용 베이커 컴포넌트(`AtlasApplyDebug`·`InstanceSceneBaker`·`ProbeVolumeBaker`) (배포 대상) |
 | `HuskyLibs.CustomLightmapper.Editor` | `Editor/` | Editor | 에디터 디버그 툴 (UVLayoutViewer 등) |
 | `HuskyLibs.CustomLightmapper.Tests` | `Tests/` | Editor | 자체 검증 클래스 (`static RunAll()→string`) |
 | `HuskyLibs.CustomLightmapper.Samples` | `Samples/` | Editor | MonoBehaviour 데모/디버그 하니스 + 씬 + FBX |
@@ -47,4 +47,7 @@ mkdir Samples~ && git mv Samples "Samples~/Demo"
 
 ## 사용 (기본 흐름)
 
-씬에 `AtlasApplyDebug` 컴포넌트를 붙이고 대상 MeshFilter 를 지정한 뒤, 인스펙터 우클릭 → **Bake & Apply**. 자세한 내용은 `Documentation~/` 참조.
+- **텍스처 라이트맵**: 씬에 `AtlasApplyDebug` 컴포넌트를 붙이고 대상 MeshFilter 를 지정한 뒤, 인스펙터 우클릭 → **Bake & Apply**. 라이팅 모드 결과는 `AtlasBakeAsset`(SO) + EXR 로 저장되고 OnEnable 에 다시 적용된다.
+- **인스턴싱 SH(프롭)**: `InstanceSceneBaker` — 템플릿 메시 + 인스턴스 행렬 → 2-프로브 SH → `InstancedSH_URP`.
+- **식생 프로브 볼륨(Track B)**: `ProbeVolumeBaker` — 볼륨 박스·간격 → SH9 프로브 격자(+ 유효성·정점 AO) → 인스턴스 대표점 샘플(`InstancedSH_URP`) 또는 픽셀 샘플(`InstancedVegetation_URP`).
+- 검증: `Samples/LightmapEvaluateDebugger` 우클릭 **Run All Tests**. 자세한 내용은 `Documentation~/` 참조.

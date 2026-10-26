@@ -11,6 +11,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
     /// 일치하므로 결과는 near-bit-identical(전이함수 없음).
     ///
     /// 결정적(RNG 없음). 시드/Valid 미사용 — 전 프로브 무조건 베이크.
+    /// 다바운스는 <see cref="BakeMultiBounce"/>(CSSHBakeMulti, Burst SHPathJob 미러).
     /// </summary>
     public static class GpuSHBaker
     {
@@ -22,6 +23,23 @@ namespace HuskyLibs.CustomLightmapper.Bake
         public static SH9[] Bake(GpuScene gpu, ComputeShader cs, int kernel,
                                  DirectionalLight sun, BurstSky sky,
                                  Vector3[] points, Vector3[] dirs, float weight)
+            => Run(gpu, cs, kernel, sun, sky, points, dirs, weight, null, 0u);
+
+        /// <summary>
+        /// 다바운스(경로추적) SH9 베이크(GPU) — <see cref="BurstSHBaker.BakeMultiBounce"/> 미러, 커널 "CSSHBakeMulti".
+        /// <paramref name="q"/>(MaxBounces·RRStartDepth·RayBias)·<paramref name="seed"/>·방향셋을 Burst 와 같게 주면 교차검증 성립.
+        /// RNG 는 비트동일, 코사인 샘플의 sqrt/sin/cos 만 하드웨어 차이 → 통계적으로 일치(G5 Indirect 와 같은 기준).
+        /// </summary>
+        public static SH9[] BakeMultiBounce(GpuScene gpu, ComputeShader cs, int kernel,
+                                            DirectionalLight sun, BurstSky sky, BakeQualitySettings q, uint seed,
+                                            Vector3[] points, Vector3[] dirs, float weight)
+            => Run(gpu, cs, kernel, sun, sky, points, dirs, weight, q, seed);
+
+        // 공통 디스패치. q 가 있으면 다바운스 유니폼(_MaxBounces/_RRStartDepth/_RayBias/_ShSeed)도 설정.
+        static SH9[] Run(GpuScene gpu, ComputeShader cs, int kernel,
+                         DirectionalLight sun, BurstSky sky,
+                         Vector3[] points, Vector3[] dirs, float weight,
+                         BakeQualitySettings? q, uint seed)
         {
             int n = points.Length;
             int dirCount = dirs.Length;
@@ -56,6 +74,14 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 cs.SetInt("_SkyType", sky.Type);
                 cs.SetVector("_SkyTop", sky.A);
                 cs.SetVector("_SkyBottom", sky.B);
+
+                if (q.HasValue)
+                {
+                    cs.SetInt("_MaxBounces", q.Value.MaxBounces);
+                    cs.SetInt("_RRStartDepth", q.Value.RRStartDepth);
+                    cs.SetFloat("_RayBias", q.Value.RayBias);
+                    cs.SetInt("_ShSeed", unchecked((int)seed));   // HLSL uint — 비트 그대로 전달
+                }
 
                 cs.Dispatch(kernel, (n + 63) / 64, 1, 1);
                 shBuf.GetData(result);

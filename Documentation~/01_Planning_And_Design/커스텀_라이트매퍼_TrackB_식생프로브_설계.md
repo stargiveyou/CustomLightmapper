@@ -1,0 +1,213 @@
+# Track B 식생 프로브 설계 · 진행 계획 (B1 → B2)
+
+> 기준: 기획서 v15 §2 「Track B(식생): Light Probe/SH9(주) + 정점 베이크(보조), 텍스처 회피」 · §8 마일스톤 B1 · §9.1 결정 ②(프로브+정점) ⑥(적응형 프로브) · §11 다음 단계 5번.
+> 선행: 공유 코어(2단 BVH·경로추적, CPU/Burst/GPU) ✅ · SH 트랙(SH9·`BurstSHBaker`/`GpuSHBaker` 1/다바운스·`EvaluateSH9.hlsl`·`InstanceSceneBaker`/`InstanceSHBakeAsset`) ✅.
+> 원칙: **코어(BVH·순회·RadianceCore·SH 베이커) 무수정 재사용**, 신규는 별도 파일. 예외는 B1-6(알파 커버리지) 하나 — 3백엔드 동시 변경 + 비트 동일 회귀로 고정.
+> **진행(2026-10-26)**: D1~D6 권장안 확정 · B1-1 `ProbeGrid` · B1-2 `BurstProbeValidity`(v15.7) · B1-3 `ProbeVolumeAsset`·`ProbeVolumeBaker`·인스턴스 적용(v15.8) · B1-4 `HuskyProbeVolume.hlsl`·`InstancedVegetation_URP`(v15.9) · **B1-5 `VertexAOBake`(v15.10)** — 테스트 5종, 에디터 실행 대기 · 다음 B1-6(패키지 저장소 any-hit 와 정합 검토).
+
+---
+
+## 1. 왜 Track B 인가 — SH 트랙과의 차이
+
+| 축 | 인스턴싱 SH 트랙(현재) | Track B 공간 프로브(이 문서) |
+|---|---|---|
+| 프로브 위치 | 인스턴스마다 2개(상/하 대표점) | **공간 격자**(인스턴스와 무관) |
+| 베이크 비용·저장 | ∝ 인스턴스 수 N (112B × 2 × N) | ∝ 볼륨 크기 / 간격 |
+| 인스턴스 추가·이동·절차 배치 | 재베이크 필요 | **재베이크 없음**(런타임에 위치로 샘플) |
+| 풀(수십만~수백만) | ✗ 버퍼 폭증(1M × 224B ≈ 224MB) | ✅ 픽셀/정점에서 볼륨 샘플 |
+| 큰 나무 내부 음영 | 2-프로브 보간 한계 | 볼륨 + 정점 AO(보조) |
+| 정확도(같은 점) | 그 점에서 직접 베이크 = 기준 | 격자 보간 오차(간격 의존) |
+
+→ **역할 분담**: 소형 프롭 대량(고정 배치) = SH 트랙 유지 / 식생(나무·풀·꽃)·절차 배치 = Track B. 두 트랙은 같은 씬(2단 BVH)·같은 SH9 계약·같은 셰이더 평가식(`EvaluateSH9`)을 쓴다.
+
+---
+
+## 2. 재사용 자산 (무수정)
+
+| 자산 | Track B 에서의 쓰임 |
+|---|---|
+| `TemplateInstanceSource.BuildScene` (Mesh[] + Matrix4x4[][] → 2단 BVH) | 볼륨 씬 구성(정적 MeshFilter 도 메시→템플릿·행렬로 변환해 투입) |
+| `BurstSHBaker.Bake` / `BakeMultiBounce` (`NativeArray<Vector3> points` 입력) | **격자 위치를 그대로 points 로** — 프로브 베이커 신규 작성 불필요 |
+| `GpuSHBaker.Bake` / `BakeMultiBounce` (`CSSHBake`/`CSSHBakeMulti`) | 대형 볼륨 GPU 베이크(동일 시드 규약) |
+| `SH9`(Accumulate/Evaluate) · `SHPacked`(7×float4) · `SHInstancedBuffer` | 계수 저장·패킹·인스턴스 버퍼 |
+| `EvaluateSH9.hlsl`(`SH9Coeffs`·`EvaluateSH9`·`EvaluateInstanceSH2Axis`) | 런타임 평가(볼륨 샘플 결과도 같은 함수로) |
+| `InstancedSH_URP` + `InstancedSHRenderer` | B1-3 인스턴스 단위 적용(셰이더 변경 없음) |
+| `ComputeProbePoints`(2-프로브 상/하 대표점) | B1-3 인스턴스별 샘플 위치 |
+| `BurstAO.Compute`(points/normals) · `BurstRadianceBaker.Bake` | B1-5 정점 베이크(정점 = 점 배열) |
+| `BakeOutputUtil`(EXR·폴더·임포트) · `[PreferBinarySerialization]` SO 패턴 | B1-3 저장(SO + EXR — §9.3 결정 그대로) |
+| `PathTraceShader.Resolve` | GPU 셰이더 로드 |
+
+반사 규약(ρ/π·E)·Linear·시드 규약(`seed + i*2654435761u`)·직사광 실시간(SH엔 간접+환경만)도 그대로 따른다.
+
+---
+
+## 3. 데이터 흐름
+
+```
+[씬 입력] 정적 MeshFilter(지형·건물) + 템플릿·행렬(나무·풀·프롭)
+   └─ TemplateInstanceSource.BuildScene → 2단 BVH (+ BurstScene / GpuScene)
+[프로브 배치]  ProbeGrid(origin, spacing, dims)  →  positions[]          (B1-1, 이후 B2 적응형)
+[베이크]       BurstSHBaker / GpuSHBaker (1·다바운스)  →  SH9[]          (재사용)
+[유효성]       ProbeValidity(backface 비율)  →  valid[] → dilation      (B1-2)
+[저장]         ProbeVolumeAsset(SO: 메타·SH 패킹·valid + Texture3D×7) + EXR(z 슬라이스 타일)   (B1-3)
+[런타임]       (a) 인스턴스 대표점에서 CPU 샘플 → SHInstancedBuffer(iid*14) → InstancedSH_URP   (B1-3)
+               (b) 픽셀/정점에서 Texture3D 샘플 → EvaluateSH9                                (B1-4)
+               × 정점 AO(템플릿 로컬, 보조)                                                  (B1-5)
+```
+
+---
+
+## 4. 구성요소 설계
+
+### 4.1 `ProbeGrid` (B1-1, 코어)
+- `origin`(최소 코너), `spacing`(Vector3 — 수평/수직 분리 가능), `dims`(int3).
+- 프로브 위치 `p(i,j,k) = origin + (i,j,k)·spacing` — 셀 **코너**에 배치(텍스처 텍셀 중심 ↔ 프로브 정렬: `uvw = ((p-origin)/spacing + 0.5) / dims`).
+- 선형 인덱스 `idx = i + dims.x·(j + dims.y·k)`, `FromBounds(Bounds, spacing)` 헬퍼.
+- CPU `Sample(SH9[] grid, bool[] valid, Vector3 pos)` — 8탭 trilinear(SH 계수는 위치에 대해 선형 결합해도 의미 유지). valid 가 주어지면 무효 탭 가중치 0 + 재정규화.
+
+### 4.2 베이크 (B1-1, 재사용)
+- positions 를 `NativeArray<Vector3>` 로 → `BurstSHBaker.Bake`(1바운스, 결정적) 또는 `BakeMultiBounce`(경로추적) / GPU 대응 커널. **신규 커널 없음.**
+- 규모 감: 128×16×128 = 262,144 프로브 × 방향 256 ≈ 6,700만 1차 레이(+1바운스는 히트당 그림자 레이). 대형 볼륨은 GPU 기본.
+
+### 4.3 유효성 · dilation (B1-2, 신규 `BurstProbeValidity`)
+- 지형·건물 **내부**에 놓인 프로브는 뒷면만 보고 검정 → 보간 시 누수(검은 얼룩).
+- 프로브당 K(=64) 피보나치 방향으로 `IntersectInstanced` → **뒤집지 않은 면 노멀**로 `dot(n_geo, d) > 0`(뒷면 히트) 비율 r. `r > τ`(기본 0.25) 이면 invalid.
+  - `ClosestHit` 는 노멀을 레이 쪽으로 뒤집으므로 쓰지 않음(그래서 별도 잡 — 코어 무수정).
+  - 양면 얇은 메시(잎 카드·단면 플레인)는 뒷면 판정이 무의미 → 템플릿 플래그 `countBackface=false` 로 판정 제외.
+- dilation: invalid 프로브 = 유효 6-이웃 평균, 링 단위 반복(라이트맵 dilation 과 같은 방식). 런타임 샘플은 valid 가중 재정규화로 이중 방어.
+- GPU 미러는 필요 시(검증 후) — 레이 수가 베이크의 1/4 수준이라 Burst 로 충분할 가능성 큼.
+
+### 4.4 저장 · 컴포넌트 (B1-3)
+- **`ProbeVolumeAsset`**(SO, `[PreferBinarySerialization]`): 격자 메타·SH 패킹 `Vector4[]`(프로브당 7, GPU 레이아웃 그대로)·valid·베이크 정보 + 서브에셋 `Texture3D`×7(RGBAHalf, Bilinear, Clamp) + EXR 사본(z 슬라이스를 가로로 타일한 RGBAFloat 2D).
+  - 메모리 감: 262,144 프로브 × 7 × 8B(half) ≈ 14.7MB (float32 29.4MB).
+- **`ProbeVolumeBaker`**(코어 컴포넌트, `InstanceSceneBaker` 패턴): 볼륨 Bounds·간격, 씬 입력(정적 루트 목록 + 템플릿·행렬 목록), 백엔드(Burst/GPU) × 바운스, 시드. ContextMenu: Bake / Save / Apply / Clear. OnEnable 에 에셋 적용.
+- **인스턴스 적용(엔드투엔드 1차)**: 대상 인스턴스 집합(템플릿·행렬)에 대해 `ComputeProbePoints` 상/하 점에서 `ProbeGrid.Sample` → 2-프로브 SH → `SHInstancedBuffer.CreateFromPacked(…, 2)` → **기존 `InstancedSH_URP` 무수정**. 인스턴스 배치가 바뀌면 샘플만 다시(베이크 불필요).
+
+### 4.5 픽셀 단위 샘플 셰이더 (B1-4)
+- `HuskyProbeVolume.hlsl`(구현 시 이름 변경 — RP core APV 의 `ProbeVolume.hlsl` 과 구분, 식별자 `_HuskyProbeSH0..6`·`_HuskyPV_*`): Texture3D×7 HW trilinear → `UnpackSH9` → `EvaluateSH9`(공유 함수, 디링잉 동일). 볼륨 밖은 클램프 + 페이드(가장자리 → 하늘 앰비언트).
+- 샘플 위치 = `worldPos + n·normalBias`(셀 크기 비례) — 얇은 벽·지면 누수 완화.
+- `InstancedVegetation_URP.shader`: 알파 클립, 양면(백페이스 노멀 플립 — `InstancedSH_URP` 와 동일), **잎 투과** = `E(n) + t·E(-n)`(t = 투과율 프로퍼티), 직사광 실시간 + 그림자(알파 클립 ShadowCaster). 바람·LOD 는 범위 밖.
+- 풀처럼 인스턴스가 극히 많은 경우 버텍스 셰이더에서 인스턴스 피벗 1회 샘플(정점당 아닌 인스턴스당) 옵션.
+
+### 4.6 정점 베이크 — 보조 (B1-5)
+- **(a) 템플릿 로컬 정점 AO**(인스턴싱 공유 — 기본, ✅ v15.10 `VertexAOBake`): 템플릿 메시 단독 씬(항등 행렬 1인스턴스) → `BurstAO.Compute`(정점 위치·노멀) → 메시 사본 `uv3` = (앞면, 뒷면 AO — 양면 잎 카드는 뒷면 반구 별도)에 저장(`ProbeVolumeAsset` 서브메시). 런타임 `E_probe × AO_vertex` — 수관 안쪽 자기차폐 음영. 인스턴스 무관이라 저장 = 템플릿 수 × 정점 수.
+- **(b) 히어로(비인스턴스) 정점 조도**(선택): `BurstRadianceBaker.Bake`(정점 위치·노멀 = 텍셀 배열과 동일 입력) → `MeshRenderer.additionalVertexStreams`. 인스턴스별 저장이라 대량에는 부적합.
+- 텍스처 회피 원칙(기획 §2) 유지 — 식생엔 uv2/아틀라스 없음.
+
+### 4.7 알파 커버리지 차폐 (B1-6, 코어 변경)
+- 잎 카드를 불투명 삼각형으로 트레이스하면 수관 내부·나무 밑 프로브가 과도하게 어두움.
+- 방식: 삼각형별 평균 커버리지 ᾱ(알파 텍스처를 UV 삼각형 위에서 적분, 베이크 전 1회) → 순회 중 히트 시 결정적 난수 `hash(rayId, instId, triId) < ᾱ` 일 때만 히트(아니면 통과·계속 순회). 기대값으로 투과율 = 1-ᾱ.
+- 변경 범위: `Tri`(또는 병렬 배열)에 ᾱ, `BurstScene`/`GpuScene` 평탄화, CPU `TwoLevelBVH`·Burst·`BvhTraverse/PathTrace.compute` 순회 3곳. ᾱ 미지정(=1) 경로는 **비트 동일**해야 함.
+- 1차 대체(B1-1~5 동안): 템플릿별 `occluderMode = Opaque | Excluded` 토글.
+
+### 4.8 적응형 프로브 (B2 — 결정 ⑥)
+균일 격자는 하늘 빈 공간에 대부분을 낭비. 둘 중 택1(§5 D1):
+- **지형 추종 2.5D 레이어**: XZ 격자 × 지면 높이 기준 K층(높이맵 Texture2D 1장 추가). 식생이 지면 근처에 몰리는 오픈월드에 가장 단순·효율적.
+- **희소 브릭(APV식)**: 거친 격자 전역 + 지오메트리 근처만 4³ 브릭 세분, 인디렉션 Texture3D → 브릭 아틀라스 Texture3D. 건물 사이·다층 구조에 강함, 구현량 큼.
+
+### 4.9 Unity LightProbes 연동 (B3, 선택)
+- LightProbeGroup 으로 위치를 Unity 베이크로 확보 → 우리 볼륨을 그 위치에서 샘플 → `LightmapSettings.lightProbes.bakedProbes` 덮어쓰기(일반 MeshRenderer·SkinnedMesh 가 자동 사용).
+- `SphericalHarmonicsL2` 와 우리 SH9 의 정규화·π·계수 순서 차이 → `AddAmbientLight`/`AddDirectionalLight` + `Evaluate` 왕복 테스트로 변환식 확정 후 진행.
+
+---
+
+## 5. 결정 항목 — ✅ 2026-10-25 권장안(굵게)으로 확정
+
+| ID | 항목 | 선택지 | 권장 근거 |
+|---|---|---|---|
+| **D1** | 프로브 배치 1차 → 적응형 방식 | (**균일 3D 격자 → B2 에서 지형 추종 2.5D**) / 균일 → 희소 브릭 / 바로 적응형 | 균일 격자가 검증 기준(해석해·수렴 테스트). 식생은 지면 근처 → 2.5D 가 ⑥의 최소 구현 |
+| **D2** | 런타임 보간 단위 | (**인스턴스 대표점 먼저(B1-3) → 픽셀 Texture3D(B1-4)**) / 픽셀만 | B1-3 은 셰이더 무변경으로 엔드투엔드 확보, 풀·큰 나무는 B1-4 필요 |
+| **D3** | 런타임 저장 형식 | (**Texture3D×7 RGBAHalf**) / StructuredBuffer float4(수동 8탭) | HW trilinear·캐시 효율. SO 에는 패킹 원본도 보관 |
+| **D4** | 정점 베이크 내용 | (**템플릿 로컬 AO**) / AO + bent normal / 히어로 정점 조도까지 | 인스턴싱과 호환되는 유일한 정점 데이터. bent normal 은 효과 확인 후 |
+| **D5** | 알파 잎 차폐 | 1차 Opaque/Excluded 토글 → (**삼각형 평균 커버리지 확률 통과, B1-6**) / 텍스처 any-hit | 커버리지 방식은 순회에 float 1개·해시 1회 추가로 3백엔드 미러 용이. any-hit 는 UV·텍스처 샘플이 순회에 들어가 GPU 비용·구현량 큼 |
+| **D6** | Unity LightProbes 연동 | (**자체 볼륨만, B3 는 보류**) / bakedProbes 내보내기 병행 | DrawMeshInstancedIndirect 는 Unity 프로브를 자동으로 못 받음 → 자체 볼륨이 본선 |
+
+고정(재확인만): SH9(L2) 계약 유지 · 직사광은 실시간(프로브엔 간접+환경) · 반사 규약 ρ/π·E · URP 우선.
+
+---
+
+## 6. 단계 분할 · 검증
+
+| Phase | 내용 | 신규 파일(예정) | 검증(테스트) |
+|---|---|---|---|
+| **B1-1** ✅ | 격자 정의 + 베이크 연결 + CPU trilinear | `Script/ProbeVolume/ProbeGrid.cs` | `ProbeGridTests`: 인덱스↔위치 왕복 · **선형장 trilinear 정확**(c0 = a·x+b → 임의 내부점 오차 ε) · **격자 베이크 ≡ 같은 점 직접 `BurstSHBaker` 호출(비트 동일)** · 열린 바닥+균일 하늘 해석해(`BurstSHBakerTests` D 계열 재사용) |
+| **B1-2** ✅ | 유효성(backface 비율) + dilation + valid 가중 샘플 | `ProbeVolume/BurstProbeValidity.cs` | 닫힌 박스 내부 프로브 invalid / 외부 valid · 단면 플레인(`countBackface=false`) 무영향 · dilation 후 invalid = 유효 이웃 평균 · valid 가중 샘플이 invalid 값 무시 |
+| **B1-3** ✅ | 저장 + 베이커 컴포넌트 + 인스턴스 적용(엔드투엔드) | `ProbeVolume/ProbeVolumeAsset.cs`, `ProbeVolume/ProbeVolumeBaker.cs` | 에셋 왕복(패킹·Texture3D 텍셀 ≡ SH) · EXR 매직 · 인스턴스 샘플 ≡ CPU `Sample` · **수렴: 간격 ½ 마다 '직접 베이크(SH 트랙) 대비 오차' 단조 감소** |
+| **B1-4** ✅ | 픽셀 샘플 셰이더 | `Shaders/HuskyProbeVolume.hlsl`, `Shaders/InstancedVegetation_URP.shader` | GPU 샘플 ≡ CPU `Sample`(렌더 컨텍스트, `SHEvalProbeGpuTests` 패턴 — 텍셀 중심 정렬·클램프 경계 포함) · glslang 컴파일 |
+| **B1-5** ✅ | 정점 AO(템플릿 로컬) [히어로 정점 조도는 미착수] | `ProbeVolume/VertexAOBake.cs` | 정점 AO ≡ `BurstAO.Compute` 직접 호출 · 고립 평면 AO=1 · 무한 천장 아래 AO≈0 · (히어로) 정점 조도 ≡ 같은 점·노멀 `BurstRadianceBaker` |
+| **B1-6** | 알파 커버리지 확률 통과(코어 3백엔드) | `Tri` 확장/병렬 배열, 순회 3곳 | ᾱ=1 ≡ 현행 **비트 동일**(전 회귀 18종 통과) · ᾱ=0 ≡ 메시 제거 · ᾱ=0.5 그림자 투과 ≈ 0.5(±3σ) · CPU≡Burst≡GPU |
+| **B2** | 적응형(D1 선택안) | `ProbeVolume/…` | 세분 영역 샘플 ≡ 같은 해상도 균일 격자 · 프로브 수·메모리 절감률 리포트 |
+| B3 | (선택) Unity LightProbes 내보내기 | — | `SphericalHarmonicsL2` 변환 왕복 ≡ |
+
+- 모든 신규 테스트는 Tests 어셈블리(`Script/Test/ProbeVolume/`) + `LightmapEvaluateDebugger.RunAllTests` 배선(코어 → 테스트 참조 0 유지).
+- 이 환경(Unity 없음)에선 tree-sitter 구문·glslang 컴파일·정적 의존성 검사까지 — 에디터 실행 확인은 단계마다 체크리스트로 남김.
+
+**B1-1 + B1-2 완료(v15.7)** — 코어 무수정, 신규 2파일 + 테스트 2종(A~F 각각). 구현 메모:
+- `ProbeGrid` 는 `[Serializable]` 구조체(B1-3 SO 에 그대로 직렬화). `BakeBurst` 는 q.MaxBounces ≤1 → 1바운스 근사, ≥2 → 다바운스(`InstanceSceneBaker` 규약). `BakeGpu` 커널은 `GpuKernelName(q)`.
+- `Sample(sh, valid, p)`: 무효 탭 가중치 0 + 재정규화, 유효 탭이 전무하면 무가중(= dilation 값) 폴백. `w==0` 탭은 건너뜀(축 위 점은 탭 2개만).
+- `BurstProbeValidity.BackfaceRatio` 분모는 K(미스 포함) — 지면 바로 아래는 r=0.5, 닫힌 메시 내부는 r≈1. `Dilate` 는 반복 시작 스냅샷 기준 링 단위라 결과가 순회 순서와 무관.
+- 에디터 확인: `LightmapEvaluateDebugger` 우클릭 "Run Probe Volume Tests (Track B B1-1 _ B1-2)" 또는 Run All Tests(20종).
+
+**B1-3 완료(v15.8)** — `ProbeVolumeAsset`(SO + Texture3D×7 RGBAHalf + EXR) · `ProbeVolumeBaker` · 인스턴스 적용. 구현 메모:
+- 볼륨 = 베이커 Transform 위치 중심 월드 축 정렬 박스(회전 무시) + 간격 → `ProbeGrid.FromBounds`. 프로브 수·Texture3D 축(2048) 가드.
+- 씬 입력: 템플릿(행렬) + 정적 루트(MeshFilter, 메시 dedupe). 템플릿별 `Opaque`/`Excluded`(D5 1차) · `twoSided`(유효성 뒷면 제외) · `render`.
+- 인스턴스 적용: 상/하 대표점(SH 트랙과 같은 규칙, 템플릿 단위 `ComputeProbePoints`) → CPU 샘플(valid 가중) → `InstancedSH_URP` 무수정. 배치만 바뀌면 'Rebuild Render'.
+- 저장: 기존 에셋 파일이면 서브에셋(텍스처)만 교체해 GUID 유지. EXR = z 슬라이스 가로 타일 × 계수 7 세로 블록(32-bit).
+
+**B1-3 에디터 확인 체크리스트**
+1. 재컴파일 에러 0 → `LightmapEvaluateDebugger` 우클릭 "Run Probe Volume Tests (Track B B1-1 ~ B1-3)" 전부 PASS(특히 F 수렴 수치).
+2. 빈 GameObject 에 `ProbeVolumeBaker` → `volumeSize`·`probeSpacing` 지정 → 템플릿(Read/Write 켠 메시 + 'Capture Matrices From Sources') · 지면 등은 `staticRoots`.
+3. 우클릭 Bake → `BakeOutput/<씬>_<이름>_ProbeVolume.asset`(+ Texture3D 7 서브에셋) · `.exr` 생성, 콘솔에 프로브 수·무효/dilation 수.
+4. 선택 시 기즈모: 볼륨 박스 · 프로브 구(위쪽 조도 색 — 그늘·지면 근처 어두움) · 지면/건물 내부 프로브 빨강.
+5. 인스턴스가 볼륨 조명으로 표시(InstancedSH_URP) → 인스턴스를 옮기고 'Rebuild Render' 만으로 새 위치 조명 반영(재베이크 없이).
+6. 씬 저장·재오픈 / 플레이 모드에서 베이크 없이 에셋으로 표시.
+
+**B1-4 완료(v15.9)** — 픽셀 단위 볼륨 샘플. 구현 메모:
+- 셰이더 계약은 `ProbeVolumeShaderBinding`(C#) ↔ `HuskyProbeVolume.hlsl` 1:1 — CPU 미러 `EvaluateIrradiance` 가 GPU 테스트 기준. HW trilinear 는 valid 가중 불가 → dilation 값 의존.
+- 볼륨 밖: 경계 클램프 + `edgeFadeCells` 동안 폴백 SH(베이크 때 저장한 하늘만 SH)로 lerp. 비활성(바인딩 없음) → 폴백만.
+- 식생 셰이더: 알파 클립(그림자 포함)·양면·잎 투과(간접 E(n)+t·E(-n), 직사 뒷면 t 배)·`_HUSKY_PV_PIVOT`(풀 — 정점에서 피벗 1회 샘플). 바람·LOD 는 범위 밖.
+- 베이커: 템플릿별 `ShadingMode.PerPixelVolume` → SH 버퍼 없는 렌더러 + MPB 볼륨 바인딩. `bindGlobal` 로 다른 렌더러도 볼륨 사용.
+
+**B1-4 에디터 확인 체크리스트**
+1. 재컴파일 에러 0(셰이더 3종 포함) → "Run Probe Volume Tests (Track B B1-1 ~ B1-4)" 전부 PASS — 특히 `ProbeVolumeGpuSampleTests` G1~G6 의 max|Δ|.
+2. `ProbeVolumeBaker` 템플릿 하나를 `PerPixelVolume` 으로 → Rebuild Render → 같은 인스턴스 안에서도 높이·위치별로 GI 가 달라지는지(InstanceProbes 대비).
+3. 잎 텍스처 머티리얼(InstancedVegetation_URP, `_BaseMap` 알파) 지정 → 알파 클립·그림자 구멍·뒷면 투과 확인.
+4. 볼륨 경계 밖으로 인스턴스 이동 → `edgeFadeCells` 동안 하늘 GI 로 부드럽게 전환, 끊김 없음.
+5. 지면 접지부 누수: `normalBiasCells` 0 ↔ 0.25 비교(지면 아래 프로브 영향 감소).
+6. 풀(대량): `_SamplePivot` 켜고 프레임 시간 비교.
+
+**B1-5 완료(v15.10)** — 템플릿 로컬 정점 AO. 구현 메모:
+- `VertexAOBake.Compute`: 메시 단독 씬 → `BurstAO.Compute`(코어 무수정). 앞면 = 노멀 반구, 뒷면 = 반대 반구(twoSided 템플릿만, 아니면 앞면 사본). 레이 길이 = 0.5 × bounds 대각선(기본), 시작 오프셋 = 1e-4 × 대각선(+ BurstAO 1e-3).
+- 저장: 메시 사본 uv3 = (앞, 뒤) → `ProbeVolumeAsset.vertexAO`(서브에셋). 같은 메시를 쓰는 템플릿은 1개(twoSided OR).
+- 표시: AO 메시 + `_HUSKY_VERTEX_AO` 머티리얼(식생·InstancedSH 둘 다) — 간접광에만 곱함, 백페이스는 뒷면 AO. 런타임 머티리얼은 AO 판/비-AO 판 분리(uv3 없는 메시에 키워드 = 간접광 0 방지).
+
+**B1-5 에디터 확인 체크리스트**
+1. "Run Probe Volume Tests (Track B B1-1 ~ B1-5)" 전부 PASS(특히 `VertexAOBakeTests` C·D 수치).
+2. 실 나무 템플릿(Read/Write) → Bake → 에셋에 `<메시>_AO` 서브메시 생성, 콘솔 경고 없음.
+3. 수관 안쪽·가지 밑이 어두워지는지 `vertexAOStrength` 0 ↔ 1 비교(직사광 그림자는 그대로).
+4. 양면 잎 카드(twoSided) 뒷면에서 AO 가 따로 적용되는지.
+5. 정점 수 많은 메시의 베이크 시간(정점 × samples 레이) — 필요 시 samples·maxDistanceRelative 조정.
+
+다음: **B1-6** 알파 잎 차폐 — 패키지 저장소의 텍스처 any-hit 구현과 방식 정합 먼저.
+
+---
+
+## 7. 리스크
+
+- **누수(leak)**: trilinear 는 벽을 넘어 보간 → 얇은 벽·지면 경계 번짐. B1-2(유효성)·B1-4(normalBias)로 완화, 근본 해결(가시성 가중 — DDGI 식 깊이 모멘트)은 범위 밖.
+- **알파 잎 과차폐**: B1-6 전까진 Opaque/Excluded 근사 — 수관 아래가 과하게 어둡거나(Opaque) 밝음(Excluded).
+- **볼륨 해상도 vs 메모리**: 균일 격자는 빈 공간 낭비 → B2 필요. 간격이 크면 풀 접지부 음영 손실(정점 AO 가 일부 보완).
+- **씬 입력 이원화**: 텍스처 경로(`AtlasApplyDebug.BuildGiScene`)와 볼륨(`TemplateInstanceSource`)이 씬을 따로 구성 → 같은 씬을 다르게 볼 위험. C0(수집·분류) 착수 시 공용 씬 빌더로 합류.
+- **B1-6 코어 변경**: 3백엔드 순회 동시 수정 — ᾱ=1 비트 동일 회귀를 게이트로.
+- **SH 링잉**: 고대비(하늘↔지면) 볼륨에서 L2 링잉 — 기존 디링잉(W2=0.5) 공유, 필요 시 볼륨 전용 윈도우.
+- 공통: 에디터 미검증 상태로 쌓이는 변경 → 기획서 §11-1 에디터 게이트를 B1-3 전에 한 번 통과 권장.
+
+---
+
+## 8. 다음 액션
+1. ✅ §5 **D1~D6** 확정(권장대로, 2026-10-25).
+2. ✅ **B1-1 + B1-2**: `ProbeGrid`·`BurstProbeValidity` + `ProbeGridTests`·`ProbeValidityTests` + RunAll 배선 + 문서 v15.7 (에디터 테스트 실행 대기).
+3. ✅ **B1-3**: `ProbeVolumeAsset` · `ProbeVolumeBaker` · 인스턴스 적용 + `ProbeVolumeBakerTests` + 문서 v15.8 (에디터 확인 — §6 체크리스트).
+4. ✅ **B1-4**: `HuskyProbeVolume.hlsl` + `InstancedVegetation_URP.shader` + `ProbeVolumeShaderBinding` + `ProbeVolumeGpuSampleTests` + 문서 v15.9 (에디터 확인 — §6 체크리스트).
+5. ✅ **B1-5**: `VertexAOBake` + 에셋·베이커 연동 + 셰이더 `_HUSKY_VERTEX_AO` + `VertexAOBakeTests` + 문서 v15.10 (에디터 확인 — §6 체크리스트).
+6. ✅ **B1-6 방식 결정(2026-10-26)**: 패키지 병합(v15.11)을 기준으로 함 → D5 를 '삼각형 평균 커버리지' 대신 **패키지 텍스처 any-hit**(CPU/Burst/GPU + `AlphaCutoutTests`·`AlphaGpuCompareTests`)으로 변경. B1-6 = 템플릿 머티리얼 → `AlphaSceneData`(`AlphaMaskBuilder`) → 볼륨 베이크·유효성·정점 AO 씬에 `SetAlpha`/`BurstScene.Create(…, alpha, …)`/`GpuScene.BindAlpha`. 코어 순회 변경 불필요(이미 3백엔드 구현·검증).

@@ -72,24 +72,56 @@ namespace HuskyLibs.CustomLightmapper
             if (probesPerInstance < 1) throw new ArgumentException("probesPerInstance ≥ 1");
             if (SH.Length % probesPerInstance != 0)
                 throw new ArgumentException($"SH 길이({SH.Length})가 probesPerInstance({probesPerInstance}) 배수 아님");
-            int total = SH.Length;                     // 인스턴스 × 프로브
-            int n = total / probesPerInstance;         // 인스턴스 수(=Count, 렌더러 행렬 수와 정합)
+            var flat = new Vector4[SH.Length * SHPacked.Float4Count];
+            for (int i = 0; i < SH.Length; i++) PackInto(flat, i, SH[i]);
+            return CreateFromPacked(flat, probesPerInstance);
+        }
+
+        /// <summary>
+        /// 이미 평탄 패킹된 float4 열(프로브당 7개, inst0_probe0, inst0_probe1, …)로 버퍼 생성 — 베이크 에셋 로드용.
+        /// </summary>
+        public static SHInstancedBuffer CreateFromPacked(Vector4[] flat, int probesPerInstance = 1)
+        {
+            if (flat == null) throw new ArgumentNullException(nameof(flat));
+            if (probesPerInstance < 1) throw new ArgumentException("probesPerInstance ≥ 1");
+            int perInstance = probesPerInstance * SHPacked.Float4Count;
+            if (flat.Length == 0 || flat.Length % perInstance != 0)
+                throw new ArgumentException($"패킹 길이({flat.Length})가 인스턴스당 {perInstance}(float4)의 배수가 아님");
+            int n = flat.Length / perInstance;         // 인스턴스 수(=Count, 렌더러 행렬 수와 정합)
             // 셰이더는 _InstanceSH 를 StructuredBuffer<float4>(stride 16)로 보고 프로브당 7개를
             // 연속 인덱스로 읽는다(EvaluateSH9.hlsl). 따라서 버퍼도 반드시 float4 × (total·7),
             // stride 16 으로 만들어야 stride 정합(112 로 만들면 SRV stride 불일치 → 오독/바인딩 거부).
-            var flat = new Vector4[total * SHPacked.Float4Count];
-            for (int i = 0; i < total; i++)
-            {
-                var p = SHPacked.Pack(SH[i]);
-                int b = i * SHPacked.Float4Count;
-                flat[b + 0] = p.p0; flat[b + 1] = p.p1; flat[b + 2] = p.p2; flat[b + 3] = p.p3;
-                flat[b + 4] = p.p4; flat[b + 5] = p.p5; flat[b + 6] = p.p6;
-            }
-
-            var buf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, total * SHPacked.Float4Count, sizeof(float) * 4);
+            var buf = new GraphicsBuffer(GraphicsBuffer.Target.Structured, flat.Length, sizeof(float) * 4);
             buf.SetData(flat);
             return new SHInstancedBuffer() { Buffer = buf, Count = n }; // Count=인스턴스 수 유지 — 렌더러 정합 검사용
+        }
 
+        /// <summary>SH9 열 → 평탄 float4 열(프로브당 7개). GPU 버퍼·베이크 에셋 저장이 같은 레이아웃을 쓰도록 단일화.</summary>
+        public static Vector4[] Flatten(SH9[] sh)
+        {
+            var flat = new Vector4[sh.Length * SHPacked.Float4Count];
+            for (int i = 0; i < sh.Length; i++) PackInto(flat, i, sh[i]);
+            return flat;
+        }
+
+        /// <summary>평탄 float4 열에서 probeIndex 번째 프로브(전역 순번) SH9 복원.</summary>
+        public static SH9 UnflattenAt(Vector4[] flat, int probeIndex)
+        {
+            int b = probeIndex * SHPacked.Float4Count;
+            var p = new SHPacked
+            {
+                p0 = flat[b + 0], p1 = flat[b + 1], p2 = flat[b + 2], p3 = flat[b + 3],
+                p4 = flat[b + 4], p5 = flat[b + 5], p6 = flat[b + 6],
+            };
+            return p.Unpacked();
+        }
+
+        static void PackInto(Vector4[] flat, int probeIndex, in SH9 s)
+        {
+            var p = SHPacked.Pack(s);
+            int b = probeIndex * SHPacked.Float4Count;
+            flat[b + 0] = p.p0; flat[b + 1] = p.p1; flat[b + 2] = p.p2; flat[b + 3] = p.p3;
+            flat[b + 4] = p.p4; flat[b + 5] = p.p5; flat[b + 6] = p.p6;
         }
 
 

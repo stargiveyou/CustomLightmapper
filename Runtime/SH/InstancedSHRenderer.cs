@@ -32,14 +32,16 @@ namespace HuskyLibs.CustomLightmapper.Bake
         static readonly int ID_Matrix = Shader.PropertyToID("_InstanceMatrix");
         static readonly int ID_Color = Shader.PropertyToID("_Color");
 
+        /// <param name="sh">인스턴스 SH 버퍼(InstancedSH_*). null 이면 SH 버퍼 없이 그림 — 볼륨 샘플 셰이더(InstancedVegetation_URP)용,
+        ///   볼륨 텍스처 등은 <see cref="Properties"/> 에 호출측이 바인딩.</param>
         /// <param name="ownsSh">true 면 이 렌더러가 Dispose 시 SH 버퍼도 해제.</param>
         /// <param name="albedo">표면 알베도(_Color). 머티리얼 공유 시 템플릿별 색을 MPB 로 주입.
         ///   null 이면 셰이더 기본값(흰색) 유지.</param>
         public InstancedSHRenderer(Mesh mesh, Material material, Matrix4x4[] matrices, SHInstancedBuffer sh, Bounds worldBounds, bool ownSh = false, Vector4? albedo = null)
         {
-            if (mesh == null || material == null || matrices == null || sh == null)
+            if (mesh == null || material == null || matrices == null)
                 throw new ArgumentNullException();
-            if (matrices.Length != sh.Count)
+            if (sh != null && matrices.Length != sh.Count)
                 throw new ArgumentException($"행렬 수({matrices.Length}) ≠ SH 수({sh.Count}) — SV_InstanceID 순서 불일치");
             if (SystemInfo.maxComputeBufferInputsVertex <= 0 && !SystemInfo.supportsInstancing)
                 Debug.LogWarning("[InstancedSHRenderer] 플랫폼이 StructuredBuffer(정점) 또는 인스턴싱을 제한할 수 있음.");
@@ -67,9 +69,14 @@ namespace HuskyLibs.CustomLightmapper.Bake
             _mpb = new MaterialPropertyBlock();
             _mpb.SetBuffer(ID_Matrix, _matrices);
             if (albedo.HasValue) _mpb.SetVector(ID_Color, albedo.Value); // 템플릿별 _Color 주입(공유 머티리얼 대응)
-            _sh.Bind(_mpb, SHInstancedBuffer.DefaultShaderProp);
+            _sh?.Bind(_mpb, SHInstancedBuffer.DefaultShaderProp);
 
         }
+
+        /// <summary>이 렌더러의 MaterialPropertyBlock(행렬·SH·알베도 바인딩 완료). 추가 바인딩(예: 프로브 볼륨)용 — 드로우마다 그대로 쓰임.</summary>
+        public MaterialPropertyBlock Properties => _mpb;
+        internal Mesh DrawMesh => _mesh;
+        internal Material DrawMaterial => _mat;
 
         /// <summary>인스턴스 행렬 갱신(정적이면 불필요; 동적/스트리밍용).</summary>
         public void UpdateMatrices(Matrix4x4[] matrices)

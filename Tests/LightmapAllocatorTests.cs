@@ -10,6 +10,34 @@ namespace HuskyLibs.CustomLightmapper.Bake
     /// </summary>
     public static class LightmapAllocatorTests
     {
+        /// <summary>A4 기본 자체 테스트(3큐브 변 비율·200큐브 페이지 오버플로). 구 LightmapAllocator.RunSelfTests 이전.</summary>
+        public static string RunSelfTests()
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("=== A4 per-instance ST Self-Tests ===");
+
+            // 단위 큐브 area=6, 스케일 1/2/0.5 → 월드면적 6/24/1.5 → 변 비율 1:2:0.5
+            var insts = new[]
+            {
+                new LightmapInstance { InstanceId = 1, WorldArea = 6f },
+                new LightmapInstance { InstanceId = 2, WorldArea = 24f },
+                new LightmapInstance { InstanceId = 3, WorldArea = 1.5f },
+            };
+            var r = LightmapAllocator.Allocate(insts, AllocationSettings.Default);
+            float s1 = Find(r, 1).ScaleOffset.x, s2 = Find(r, 2).ScaleOffset.x, s05 = Find(r, 3).ScaleOffset.x;
+            bool ratio = Mathf.Abs(s2 / s1 - 2f) < 0.05f && Mathf.Abs(s05 / s1 - 0.5f) < 0.05f;
+            bool ok = ratio && StInRange(r) && NoOverlap(r) && r.PageCount == 1;
+            sb.AppendLine($"[{(ok ? "PASS" : "FAIL")}] 3 cubes(1/2/0.5): pages={r.PageCount}, util={r.Utilization:P1}, sideRatio(2:1:0.5)={ratio}, ST∈[0,1]={StInRange(r)}, noOverlap={NoOverlap(r)}");
+
+            // 페이지 오버플로: 단위 큐브 200개
+            var many = new LightmapInstance[200];
+            for (int i = 0; i < 200; i++) many[i] = new LightmapInstance { InstanceId = i, WorldArea = 6f };
+            var r2 = LightmapAllocator.Allocate(many, AllocationSettings.Default);
+            bool ok2 = r2.PageCount > 1 && StInRange(r2) && NoOverlap(r2);
+            sb.AppendLine($"[{(ok2 ? "PASS" : "FAIL")}] 200 cubes: pages={r2.PageCount}, util={r2.Utilization:P1}, ST∈[0,1]={StInRange(r2)}, noOverlap={NoOverlap(r2)}");
+            return sb.ToString();
+        }
+
         public static string RunAll()
         {
             var sb = new StringBuilder();
