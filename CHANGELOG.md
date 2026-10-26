@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added — A3 LSCM / MVC 솔버 본체 (2026-10-26)
+- `LSCMSolver`(Lévy 2002 등각 최소제곱, 외곽 루프 2점 고정, Jacobi CG) · `MVCFallback`(Floater 평균값 좌표, 원 경계, 구멍 가상 부채꼴, BiCGSTAB/Gauss–Seidel) · `SparseSolver`(CSR·CG·BiCGSTAB·GS, double·결정적).
+- `ChartFlattener`: `FlattenSettings`(Planar 유지 L2 stretch 임계 기본 1.005, LSCM/MVC 토글, 반복·허용치) + `FlattenStats`, 3단 디스패치(겹침 또는 고왜곡 → LSCM 이 더 나을 때만 · 둘 다 겹치면 MVC). `FlattenSettings.FoldoverOnly` = 구 거동.
+- `UVValidator.Stretch`(L2 stretch, 면적 정규화). `ParameterizationPipeline.Run(mesh, seg, flatten)` + `ParamResult.Stats`. `AtlasApplyDebug.flatten`. `ParameterizationTestDebugger` 리포트에 stretch·방법 집계.
+- `Tests/ChartFlattenTests`(헤드리스 17 체크) — RunAll 배선 + 메뉴 "Run Chart Flatten Tests (A3 LSCM_MVC)".
+
+### Changed
+- 곡면 차트(평면투영 L2 stretch > 1.005)의 uv2 가 LSCM 결과로 바뀔 수 있음(더 나을 때만). 평면 차트는 비트 동일.
+
+### Fixed
+- `ProbeVolumeBakerTests`·`ProbeAlphaTests` 의 비트 동일 판정이 Unity `Vector4 !=`(ε 근사)를 쓰던 것을 성분별 정확 비교로.
+
 ### Added — Track B B1-6 알파 잎 차폐 (2026-10-26)
 - `ProbeVolumeBaker`: 컷아웃 머티리얼의 투명 텍셀을 프로브 SH(Burst·GPU, 1·다바운스)·유효성·정점 AO 베이크 레이가 통과(패키지 α any-hit 재사용 — 코어 무수정). 설정 `alphaCutout`(기본 on)·`alphaMaskResolution`·`alphaTransparentPolicy`·`alphaForceCutout`·`alphaForceCutoutNames`·`alphaDefaultCutoff`, 템플릿 `alphaMaterials`(서브메시별, 비우면 표시 머티리얼). 머티리얼이 없으면 기존과 비트 동일.
 - `VertexAOBake.Compute`/`Bake` 에 선택 인자 `AlphaSceneData alpha` + `VertexAOBake.BuildAlpha`.

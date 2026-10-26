@@ -25,9 +25,10 @@ tags: [custom-lightmapper, guide, reference]
 
 | 파일 | 줄 | 주요 타입 / API | 설명 |
 |---|---|---|---|
-| `ChartFlatten/ChartFlattener.cs` | 48 | `FlattenMethod`, `Flatten`, `FlattenAll` | Planar → LSCM → MVC 순 디스패처. **실제로는 Planar만 동작** |
-| `ChartFlatten/LSCMSolver.cs` | 29 | `LSCMSolver.Solve` | ⚠ **스텁** — `LogWarning("미구현 stub")` |
-| `ChartFlatten/MVCFallback.cs` | 28 | `MVCFallback.Solve` | ⚠ **스텁** |
+| `ChartFlatten/ChartFlattener.cs` | 148 | `FlattenMethod`, `FlattenSettings`, `FlattenStats`, `Flatten`, `FlattenAll` | Planar →(겹침·L2 stretch > 임계) LSCM →(겹침) MVC 디스패처 (v15.14) |
+| `ChartFlatten/LSCMSolver.cs` | 189 | `LSCMSolver.Solve` | 등각 최소제곱(외곽 2점 고정 + Jacobi CG) |
+| `ChartFlatten/SparseSolver.cs` | 228 | `SparseMatrix`, `SparseSolver` | CSR · CG · BiCGSTAB · Gauss–Seidel (double) |
+| `ChartFlatten/MVCFallback.cs` | 170 | `MVCFallback.Solve` | 평균값 좌표(원 경계, 구멍 가상 부채꼴, BiCGSTAB) |
 | `UVAssembly/PlanarProjector.cs` | 44 | `Projector`, `ProjectAll` | 차트 평균 노멀 평면으로 정사영 |
 | `UVAssembly/UVValidator.cs` | 51 | `UVReport`, `Validate`, `HasFoldover` | 부호 면적으로 뒤집힌 삼각형(foldover) 검출 |
 | `UVAssembly/UVPacker.cs` | 140 | `DensityNormalizer.Normalize`, `ShelfPacker.Pack` | 월드 면적 비례 UV 스케일 통일 → 셸프 방식 [0,1] 비겹침 배치 |

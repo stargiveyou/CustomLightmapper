@@ -400,7 +400,11 @@ namespace HuskyLibs.CustomLightmapper.Bake
         static bool SamePacked(ProbeVolumeAsset x, ProbeVolumeAsset y)
         {
             if (x.shPacked.Length != y.shPacked.Length) return false;
-            for (int i = 0; i < x.shPacked.Length; i++) if (x.shPacked[i] != y.shPacked[i]) return false;
+            for (int i = 0; i < x.shPacked.Length; i++)   // 성분별 정확 비교(Vector4 != 는 ε 근사 — 비트 동일 판정에 못 씀)
+            {
+                Vector4 a = x.shPacked[i], b = y.shPacked[i];
+                if (a.x != b.x || a.y != b.y || a.z != b.z || a.w != b.w) return false;
+            }
             return true;
         }
 

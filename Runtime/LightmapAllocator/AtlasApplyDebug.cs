@@ -35,6 +35,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
         [Tooltip("차폐 전용(occluder-only) — 차폐 씬에만 참여, 라이트맵 베이크/메시·머티리얼 스왑 대상 아님. 지형 기획: halo·프롭·건물.")]
         public MeshFilter[] occluders;
         public SegmentationSettings segmentation = SegmentationSettings.Default;
+        [Tooltip("차트 평탄화(A3): Planar → (겹침·L2 stretch > 임계) LSCM 등각 → (겹침) MVC 전단사. FoldoverOnly 처럼 임계를 Infinity 로 두면 겹칠 때만 LSCM.")]
+        public FlattenSettings flatten = FlattenSettings.Default;
 
         [Header("Allocation (LightmapAllocator)")]
         public int atlasResolution = 1024;
@@ -382,7 +384,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 SeamTable seams = null;
                 try
                 {
-                    var pr = ParameterizationPipeline.Run(src, segmentation);
+                    var pr = ParameterizationPipeline.Run(src, segmentation, flatten);
                     if (pr.Charts == null || pr.Charts.Length == 0) { Debug.LogWarning($"[AtlasApply] '{mf.name}' 차트 0개 — 건너뜀.", mf); continue; }
                     DensityNormalizer.Normalize(pr.Charts);
                     ShelfPacker.Pack(pr.Charts, chartGutter);

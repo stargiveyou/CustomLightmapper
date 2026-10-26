@@ -69,7 +69,7 @@ flowchart TD
 |---|---|---|
 | A1 | 메시 → Half-Edge(DCEL), 위치 기반 정점 용접 | `HalfEdge`, `WeldedHalfEdge` |
 | A1 | 노멀 각도 기반 best-first 영역성장 차트 분할 | `ChartSegementer`, `SegmentationSettings` |
-| A2 | 차트 평탄화 — **평면투영만 동작** (LSCM/MVC는 스텁) | `ChartFlattener`, `PlanarProjector` |
+| A2 | 차트 평탄화 — Planar → LSCM(등각) → MVC(전단사) 디스패치 (v15.14) | `ChartFlattener`, `PlanarProjector`, `LSCMSolver`, `MVCFallback` |
 | A2 | foldover(뒤집힌 삼각형) 검출 | `UVValidator` |
 | A3 | 월드 면적 기준 밀도 정규화 + 셸프 패킹 | `DensityNormalizer`, `ShelfPacker` |
 | A3 | uv2(채널1) 메시 조립 + 시임 테이블 | `UVAssembly`, `SeamTable` |
@@ -171,7 +171,7 @@ flowchart TD
 
 | 항목 | 내용 |
 |---|---|
-| 평탄화 | LSCM/MVC가 스텁(`LogWarning("미구현 stub")`) — 곡면 차트도 평면투영 → 왜곡 가능 |
+| 평탄화 | (v15.14 해소) LSCM/MVC 구현 — 비원판 차트(원통 고리 등)는 MVC 보장 밖이라 분할에 의존 |
 | 광원 | Directional + Sky만. Point/Spot/Area 없음 |
 | 출력 포맷 | 아틀라스가 **RGBA32 linear**(LDR 클램프). RGBAHalf HDR 출력은 문서상 계획이나 미구현 → 1.0 넘는 직사광이 잘림 |
 | 진입점 | 실 씬 자동 수집 없음(C0). 대상은 인스펙터에 수동 지정 |
@@ -190,7 +190,7 @@ flowchart TD
 |---|---|---|
 | 1 | **C0 씬 수집·분류** | 설계·개발문서 완료. C0-0 정책 코어(헤드리스 테스트 T1~T8)부터. 게이트 V3(수동 배열과 아틀라스 비트 동일)·V6(α 정합 무손상)이 핵심 |
 | 2 | B1 범용 프로브 격자 / 정점 베이크 | `BakePoints` 재사용, 샘플 지점 공급만 교체 |
-| 3 | LSCM / MVC 솔버 본체 | 리스크 표 유일 미해소 |
+| 3 | ~~LSCM / MVC 솔버 본체~~ | ✅ v15.14 |
 | 4 | Point / Spot / Area 광원 | `ILight.Sample` 계약 확정 후 3백엔드 미러 |
 | 5 | SH-2 다중 바운스 · `iid*7` 인덱싱 자동검증 | |
 | 6 | G6-3b 단일 글로벌 디스패치 · 타일/적응 샘플링 | |

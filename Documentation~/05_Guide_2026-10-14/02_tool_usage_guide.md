@@ -322,4 +322,4 @@ Run Self Tests · Run Indirect Tests · Run Mode-B Albedo Tests · Run BVH Cross
 | `overflow = true` | 페이지 초과 → `maxPages`↑ 또는 `texelsPerWorldUnit`↓ |
 | GPU 결과가 안 나옴 | 콘솔에 폴백 로그 확인. compute 미지원이면 Burst로 자동 전환 |
 | 새 테스트 클래스가 IDE에서 "없음" | Unity 재컴파일 전 정상 |
-| 곡면이 늘어나 보임 | LSCM/MVC 미구현 — 평면투영 한계. `segmentation.MaxChartAngleDeg`를 낮춰 차트를 잘게 |
+| 곡면이 늘어나 보임 | (v15.14 부터 LSCM 자동) `flatten.PlanarStretchThreshold` 를 낮추면 더 많은 차트가 LSCM 비교를 탐 · 그래도 남으면 `segmentation.MaxChartAngleDeg` 를 낮춰 차트를 잘게. `ParameterizationTestDebugger` 로 차트별 stretch·방법 확인 |

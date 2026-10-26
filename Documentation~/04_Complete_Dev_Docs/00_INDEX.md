@@ -36,7 +36,7 @@
 |---|---|---|---|
 | 1 | 수집·분류·알파 마스크 | ◕ | 알파 마스크 ✅(`Alpha/` + 3백엔드 any-hit) / C0 씬 수집·분류 구현(`Runtime/Collect/` + `Editor/SceneCollector`, v15.12 — 에디터 씬 게이트 대기) / MeshCleaner = `WeldedHalfEdge` 용접·퇴화제거 공개(진단만) |
 | 2 | 메시 구조(클린업→Half-Edge) | ✅ | `HalfEdge.cs` (`WeldedHalfEdge` weld 내장) |
-| 3 | 파라미터화(분할→UV2→정규화→패킹→통합) | ✅ | 평면투영 한정 (LSCM/MVC 스텁) |
+| 3 | 파라미터화(분할→UV2→정규화→패킹→통합) | ✅ | Planar → LSCM → MVC 디스패치 (솔버 본체 v15.14) |
 | 4 | 텍셀 복원(uv2→worldPos/normal) | ✅ | `TexelMapper.cs` |
 | 4* | SSAA 텍셀 내부 슈퍼샘플링(그림자 계단 제거) | ✅ | `TexelMapper.MapSubsamples` / `LightmapSSAA.cs` |
 | 4' | per-instance ST 할당 | ✅ | `LightmapAllocator.cs` |
@@ -74,7 +74,7 @@
 | SSAA | 텍셀 내부 슈퍼샘플링(Adaptive/Full) | ✅ 완료·검증 |
 | C0 | 씬 수집·분류 (알파 마스크는 완료) | ◕ C0-0~C0-4 구현(v15.12, 정책 테스트 20/20 헤드리스) · 에디터 씬 게이트 V3·V6·V8 대기 · C0-5(선택) 미착수 |
 | B1 | 범용 프로브 격자 / 정점 베이크 | ✅ B1-1~6 구현(격자·유효성·저장·픽셀 셰이더·정점 AO v15.7~10 병합 · 알파 잎 차폐 v15.13) — 에디터 테스트 대기 |
-| — | LSCM / MVC 솔버 본체 | ✗ 스텁 |
+| — | LSCM / MVC 솔버 본체 | ✅ v15.14 (헤드리스 17/17) — 에디터 실씬 확인 대기 |
 | — | Point / Spot / Area 광원 | ✗ 미착수 |
 
 ---
@@ -89,7 +89,7 @@
 | — | ~~C0 — 씬 수집·분류~~ | ◕ 구현(v15.12) — [설계](../01_Planning_And_Design/커스텀_라이트매퍼_C0_씬수집_설계.md) · [개발문서](../02_Development_And_Reference/커스텀_라이트매퍼_C0_SceneCollector_개발문서.md) §11 구현 차이 |
 | — | ~~B1-6 — Track B 알파 잎 차폐~~ | ✅ 구현(v15.13) — 패키지 α any-hit 연결, 코어 무수정 → [Track B 설계](../01_Planning_And_Design/커스텀_라이트매퍼_TrackB_식생프로브_설계.md) §6 체크리스트 |
 | 2 | Track B B2 — 적응형 프로브 | D1: 균일 격자 → 지형 추종 2.5D. 빈 하늘 공간 낭비 해소 |
-| 3 | LSCM / MVC 솔버 본체 | 리스크 표에서 유일하게 미해소 — 곡면 차트가 평면투영만 받음 |
+| — | ~~LSCM / MVC 솔버 본체~~ | ✅ v15.14 — 곡면 차트 등각 평탄화 · 겹침 MVC |
 | 4 | Point / Spot / Area 광원 | `ILight.Sample` 계약 확정 후 3백엔드 미러링 |
 | 5 | ~~SH-2 다바운스 · `iid*7` 인덱싱 검증~~ | ✅ 완료(v14.12·v14.14·v15.2 — 병합으로 반영). SH 트랙 잔여는 실씬 노출 튜닝 |
 | 6 | G6-3b 단일 글로벌 디스패치 · 타일/적응 샘플링 | GPU 추가 가속(현재 7.2×) |

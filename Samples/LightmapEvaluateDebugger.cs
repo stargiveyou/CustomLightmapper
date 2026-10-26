@@ -59,6 +59,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         public void RunAllTests()
         {
             var sb = new System.Text.StringBuilder();
+            sb.AppendLine(ChartFlattenTests.RunAll());         // A3 차트 평탄화: 희소 솔버·Stretch·Planar 회귀·LSCM(평면/원통/구면)·겹침·MVC(구멍)·실패/퇴화(헤드리스)
             sb.AppendLine(LightmapEvaluateTests.RunAll());     // C2 토대(RayTri/BruteForce/AO/Direct)
             sb.AppendLine(BVHTests.RunAll());                   // C1 가속구조(BruteForce 정답 대조)
             sb.AppendLine(RadianceIndirectTests.RunAll());      // C2 Indirect(경로추적)
@@ -88,6 +89,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
             sb.AppendLine(SceneCollectPolicyTests.RunAll());      // C0 수집 정책(결정성·배타성·LOD·사유 우선순위·리포트 — 헤드리스)
             Debug.Log(sb.ToString(), this);
         }
+
+        [ContextMenu("Run Chart Flatten Tests (A3 LSCM_MVC)")]
+        public void RunChartFlattenTests() => Debug.Log(ChartFlattenTests.RunAll(), this);
 
         [ContextMenu("Run Self Tests")]
         public void RunSelfTests() => Debug.Log(LightmapEvaluateTests.RunAll(), this);
