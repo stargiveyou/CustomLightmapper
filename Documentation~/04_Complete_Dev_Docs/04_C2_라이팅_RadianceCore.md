@@ -391,7 +391,7 @@ static Tri[] BuildWorldTris(MeshFilter[] filters)   // 전 메시 삼각형을 �
 
 ### 9.2 Occluder / Receiver 분리 (v14.11)
 
-지형 QuadTree 기획의 개념검증. **`occluders` 배열은 차폐 씬에만 참여**하고 베이크·머티리얼 스왑에서는 제외된다.
+occluder 전용 오브젝트 지원. **`occluders` 배열은 차폐 씬에만 참여**하고 베이크·머티리얼 스왑에서는 제외된다.
 
 ```csharp
 // Samples/AtlasApplyDebug.cs:28

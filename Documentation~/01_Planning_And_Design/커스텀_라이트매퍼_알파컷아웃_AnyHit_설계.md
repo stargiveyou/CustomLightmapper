@@ -411,14 +411,16 @@ uv0 = mesh.uv   (없으면 zero + 해당 메시 hasCutout=0 강제 + 경고)
 ## 11. 상위 로드맵과의 관계
 
 - 이 트랙은 대시보드 **단계 1 (C0: 수집·분류·알파 마스크)** 중 "알파 마스크" 부분의 완결이다.
-  `SceneCollector`/`MeshCleaner` 는 별도.
-- **지형 QuadTree 라이트맵 본계획의 선행 조건**이다. QuadTree 설계는 나무·프롭을
-  occluder 인스턴스로 취급하는데(v14.11 Occluder/Receiver 분리 개념검증 완료),
-  그 occluder 대부분이 컷아웃 식생이다. 알파 없이는 QuadTree를 구현해도
-  그림자 품질이 지금과 같다.
+  `SceneCollector`/`MeshCleaner` 는 별도 — C0 는 이 빌더를 **재구현하지 말고 호출**한다.
+- **occluder 전용 오브젝트**(v14.11 `AtlasApplyDebug.occluders`)와 짝이다. 나무·프롭을
+  occluder 로만 넣어도, 알파가 없으면 잎이 통짜 실루엣 그림자로 구워진다.
 - **Track B(식생 프로브)** 도 같은 레이 엔진을 쓰므로 자동으로 수혜를 받는다.
 
-→ **권장 순서: α 트랙 → 지형 QuadTree 본계획 → Track B**
+> 2026-08-18: 이 트랙의 선행조건으로 잡혀 있던 **지형 QuadTree 라이트맵 본계획은 로드맵에서 제외**됐다.
+> α 트랙 자체는 독립적으로 완결(α0~α8)되었고 위 두 항목은 그대로 유효하다.
+> 현재 로드맵은 `02_Development_And_Reference/커스텀_라이트매퍼_개발문서_v14.md` §10.
+
+→ **권장 순서: ✅α 트랙(완료) → C0 수집·분류 → Track B**
 
 ---
 

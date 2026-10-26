@@ -1,7 +1,7 @@
 # CustomLightmapper — 기획 · 개발 완료 정리 (소스 첨부)
 
 > 패키지: `com.huskylibs.customlightmapper` v0.14.0 (UPM embedded)
-> 정리 기준일: 2026-07-27 · 기준 커밋: `6206368` (A-trous denoise) / `f7ec4b9` (Initial import v0.14.0)
+> 정리 기준일: 2026-08-18 · 기준 커밋: `5a727ff` (SSAA) / `4553f0c` (α 컷아웃) / `6206368` (A-trous denoise)
 > 원 문서: `01_Planning_And_Design/커스텀_라이트매퍼_기획서_v14.md` · `02_Development_And_Reference/커스텀_라이트매퍼_개발문서_v14.md`
 
 이 폴더는 **기획 단계별 결정**과 **실제 개발 완료된 코드**를 1:1로 대응시켜 정리한 문서 묶음이다.
@@ -33,7 +33,7 @@
 
 | 단계 | 내용 | 상태 | 구현 |
 |---|---|---|---|
-| 1 | 수집·분류·알파 마스크 | ✗ | SceneCollector / MeshCleaner 미존재 |
+| 1 | 수집·분류·알파 마스크 | ◐ | 알파 마스크 ✅(`Alpha/` + 3백엔드 any-hit) / SceneCollector·MeshCleaner 미존재 |
 | 2 | 메시 구조(클린업→Half-Edge) | ✅ | `HalfEdge.cs` (`WeldedHalfEdge` weld 내장) |
 | 3 | 파라미터화(분할→UV2→정규화→패킹→통합) | ✅ | 평면투영 한정 (LSCM/MVC 스텁) |
 | 4 | 텍셀 복원(uv2→worldPos/normal) | ✅ | `TexelMapper.cs` |
@@ -69,9 +69,29 @@
 | SH-1~5 | 인스턴싱 SH9 엔드투엔드(URP) | ✅ 완료·검증 |
 | SH-G | SH 베이크 GPU 가속 | ✅ 완료·검증 |
 | 후처리 | 시임 Tier1+2 · Dilation · **Denoise** · RGBAHalf | ✅ 완료 |
+| α0~α8 | 알파 컷아웃 Any-Hit 셰도우(CPU/Burst/GPU) | ✅ 완료·검증 |
+| SSAA | 텍셀 내부 슈퍼샘플링(Adaptive/Full) | ✅ 완료·검증 |
+| C0 | 씬 수집·분류 (알파 마스크는 완료) | 🔧 설계 완료 · 구현 미착수 |
 | B1 | 범용 프로브 격자 / 정점 베이크 | ✗ 미착수 |
-| C0 | SceneCollector · MeshCleaner | ✗ 미착수 |
 | — | LSCM / MVC 솔버 본체 | ✗ 스텁 |
+| — | Point / Spot / Area 광원 | ✗ 미착수 |
+
+---
+
+## 다음 단계 (2026-08-18)
+
+우선순위와 작업 단위는 **[개발문서 v14 §10](../02_Development_And_Reference/커스텀_라이트매퍼_개발문서_v14.md)** 이 기준이다.
+
+| 순위 | 항목 | 왜 |
+|---|---|---|
+| 1 | **C0 — 씬 수집·분류** 🔧설계완료 | 파이프라인 9단계 중 유일한 미구현 단계. 실 씬을 그대로 굽는 진입점이 없다. → [설계](../01_Planning_And_Design/커스텀_라이트매퍼_C0_씬수집_설계.md) · [개발문서](../02_Development_And_Reference/커스텀_라이트매퍼_C0_SceneCollector_개발문서.md) |
+| 2 | **B1 — 범용 프로브 격자 / 정점 베이크** | Track B 미착수. 레이 엔진·`BakePoints` 재사용으로 샘플 지점 공급만 교체 |
+| 3 | LSCM / MVC 솔버 본체 | 리스크 표에서 유일하게 미해소 — 곡면 차트가 평면투영만 받음 |
+| 4 | Point / Spot / Area 광원 | `ILight.Sample` 계약 확정 후 3백엔드 미러링 |
+| 5 | SH-2 다바운스 · `iid*7` 인덱싱 검증 | SH 트랙 잔여 |
+| 6 | G6-3b 단일 글로벌 디스패치 · 타일/적응 샘플링 | GPU 추가 가속(현재 7.2×) |
+| — | ~~지형 QuadTree 라이트맵~~ | **2026-08-18 로드맵 제외**. `AtlasApplyDebug.occluders` 는 occluder 전용 기능으로 존치 |
+| 보류 | BIRP 포팅 | 2026-07-09 결정 — SH 트랙 URP 확정 |
 
 ---
 
@@ -86,6 +106,6 @@
 
 ## 표기 규약
 
-- ✅ 구현·검증 완료 / ◐ 부분 완료 / ✗ 미착수 / ⚠ 주의·차이점
+- ✅ 구현·검증 완료 / ◐ 부분 완료 / 🔧 설계 완료·구현 미착수 / ✗ 미착수 / ⚠ 주의·차이점
 - 코드 인용은 `파일경로:줄번호` 형식이며 실제 트리 기준이다.
 - 문서(v14)와 실제 트리가 다른 지점은 각 문서 말미 「문서↔트리 차이」에 명시했다.
