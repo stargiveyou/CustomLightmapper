@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added — Track B B1-6 알파 잎 차폐 (2026-10-26)
+- `ProbeVolumeBaker`: 컷아웃 머티리얼의 투명 텍셀을 프로브 SH(Burst·GPU, 1·다바운스)·유효성·정점 AO 베이크 레이가 통과(패키지 α any-hit 재사용 — 코어 무수정). 설정 `alphaCutout`(기본 on)·`alphaMaskResolution`·`alphaTransparentPolicy`·`alphaForceCutout`·`alphaForceCutoutNames`·`alphaDefaultCutoff`, 템플릿 `alphaMaterials`(서브메시별, 비우면 표시 머티리얼). 머티리얼이 없으면 기존과 비트 동일.
+- `VertexAOBake.Compute`/`Bake` 에 선택 인자 `AlphaSceneData alpha` + `VertexAOBake.BuildAlpha`.
+- `ProbeVolumeAsset.alphaCutout`·`alphaLog`, `VertexAOEntry.alphaCutout`.
+- `Tests/ProbeVolume/ProbeAlphaTests`(ᾱ=1 ≡ 알파 없음 · ᾱ=0 ≡ 메시 제거 비트 동일 · 체커 · 정점 AO · 베이커 머티리얼 경로 · GPU) — RunAll 배선.
+
 ### Added — C0 씬 수집·분류 (2026-10-26)
 파이프라인 단계 1(씬에서 무엇을 굽을지 고르는 층). 베이크 경로 무변경 — `AtlasApplyDebug` 의 targets/occluders 를 채우는 입력 공급기. 상세 `Documentation~/02_Development_And_Reference/커스텀_라이트매퍼_개발문서_v15.md` §5.8 · §12 v15.12.
 - `Runtime/Collect/`: `SceneCollectPolicy`(순수 함수 — Receiver / OccluderOnly / Excluded + 사유, 판정 순서 = 사유 우선순위, 정렬 없음) · `SceneCollection`(결과 + `Report`) · `SceneCollectOverride`(재수집에도 남는 OccluderOnly/Exclude 표식).

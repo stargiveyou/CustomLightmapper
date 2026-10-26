@@ -14,6 +14,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
     ///   단면 메시는 뒷면 = 앞면. 셰이더(_HUSKY_VERTEX_AO)는 간접광(볼륨/SH)에만 곱함 — 직사광 차폐는 실시간 그림자.
     /// 레이 길이 = maxDistanceRelative × 템플릿 bounds 대각선(0 = 무제한), 시작점 = 정점 + n·(surfaceBiasRelative × 대각선)
     ///   (+ BurstAO 내부 1e-3). 노멀이 없는(0) 정점은 AO 1.
+    /// 알파(B1-6): <see cref="BuildAlpha"/>(메시 + 서브메시별 머티리얼) 결과를 넘기면 AO 레이가 잎 카드 구멍을 통과(패키지 α any-hit —
+    ///   BurstAO 의 Occluded 가 이미 알파 순회). null/Disabled 면 기존과 비트 동일.
     /// </summary>
     public static class VertexAOBake
     {
@@ -37,8 +39,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
         /// <summary>
         /// 템플릿 메시의 정점 AO. front[i] = 노멀 반구, back[i] = 반대 반구(twoSided 일 때만 — 아니면 front 사본). Read/Write 필요.
+        /// <paramref name="alpha"/> = 이 메시 단독 씬의 알파 데이터(<see cref="BuildAlpha"/> — BLAS 0 = 메시, 인스턴스 0 = 항등).
         /// </summary>
-        public static void Compute(Mesh mesh, in Settings s, bool twoSided, out float[] front, out float[] back)
+        public static void Compute(Mesh mesh, in Settings s, bool twoSided, out float[] front, out float[] back, AlphaSceneData alpha = null)
         {
             if (mesh == null) throw new ArgumentNullException(nameof(mesh));
             var tris = TemplateInstanceSource.MeshToLocalTris(mesh);   // Read/Write 아니면 예외
@@ -50,7 +53,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
             using var bvh = new TwoLevelBVH(new[] { tris }, new[] { new TwoLevelBVH.Instance { MeshIndex = 0, LocalToWorld = Matrix4x4.identity } },
                                             Allocator.TempJob, BVH.BuildQuality.SAH);
-            using var scene = BurstScene.Create(bvh, null, Allocator.TempJob);
+            using var scene = BurstScene.Create(bvh, null, alpha, Allocator.TempJob);   // alpha null/Disabled → 1원소 더미(기존 경로)
             front = Run(scene, v, n, 1f, bias, s.samples, s.seed, maxDist);
             back = twoSided ? Run(scene, v, n, -1f, bias, s.samples, s.seed ^ BackSeedSalt, maxDist) : (float[])front.Clone();
         }
@@ -94,10 +97,22 @@ namespace HuskyLibs.CustomLightmapper.Bake
         }
 
         /// <summary>Compute → CreateAOMesh 한 번에.</summary>
-        public static Mesh Bake(Mesh source, in Settings s, bool twoSided)
+        public static Mesh Bake(Mesh source, in Settings s, bool twoSided, AlphaSceneData alpha = null)
         {
-            Compute(source, s, twoSided, out var front, out var back);
+            Compute(source, s, twoSided, out var front, out var back, alpha);
             return CreateAOMesh(source, front, back);
+        }
+
+        /// <summary>
+        /// 메시 단독 AO 씬의 알파 데이터 — 서브메시 s 의 머티리얼 = materials[s](모자라면 불투명). 컷아웃이 없으면 Disabled.
+        /// 삼각형 수 = mesh.triangles/3 = <see cref="TemplateInstanceSource.MeshToLocalTris"/> 길이(BLAS 0 과 1:1 — AlphaMaskBuilder 정합 검사).
+        /// </summary>
+        public static AlphaSceneData BuildAlpha(Mesh mesh, Material[] materials, AlphaMaskBuilder builder, out string log)
+        {
+            log = null;
+            if (mesh == null || builder == null || materials == null || materials.Length == 0 || !mesh.isReadable) return AlphaSceneData.Disabled;
+            int nTri = mesh.triangles.Length / 3;
+            return builder.BuildScene(new[] { mesh }, new[] { nTri }, new[] { 0 }, new[] { materials }, out log);
         }
 
         // 메시 노멀(정점 수와 같을 때) 또는 면적가중 면 노멀 누적(원본 메시는 건드리지 않음)

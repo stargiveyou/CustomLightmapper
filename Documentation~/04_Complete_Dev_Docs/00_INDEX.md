@@ -43,7 +43,7 @@
 | 5 | 가속구조 BVH | ✅ 검증 | `BVH.cs` / `TwoLevelBVH.cs` |
 | 6 | 라이팅(AO/Direct/Indirect) | ✅ 검증 | `RadianceCore.cs` |
 | 6.5 | GI 베이크 연결 | ✅ | `AtlasApplyDebug.RadianceGI` |
-| 7 | 프로브 베이크(Track B) | ◕ | SH 인스턴싱 + 공간 프로브 볼륨(B1-1~5: 격자·유효성·저장·픽셀 셰이더·정점 AO) — v15 문서·`Runtime/ProbeVolume/` |
+| 7 | 프로브 베이크(Track B) | ◕ | SH 인스턴싱 + 공간 프로브 볼륨(B1-1~6: 격자·유효성·저장·픽셀 셰이더·정점 AO·알파 잎 차폐) — v15 문서·`Runtime/ProbeVolume/` · B2 적응형 남음 |
 | 8 | 후처리(디노이즈/스티칭/디레이션/RGBAHalf) | ✅ | `Denoise/` `LightmapStitch/` `Diliation/` |
 | 9 | 출력·런타임 적용 | ✅ | `LightmapDebug.shader` / `InstancedSH_URP.shader` |
 
@@ -73,7 +73,7 @@
 | α0~α8 | 알파 컷아웃 Any-Hit 셰도우(CPU/Burst/GPU) | ✅ 완료·검증 |
 | SSAA | 텍셀 내부 슈퍼샘플링(Adaptive/Full) | ✅ 완료·검증 |
 | C0 | 씬 수집·분류 (알파 마스크는 완료) | ◕ C0-0~C0-4 구현(v15.12, 정책 테스트 20/20 헤드리스) · 에디터 씬 게이트 V3·V6·V8 대기 · C0-5(선택) 미착수 |
-| B1 | 범용 프로브 격자 / 정점 베이크 | ◕ B1-1~5 구현(격자·유효성·저장·픽셀 셰이더·정점 AO, v15.7~10 병합) · B1-6 알파 잎 차폐 남음 |
+| B1 | 범용 프로브 격자 / 정점 베이크 | ✅ B1-1~6 구현(격자·유효성·저장·픽셀 셰이더·정점 AO v15.7~10 병합 · 알파 잎 차폐 v15.13) — 에디터 테스트 대기 |
 | — | LSCM / MVC 솔버 본체 | ✗ 스텁 |
 | — | Point / Spot / Area 광원 | ✗ 미착수 |
 
@@ -85,9 +85,10 @@
 
 | 순위 | 항목 | 왜 |
 |---|---|---|
-| 1 | **에디터 확인 게이트** | 병합(v15.11) + C0(v15.12)은 에디터 밖에서만 검증 — 재컴파일 0 · Run All Tests 26종 · C0 씬 게이트(V3 비트동일·V6 α 정합) → [C0 진행](../03_Progress_And_Validation/진행상황_C0-SceneCollector_2026-08-18.md) |
+| 1 | **에디터 확인 게이트** | 병합(v15.11) + C0(v15.12) + B1-6(v15.13)은 에디터 밖에서만 검증(패키지 전체 타입 검사 통과) — 재컴파일 0 · Run All Tests 27종 · C0 씬 게이트(V3 비트동일·V6 α 정합) → [C0 진행](../03_Progress_And_Validation/진행상황_C0-SceneCollector_2026-08-18.md) |
 | — | ~~C0 — 씬 수집·분류~~ | ◕ 구현(v15.12) — [설계](../01_Planning_And_Design/커스텀_라이트매퍼_C0_씬수집_설계.md) · [개발문서](../02_Development_And_Reference/커스텀_라이트매퍼_C0_SceneCollector_개발문서.md) §11 구현 차이 |
-| 2 | **B1-6 — Track B 알파 잎 차폐** | B1-1~5 완료(v15.7~10). 남은 것: 패키지 α any-hit(`AlphaSceneData`)를 프로브 볼륨 베이크·유효성·정점 AO 씬에 연결 → [Track B 설계](../01_Planning_And_Design/커스텀_라이트매퍼_TrackB_식생프로브_설계.md) |
+| — | ~~B1-6 — Track B 알파 잎 차폐~~ | ✅ 구현(v15.13) — 패키지 α any-hit 연결, 코어 무수정 → [Track B 설계](../01_Planning_And_Design/커스텀_라이트매퍼_TrackB_식생프로브_설계.md) §6 체크리스트 |
+| 2 | Track B B2 — 적응형 프로브 | D1: 균일 격자 → 지형 추종 2.5D. 빈 하늘 공간 낭비 해소 |
 | 3 | LSCM / MVC 솔버 본체 | 리스크 표에서 유일하게 미해소 — 곡면 차트가 평면투영만 받음 |
 | 4 | Point / Spot / Area 광원 | `ILight.Sample` 계약 확정 후 3백엔드 미러링 |
 | 5 | ~~SH-2 다바운스 · `iid*7` 인덱싱 검증~~ | ✅ 완료(v14.12·v14.14·v15.2 — 병합으로 반영). SH 트랙 잔여는 실씬 노출 튜닝 |

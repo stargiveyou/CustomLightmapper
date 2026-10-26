@@ -21,17 +21,21 @@ namespace HuskyLibs.CustomLightmapper.Bake
     ///   배치가 바뀌면 "Rebuild Render" 만 — 재베이크 불필요. 플레이/빌드에선 에셋만 로드(OnEnable).
     /// 정점 AO(B1-5, 결정 D4): 템플릿 메시별 로컬 AO(<see cref="VertexAOBake"/>) → AO 메시 사본(uv3)을 에셋에 함께 저장,
     ///   표시 때 원본 대신 AO 메시 + _HUSKY_VERTEX_AO 머티리얼(간접광 × AO). 키워드 켠 머티리얼은 AO 메시 템플릿에만 쓴다(uv3 없으면 GI 0).
+    /// 알파 잎 차폐(B1-6, 결정 D5 갱신): <see cref="alphaCutout"/> 면 머티리얼의 알파 컷아웃을 패키지 α any-hit 로 베이크 레이에 반영 —
+    ///   템플릿(alphaMaterials → material → 모드별 공용 머티리얼, 표시와 같은 것) · 정적 렌더러 sharedMaterials → <see cref="AlphaMaskBuilder"/>
+    ///   → <see cref="AlphaSceneData"/> → BurstScene/GpuScene. 프로브 SH(1·다바운스, Burst·GPU) · 유효성 · 정점 AO 가 같은 순회라 모두 잎 구멍을 통과.
+    ///   코어 순회 무변경(이미 3백엔드 구현·검증). 컷아웃 머티리얼이 없으면 Disabled → 기존과 비트 동일.
     /// </summary>
     [ExecuteAlways]
     public class ProbeVolumeBaker : MonoBehaviour
     {
         public enum Backend { Burst, Gpu }
 
-        /// <summary>베이크 씬에서의 역할(결정 D5 1차 — 알파 커버리지(B1-6) 전까지).</summary>
+        /// <summary>베이크 씬에서의 역할(결정 D5). B1-6 부터 Opaque 도 머티리얼 알파 컷아웃은 통과(<see cref="alphaCutout"/>).</summary>
         public enum OccluderMode
         {
-            Opaque,     // 불투명 삼각형으로 트레이스(잎 카드면 수관 아래가 과하게 어두움)
-            Excluded,   // 베이크 씬에서 제외(차폐·반사 없음 — 과하게 밝음). 표시·샘플은 그대로
+            Opaque,     // 트레이스. alphaCutout 이면 컷아웃 머티리얼의 투명 텍셀은 통과(잎 카드 구멍), 아니면 통짜 불투명
+            Excluded,   // 베이크 씬에서 제외(차폐·반사 없음). 표시·샘플은 그대로
         }
 
         /// <summary>표시 방식(결정 D2).</summary>
@@ -63,6 +67,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
             public Material material;
             [Tooltip("이 템플릿 메시의 정점 AO(템플릿 로컬 자기차폐) 를 굽고 표시에 적용(B1-5). Read/Write 필요.")]
             public bool vertexAO = true;
+            [Tooltip("B1-6 알파 판정용 서브메시별 머티리얼(베이크 전용). 비우면 표시 머티리얼(material, 없으면 모드별 공용)을 전 서브메시에.")]
+            public Material[] alphaMaterials;
         }
 
         [Header("볼륨 (이 Transform 위치 중심, 월드 축 정렬)")]
@@ -142,6 +148,20 @@ namespace HuskyLibs.CustomLightmapper.Bake
         [Tooltip("전역 셰이더 변수로도 바인딩 — 이 컴포넌트 밖의 렌더러(HuskyProbeVolume.hlsl 사용)도 이 볼륨을 봄(볼륨 하나만).")]
         public bool bindGlobal;
 
+        [Header("알파 컷아웃 (B1-6 — 잎 카드 구멍으로 베이크 레이 통과)")]
+        [Tooltip("컷아웃 머티리얼의 알파를 프로브 SH·유효성·정점 AO 레이에 반영(패키지 α any-hit). 끄면 Opaque 템플릿은 통짜 불투명(B1-5 이전 거동).")]
+        public bool alphaCutout = true;
+        [Tooltip("머티리얼당 알파 마스크 해상도 상한.")]
+        [Min(8)] public int alphaMaskResolution = 256;
+        [Tooltip("알파 블렌딩(Transparent) 머티리얼 처리. Ignore = 레이 통과(유리·물).")]
+        public AlphaMaskBuilder.TransparentPolicy alphaTransparentPolicy = AlphaMaskBuilder.TransparentPolicy.Ignore;
+        [Tooltip("자동 판별이 실패하는 머티리얼을 강제로 컷아웃 취급(에셋 참조).")]
+        public Material[] alphaForceCutout;
+        [Tooltip("머티리얼/셰이더 이름 부분일치로 강제 컷아웃(대소문자 무시).")]
+        public string[] alphaForceCutoutNames;
+        [Tooltip("셰이더가 컷오프를 노출하지 않을 때의 기본 임계값(SpeedTree 는 0.3333 자동).")]
+        [Range(0f, 1f)] public float alphaDefaultCutoff = 0.5f;
+
         [Header("정점 AO (B1-5, 템플릿 로컬)")]
         [Tooltip("베이크 때 템플릿 메시별 정점 AO 메시(uv3)를 함께 만들어 에셋에 저장.")]
         public bool bakeVertexAO = true;
@@ -216,7 +236,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
 #endif
             var a = volumeAsset;
             Debug.Log($"[ProbeVolumeBaker] 베이크 완료: {a.grid}, 무효 {a.invalidCount} → dilation {a.dilatedCount}, " +
-                      $"bounces={a.bounces}, dirs={a.dirCount}, backend={usedBackend}", this);
+                      $"bounces={a.bounces}, dirs={a.dirCount}, backend={usedBackend}, alpha={(a.alphaCutout ? "ON" : "OFF")}\n  alpha: {a.alphaLog}", this);
             if (renderOnEnable && isActiveAndEnabled) RebuildRender();
         }
 
@@ -231,10 +251,11 @@ namespace HuskyLibs.CustomLightmapper.Bake
             Vector3Int d = grid.dims;
             if (d.x > ProbeVolumeAsset.MaxTextureDim || d.y > ProbeVolumeAsset.MaxTextureDim || d.z > ProbeVolumeAsset.MaxTextureDim)
             { Debug.LogError($"[ProbeVolumeBaker] 격자 {d} 가 Texture3D 축 한도 {ProbeVolumeAsset.MaxTextureDim} 초과.", this); return null; }
-            if (!BuildSceneInput(out var tris, out var albedo, out var insts, out var countBackface)) return null;
+            if (!BuildSceneInput(out var tris, out var albedo, out var insts, out var countBackface, out var meshes, out var instMats)) return null;
+            var alpha = BuildAlphaData(meshes, tris, insts, instMats, out string alphaLog);
 
             using var bvh = new TwoLevelBVH(tris, insts, Allocator.TempJob, BVH.BuildQuality.SAH);
-            using var bScene = BurstScene.Create(bvh, albedo, Allocator.TempJob);
+            using var bScene = BurstScene.Create(bvh, albedo, alpha, Allocator.TempJob);   // α: SH(Burst·GPU)·유효성이 같은 씬 → 모두 잎 구멍 통과
             var sunDL = SunLight();
             var sky = BurstSky.Gradient(skyTop, skyBottom);
             var q = new BakeQualitySettings { MaxBounces = bounces, RRStartDepth = 3, RayBias = 1e-4f };
@@ -290,15 +311,19 @@ namespace HuskyLibs.CustomLightmapper.Bake
             asset.validityThreshold = validityThreshold;
             asset.invalidCount = invalid;
             asset.dilatedCount = dilated;
+            asset.alphaCutout = alpha.Enabled;
+            asset.alphaLog = alphaLog ?? (alphaCutout ? "컷아웃 대상 머티리얼 없음" : "alphaCutout 꺼짐");
             return asset;
         }
 
         /// <summary>
-        /// 템플릿 메시별 정점 AO(같은 메시를 쓰는 템플릿은 1개로 — twoSided 는 OR). vertexAO 꺼진 템플릿·Read/Write 꺼진 메시는 건너뜀(경고).
+        /// 템플릿 메시별 정점 AO(같은 메시를 쓰는 템플릿은 1개로 — twoSided 는 OR, 알파 머티리얼은 처음 템플릿 것). vertexAO 꺼진 템플릿·Read/Write 꺼진 메시는 건너뜀(경고).
+        /// alphaCutout 이면 메시 단독 씬에도 알파(B1-6) — 잎 카드끼리의 자기차폐가 구멍을 통과.
         /// </summary>
         internal ProbeVolumeAsset.VertexAOEntry[] BakeVertexAO()
         {
             var list = new List<ProbeVolumeAsset.VertexAOEntry>();
+            var mats = new List<Material[]>();
             var byMesh = new Dictionary<Mesh, ProbeVolumeAsset.VertexAOEntry>();
             if (templates == null) return list.ToArray();
             foreach (var tp in templates)
@@ -310,9 +335,68 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 e = new ProbeVolumeAsset.VertexAOEntry { source = tp.mesh, twoSided = tp.twoSided };
                 byMesh[tp.mesh] = e;
                 list.Add(e);
+                mats.Add(TemplateAlphaMaterials(tp));
             }
-            foreach (var e in list) e.aoMesh = VertexAOBake.Bake(e.source, vertexAOSettings, e.twoSided);
+            for (int i = 0; i < list.Count; i++)
+            {
+                var e = list[i];
+                var alpha = alphaCutout ? VertexAOBake.BuildAlpha(e.source, mats[i], NewAlphaBuilder(), out _) : AlphaSceneData.Disabled;
+                e.alphaCutout = alpha.Enabled;
+                e.aoMesh = VertexAOBake.Bake(e.source, vertexAOSettings, e.twoSided, alpha);
+            }
             return list.ToArray();
+        }
+
+        // ───────────────────────── 알파 (B1-6) ─────────────────────────
+
+        /// <summary>인스펙터 알파 설정의 새 마스크 빌더(씬마다 새로 — 집계·마스크 테이블이 씬 단위).</summary>
+        internal AlphaMaskBuilder NewAlphaBuilder() => new AlphaMaskBuilder
+        {
+            MaskResolution = alphaMaskResolution,
+            Transparent = alphaTransparentPolicy,
+            DefaultCutoff = alphaDefaultCutoff,
+            ForceCutout = alphaForceCutout != null && alphaForceCutout.Length > 0 ? new HashSet<Material>(alphaForceCutout) : null,
+            ForceCutoutNames = alphaForceCutoutNames,
+        };
+
+        /// <summary>
+        /// 템플릿의 서브메시별 알파 판정 머티리얼: alphaMaterials(지정 시 그대로) → 표시 머티리얼(material, 없으면 모드별 공용 —
+        /// 지정된 것만, 런타임 생성은 텍스처가 없어 제외)을 전 서브메시에. 없으면 null(불투명).
+        /// </summary>
+        internal Material[] TemplateAlphaMaterials(TemplateInput tp)
+        {
+            if (tp == null) return null;
+            if (tp.alphaMaterials != null && tp.alphaMaterials.Length > 0) return tp.alphaMaterials;
+            var m = tp.material != null ? tp.material
+                  : tp.shading == ShadingMode.PerPixelVolume ? vegetationMaterial : material;
+            if (m == null || tp.mesh == null) return null;
+            var arr = new Material[Mathf.Max(1, tp.mesh.subMeshCount)];
+            for (int s = 0; s < arr.Length; s++) arr[s] = m;
+            return arr;
+        }
+
+        /// <summary>
+        /// 베이크 씬 알파 데이터(<see cref="AlphaMaskBuilder.BuildScene"/>) — meshes/tris 는 BLAS 순서, instMats 는 인스턴스 순서.
+        /// alphaCutout 꺼짐·컷아웃 머티리얼 없음 → Disabled(기존 경로와 비트 동일).
+        /// </summary>
+        internal AlphaSceneData BuildAlphaData(Mesh[] meshes, Tri[][] tris, TwoLevelBVH.Instance[] insts, Material[][] instMats, out string log)
+        {
+            log = null;
+            if (!alphaCutout || meshes == null || meshes.Length == 0 || !AnyMaterial(instMats)) return AlphaSceneData.Disabled;   // 머티리얼 0 → 메시 배열 복사 생략
+            var triCount = new int[tris.Length];
+            for (int m = 0; m < tris.Length; m++) triCount[m] = tris[m] != null ? tris[m].Length : 0;
+            var instMesh = new int[insts.Length];
+            for (int i = 0; i < insts.Length; i++) instMesh[i] = insts[i].MeshIndex;
+            return NewAlphaBuilder().BuildScene(meshes, triCount, instMesh, instMats, out log);
+        }
+
+        static bool AnyMaterial(Material[][] instMats)
+        {
+            if (instMats == null) return false;
+            foreach (var ms in instMats)
+                if (ms != null)
+                    foreach (var m in ms) if (m != null) return true;
+            return false;
         }
 
         /// <summary>하늘만의 SH(빈 씬 베이크 — 같은 방향셋·규약). 픽셀 셰이더의 볼륨 밖 폴백.</summary>
@@ -332,12 +416,19 @@ namespace HuskyLibs.CustomLightmapper.Bake
         /// 메시가 하나도 없으면 빈 씬(하늘만)으로 진행. Read/Write 꺼진 메시는 오류.
         /// </summary>
         internal bool BuildSceneInput(out Tri[][] tris, out Vector3[] albedo, out TwoLevelBVH.Instance[] insts, out bool[] countBackface)
+            => BuildSceneInput(out tris, out albedo, out insts, out countBackface, out _, out _);
+
+        /// <summary>+ 알파용: meshes = BLAS 인덱스별 원본 Mesh, instMaterials = 인스턴스별 서브메시 머티리얼(B1-6, null 허용).</summary>
+        internal bool BuildSceneInput(out Tri[][] tris, out Vector3[] albedo, out TwoLevelBVH.Instance[] insts, out bool[] countBackface,
+                                      out Mesh[] meshes, out Material[][] instMaterials)
         {
             var triList = new List<Tri[]>();
             var albList = new List<Vector3>();
             var cbList = new List<bool>();
             var instList = new List<TwoLevelBVH.Instance>();
-            tris = null; albedo = null; insts = null; countBackface = null;
+            var meshList = new List<Mesh>();
+            var matList = new List<Material[]>();
+            tris = null; albedo = null; insts = null; countBackface = null; meshes = null; instMaterials = null;
 
             if (templates != null)
             {
@@ -350,10 +441,16 @@ namespace HuskyLibs.CustomLightmapper.Bake
                     { Debug.LogError($"[ProbeVolumeBaker] 템플릿 {t} 메시 '{tp.mesh.name}' Read/Write 꺼짐 — 임포트 설정에서 켜거나 Excluded 로.", this); return false; }
                     int mi = triList.Count;
                     triList.Add(TemplateInstanceSource.MeshToLocalTris(tp.mesh));
+                    meshList.Add(tp.mesh);
                     var lin = tp.albedo.linear;
                     albList.Add(new Vector3(lin.r, lin.g, lin.b));
                     cbList.Add(!tp.twoSided);
-                    foreach (var m in tp.matrices) instList.Add(new TwoLevelBVH.Instance { MeshIndex = mi, LocalToWorld = m });
+                    var tMats = TemplateAlphaMaterials(tp);   // 인스턴스 전부 같은 배열(템플릿 단위)
+                    foreach (var m in tp.matrices)
+                    {
+                        instList.Add(new TwoLevelBVH.Instance { MeshIndex = mi, LocalToWorld = m });
+                        matList.Add(tMats);
+                    }
                 }
             }
 
@@ -370,15 +467,18 @@ namespace HuskyLibs.CustomLightmapper.Bake
                         if (mesh == null || !seen.Add(mf)) continue;
                         if (!mesh.isReadable)
                         { Debug.LogWarning($"[ProbeVolumeBaker] 정적 메시 '{mesh.name}'({mf.name}) Read/Write 꺼짐 — 베이크 씬에서 제외.", this); continue; }
+                        var rnd = mf.GetComponent<MeshRenderer>();
                         if (!meshToIdx.TryGetValue(mesh, out int mi))
                         {
                             mi = triList.Count;
                             meshToIdx[mesh] = mi;
                             triList.Add(TemplateInstanceSource.MeshToLocalTris(mesh));
-                            albList.Add(ReadAlbedo(mf.GetComponent<MeshRenderer>(), staticDefaultAlbedo));
+                            meshList.Add(mesh);
+                            albList.Add(ReadAlbedo(rnd, staticDefaultAlbedo));
                             cbList.Add(!staticTwoSided);
                         }
                         instList.Add(new TwoLevelBVH.Instance { MeshIndex = mi, LocalToWorld = mf.transform.localToWorldMatrix });
+                        matList.Add(rnd != null ? rnd.sharedMaterials : null);   // 인스턴스별(같은 메시라도 머티리얼은 다를 수 있음)
                     }
                 }
             }
@@ -387,6 +487,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
             albedo = albList.ToArray();
             insts = instList.ToArray();
             countBackface = cbList.ToArray();
+            meshes = meshList.ToArray();
+            instMaterials = matList.ToArray();
             return true;
         }
 
