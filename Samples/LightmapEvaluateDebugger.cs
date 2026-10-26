@@ -84,6 +84,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             sb.AppendLine(ProbeVolumeBakerTests.RunAll());        // Track B B1-3 볼륨 베이커: 에셋·직접 파이프라인 ≡·Excluded 토글·Texture3D·인스턴스 샘플·수렴·EXR·렌더러(+B1-4 폴백·픽셀 바인딩)
             sb.AppendLine(ProbeVolumeGpuSampleTests.RunAll());    // Track B B1-4 픽셀 볼륨 샘플 GPU ≡ CPU 미러(내부·텍셀 중심·클램프·페이드·normalBias·투과, 렌더 컨텍스트 필요)
             sb.AppendLine(VertexAOBakeTests.RunAll());            // Track B B1-5 템플릿 로컬 정점 AO: ≡ BurstAO 직접·고립 AO=1·천장 아래 AO≈0·양면·AO 메시·베이커 연동
+            sb.AppendLine(SceneCollectPolicyTests.RunAll());      // C0 수집 정책(결정성·배타성·LOD·사유 우선순위·리포트 — 헤드리스)
             Debug.Log(sb.ToString(), this);
         }
 
@@ -139,6 +140,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
         public void RunProbeVolumeTests() =>
             Debug.Log(ProbeGridTests.RunAll() + "\n" + ProbeValidityTests.RunAll() + "\n" + ProbeVolumeBakerTests.RunAll()
                       + "\n" + ProbeVolumeGpuSampleTests.RunAll() + "\n" + VertexAOBakeTests.RunAll(), this);
+
+        [ContextMenu("Run Scene Collect Tests (C0)")]
+        public void RunSceneCollectTests() => Debug.Log(SceneCollectPolicyTests.RunAll(), this);
 
         [ContextMenu("Run BVH Mesh Test")]
         public void RunBVHMeshTest()

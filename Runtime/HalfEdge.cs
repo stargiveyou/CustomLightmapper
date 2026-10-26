@@ -288,7 +288,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
 
         // 용접 거리 임계값(월드 단위). float.Epsilon 이 아니라 실제 거리여야 한다.
-        private const float WeldEpsilon = 1e-4f;
+        // C0-4: 진단(SceneCollector.DiagnoseCleanup)이 같은 값을 쓰도록 공개 — 값 무변경.
+        public const float WeldEpsilon = 1e-4f;
 
         public WeldedHalfEdge(Mesh mesh)
         {
@@ -446,7 +447,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
         // ==========================================
         // [STEP 2-1] Vertex Welding (정점 병합)
         // ==========================================
-        private static void WeldVertices(Vector3[] vertices, int[] triangles, float epsilon, out Vector3[] weldVertices, out int[] immidiateWeldTriangles)
+        // C0-4: 접근자만 private → public(로직 무변경). 실행 지점은 이 생성자 + 진단 메뉴뿐 — 결과를 차폐 씬에 넣지 말 것(α 정합, C0 결정 ⑥).
+        public static void WeldVertices(Vector3[] vertices, int[] triangles, float epsilon, out Vector3[] weldVertices, out int[] immidiateWeldTriangles)
         {
             float invEpsilon = 1f / epsilon;
             List<Vector3> uniqueVertices = new List<Vector3>();
@@ -492,7 +494,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         // ==========================================
         // [STEP 2-2] Degenerate Triangle 제거
         // ==========================================
-        private static void RemoveDegenerateTriangles(int[] triangles, out int[] degeneratedTriangles)
+        public static void RemoveDegenerateTriangles(int[] triangles, out int[] degeneratedTriangles)
         {
             List<int> validTriangles = new List<int>();
             for (int i = 0; i < triangles.Length; i += 3)

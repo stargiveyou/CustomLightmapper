@@ -1531,6 +1531,16 @@ namespace HuskyLibs.CustomLightmapper.Bake
         static Color ToHdrColor(Vector3 lin) => new Color(
             Mathf.Max(0f, lin.x), Mathf.Max(0f, lin.y), Mathf.Max(0f, lin.z), 1f);
 
+        /// <summary>
+        /// C0 씬 수집 결과 주입(Editor <c>SceneCollectMenu</c>) — targets/occluders 를 교체할 뿐 베이크 경로는 그대로(C0 결정 ①).
+        /// 아래 ResolveTargets 의 occluder 차집합 · ResolveOccluderUnion 이 기존 계약대로 소비한다.
+        /// </summary>
+        public void SetCollected(MeshFilter[] receivers, MeshFilter[] occluderOnly)
+        {
+            targets = receivers ?? System.Array.Empty<MeshFilter>();
+            occluders = occluderOnly ?? System.Array.Empty<MeshFilter>();
+        }
+
         internal MeshFilter[] ResolveTargets()
         {
             var list = new System.Collections.Generic.List<MeshFilter>();

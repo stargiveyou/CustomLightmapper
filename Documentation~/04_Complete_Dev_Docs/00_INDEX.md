@@ -3,7 +3,7 @@
 > 패키지: `com.huskylibs.customlightmapper` v0.14.0 (UPM embedded)
 > 정리 기준일: 2026-08-18 · 기준 커밋: `5a727ff` (SSAA) / `4553f0c` (α 컷아웃) / `6206368` (A-trous denoise)
 > 원 문서: `01_Planning_And_Design/커스텀_라이트매퍼_기획서_v15.md` · `02_Development_And_Reference/커스텀_라이트매퍼_개발문서_v15.md`(2026-10-26 UnityStudyProject 브랜치 병합 후 최신 — v14 는 이력 보존)
-> Track B(식생 프로브 볼륨) 설계·진행: `01_Planning_And_Design/커스텀_라이트매퍼_TrackB_식생프로브_설계.md` — 이 폴더(01~10)는 2026-08-18 스냅샷이라 병합분(SH 다바운스·RGBAHalf·결과 저장·Track B B1-1~5)은 v15 문서가 기준.
+> Track B(식생 프로브 볼륨) 설계·진행: `01_Planning_And_Design/커스텀_라이트매퍼_TrackB_식생프로브_설계.md` — 이 폴더(01~10)는 2026-08-18 스냅샷이라 병합분(SH 다바운스·RGBAHalf·결과 저장·Track B B1-1~5)과 C0 씬 수집(v15.12)은 v15 문서가 기준.
 
 이 폴더는 **기획 단계별 결정**과 **실제 개발 완료된 코드**를 1:1로 대응시켜 정리한 문서 묶음이다.
 기존 01~03 문서가 "시간순 변경 이력"이라면, 여기는 **"현재 트리에 실제로 존재하는 소스 기준의 완료 스냅샷"** 이다.
@@ -34,7 +34,7 @@
 
 | 단계 | 내용 | 상태 | 구현 |
 |---|---|---|---|
-| 1 | 수집·분류·알파 마스크 | ◐ | 알파 마스크 ✅(`Alpha/` + 3백엔드 any-hit) / SceneCollector·MeshCleaner 미존재 |
+| 1 | 수집·분류·알파 마스크 | ◕ | 알파 마스크 ✅(`Alpha/` + 3백엔드 any-hit) / C0 씬 수집·분류 구현(`Runtime/Collect/` + `Editor/SceneCollector`, v15.12 — 에디터 씬 게이트 대기) / MeshCleaner = `WeldedHalfEdge` 용접·퇴화제거 공개(진단만) |
 | 2 | 메시 구조(클린업→Half-Edge) | ✅ | `HalfEdge.cs` (`WeldedHalfEdge` weld 내장) |
 | 3 | 파라미터화(분할→UV2→정규화→패킹→통합) | ✅ | 평면투영 한정 (LSCM/MVC 스텁) |
 | 4 | 텍셀 복원(uv2→worldPos/normal) | ✅ | `TexelMapper.cs` |
@@ -72,20 +72,21 @@
 | 후처리 | 시임 Tier1+2 · Dilation · **Denoise** · RGBAHalf | ✅ 완료 |
 | α0~α8 | 알파 컷아웃 Any-Hit 셰도우(CPU/Burst/GPU) | ✅ 완료·검증 |
 | SSAA | 텍셀 내부 슈퍼샘플링(Adaptive/Full) | ✅ 완료·검증 |
-| C0 | 씬 수집·분류 (알파 마스크는 완료) | 🔧 설계 완료 · 구현 미착수 |
+| C0 | 씬 수집·분류 (알파 마스크는 완료) | ◕ C0-0~C0-4 구현(v15.12, 정책 테스트 20/20 헤드리스) · 에디터 씬 게이트 V3·V6·V8 대기 · C0-5(선택) 미착수 |
 | B1 | 범용 프로브 격자 / 정점 베이크 | ◕ B1-1~5 구현(격자·유효성·저장·픽셀 셰이더·정점 AO, v15.7~10 병합) · B1-6 알파 잎 차폐 남음 |
 | — | LSCM / MVC 솔버 본체 | ✗ 스텁 |
 | — | Point / Spot / Area 광원 | ✗ 미착수 |
 
 ---
 
-## 다음 단계 (2026-08-18)
+## 다음 단계 (2026-10-26 갱신)
 
 우선순위와 작업 단위는 **[개발문서 v15 §10](../02_Development_And_Reference/커스텀_라이트매퍼_개발문서_v15.md)** 이 기준이다(2026-10-26 병합 반영).
 
 | 순위 | 항목 | 왜 |
 |---|---|---|
-| 1 | **C0 — 씬 수집·분류** 🔧설계완료 | 파이프라인 9단계 중 유일한 미구현 단계. 실 씬을 그대로 굽는 진입점이 없다. → [설계](../01_Planning_And_Design/커스텀_라이트매퍼_C0_씬수집_설계.md) · [개발문서](../02_Development_And_Reference/커스텀_라이트매퍼_C0_SceneCollector_개발문서.md) |
+| 1 | **에디터 확인 게이트** | 병합(v15.11) + C0(v15.12)은 에디터 밖에서만 검증 — 재컴파일 0 · Run All Tests 26종 · C0 씬 게이트(V3 비트동일·V6 α 정합) → [C0 진행](../03_Progress_And_Validation/진행상황_C0-SceneCollector_2026-08-18.md) |
+| — | ~~C0 — 씬 수집·분류~~ | ◕ 구현(v15.12) — [설계](../01_Planning_And_Design/커스텀_라이트매퍼_C0_씬수집_설계.md) · [개발문서](../02_Development_And_Reference/커스텀_라이트매퍼_C0_SceneCollector_개발문서.md) §11 구현 차이 |
 | 2 | **B1-6 — Track B 알파 잎 차폐** | B1-1~5 완료(v15.7~10). 남은 것: 패키지 α any-hit(`AlphaSceneData`)를 프로브 볼륨 베이크·유효성·정점 AO 씬에 연결 → [Track B 설계](../01_Planning_And_Design/커스텀_라이트매퍼_TrackB_식생프로브_설계.md) |
 | 3 | LSCM / MVC 솔버 본체 | 리스크 표에서 유일하게 미해소 — 곡면 차트가 평면투영만 받음 |
 | 4 | Point / Spot / Area 광원 | `ILight.Sample` 계약 확정 후 3백엔드 미러링 |

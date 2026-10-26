@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added — C0 씬 수집·분류 (2026-10-26)
+파이프라인 단계 1(씬에서 무엇을 굽을지 고르는 층). 베이크 경로 무변경 — `AtlasApplyDebug` 의 targets/occluders 를 채우는 입력 공급기. 상세 `Documentation~/02_Development_And_Reference/커스텀_라이트매퍼_개발문서_v15.md` §5.8 · §12 v15.12.
+- `Runtime/Collect/`: `SceneCollectPolicy`(순수 함수 — Receiver / OccluderOnly / Excluded + 사유, 판정 순서 = 사유 우선순위, 정렬 없음) · `SceneCollection`(결과 + `Report`) · `SceneCollectOverride`(재수집에도 남는 OccluderOnly/Exclude 표식).
+- `Editor/SceneCollector`(씬 순회 · Static ContributeGI · LODGroup LOD1+ · receiveGI · 배열 복사 없는 메시 메타데이터) · `Editor/SceneCollectMenu`(`CONTEXT/AtlasApplyDebug/Collect Scene (C0)` · 전체 로드 씬 · Report Only · Verify Determinism · Diagnose Selected Meshes · 옵션 토글).
+- `AtlasApplyDebug.SetCollected(receivers, occluders)`. R/W 꺼진 메시는 이제 수집 단계에서 receiver·occluder 양쪽 제외 + 조치 문구(이전엔 아틀라스 슬롯만 받고 그림자가 조용히 사라짐).
+- `WeldedHalfEdge.WeldVertices`·`RemoveDegenerateTriangles`·`WeldEpsilon` 공개(로직·값 무변경 — 진단 전용).
+- `Tests/SceneCollectPolicyTests`(헤드리스 20 체크) — "Run All Tests" 배선 + "Run Scene Collect Tests (C0)".
+
 ### Merged — UnityStudyProject 브랜치(v14.12~v15.10) 병합 (2026-10-26)
 패키지 0.14.0 이후 UnityStudyProject 에서 따로 진행된 작업을 패키지로 합침(3-way, 상세 `Documentation~/02_Development_And_Reference/커스텀_라이트매퍼_개발문서_v15.md` §12 v15.11).
 - **SH 트랙**: SH-2 다바운스(Burst `BurstSHBaker.BakeMultiBounce` + GPU `CSSHBakeMulti`), 1바운스 반사 규약을 물리 규약(ρ/π·E)으로 통일, 실사용 컴포넌트 `InstanceSceneBaker` + 결과 `InstanceSHBakeAsset`(SO) + EXR, 2-프로브 대표점 `TemplateInstanceSource.ComputeProbePoints`(씬·템플릿 단위), `SHInstanceIndexGpuTests`·`InstanceSceneBakerTests`·`BurstSHBakerTests` D~H.
