@@ -164,6 +164,12 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 if (cs != null && cs.HasKernel(kName)) kernel = cs.FindKernel(kName);
                 if (kernel >= 0) gpu = new GpuScene(bScene);
                 else Debug.LogWarning("[InstanceSceneBaker] GPU 사용 불가(compute 미지원/PathTrace 로드/커널 미발견) → Burst 폴백.", this);
+                if (gpu != null && !gpu.TraversalFits)
+                {
+                    Debug.LogWarning($"[InstanceSceneBaker] BVH 깊이(스택 {gpu.RequiredStack}칸 필요) > GPU 순회 스택 {GpuBakeLimits.TraversalStack} → Burst 폴백.", this);
+                    gpu.Dispose();
+                    gpu = null;
+                }
             }
             usedBackend = gpu != null ? "Gpu" : "Burst";
 

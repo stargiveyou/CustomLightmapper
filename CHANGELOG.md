@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added — GPU 추가 최적화 (2026-10-26)
+- **배치 베이크(G6-3b)**: `AtlasApplyDebug.bakeBatchLumels`(기본 1<<20) — 인스턴스들의 lumel 을 모아 1패스·SSAA 2패스를 한 번에(GPU 1 업로드·1 readback, Burst 1 잡). 0 = 인스턴스마다(구 거동). 결과는 배치와 무관하게 비트 동일. 에디터 진행 표시.
+- **분할 디스패치**: `AtlasApplyDebug.gpuDispatchChunk`(기본 65536) — `CSRadiance` 를 `_Base` 오프셋으로 나눠 연속 디스패치. 한 디스패치 4.19M 점 한도 해소, 긴 디스패치 TDR 위험 완화.
+- **순회 스택 가드**: `GpuBakeLimits`(Tiles · MaxLeafDepth · StackUsage) + `GpuScene.RequiredStack`/`TraversalFits` — GPU 스택(32)에 안 맞는 BVH 는 AtlasApplyDebug·ProbeVolumeBaker·InstanceSceneBaker·SHRenderDemo 가 Burst 로 폴백.
+- 테스트 `GpuBakeLimitsTests`(헤드리스) · `AtlasBatchBakeTests`(배치·분할 비트 동일) — RunAll 배선 + 메뉴 "Run GPU Batch Tests (G6-3b _ G6-4)".
+
+### Fixed
+- 한 인스턴스(또는 SSAA Full 서브샘플)가 4.19M 점을 넘으면 GPU 디스패치가 그룹 한도를 넘던 잠재 문제(분할로 해소).
+
 ### Added — A3 LSCM / MVC 솔버 본체 (2026-10-26)
 - `LSCMSolver`(Lévy 2002 등각 최소제곱, 외곽 루프 2점 고정, Jacobi CG) · `MVCFallback`(Floater 평균값 좌표, 원 경계, 구멍 가상 부채꼴, BiCGSTAB/Gauss–Seidel) · `SparseSolver`(CSR·CG·BiCGSTAB·GS, double·결정적).
 - `ChartFlattener`: `FlattenSettings`(Planar 유지 L2 stretch 임계 기본 1.005, LSCM/MVC 토글, 반복·허용치) + `FlattenStats`, 3단 디스패치(겹침 또는 고왜곡 → LSCM 이 더 나을 때만 · 둘 다 겹치면 MVC). `FlattenSettings.FoldoverOnly` = 구 거동.

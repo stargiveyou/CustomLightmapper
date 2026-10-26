@@ -135,6 +135,7 @@ StructuredBuffer<float3> _Normals;
 StructuredBuffer<uint>   _Valid;                  // 1=유효, 0=스킵
 StructuredBuffer<uint>   _Seeds;                  // G6-2: per-lumel 명시 시드(호출측 공급) → RngInit(_Seeds[i])
 int  _Count;
+int  _Base;                                       // G6-4: CSRadiance 분할 디스패치 오프셋(스레드 i → 점 _Base+i). 호출측이 매번 설정·복원(기본 0)
 
 // ---- SH-G 베이크 입력 (CSSHBake 전용) ----
 // 피보나치 방향셋은 CPU(BurstSHBaker.FibonacchiSphere)에서 계산해 업로드 → Burst 와 동일 방향(sqrt/sin/cos 발산 제거).
@@ -768,7 +769,7 @@ void CSIndirect(uint3 id : SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void CSRadiance(uint3 id : SV_DispatchThreadID)
 {
-    uint i = id.x;
+    uint i = id.x + (uint)_Base;   // 분할 디스패치: 같은 버퍼·같은 점별 시드 → 분할 방식과 무관하게 비트 동일
     if ((int)i >= _Count) return;
     if (_Valid[i] == 0) { _RadianceOut[i] = float3(0, 0, 0); return; }
 

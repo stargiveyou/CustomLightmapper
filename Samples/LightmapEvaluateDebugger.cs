@@ -75,6 +75,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
             sb.AppendLine(GpuBvhCompareTests.RunAll());          // G4 GPU 2단 BVH 순회 ≡ BurstTwoLevelBVH(실 ComputeBuffer 디스패치·compute 지원 필요)
             sb.AppendLine(GpuRadianceCompareTests.RunAll());     // G5 GPU 경로추적(AO/Direct/Indirect) ≡ Burst(실 ComputeBuffer 디스패치·compute 지원 필요)
             sb.AppendLine(GpuSHBakeCompareTests.RunAll());        // SH-G GPU CSSHBake per-probe SH9 ≡ BurstSHBaker(동일 방향셋·compute 지원 필요)
+            sb.AppendLine(GpuBakeLimitsTests.RunAll());           // G6-4 분할 디스패치 타일·순회 스택 요구량(헤드리스)
+            sb.AppendLine(AtlasBatchBakeTests.RunAll());          // G6-3b/G6-4 배치 베이크·분할 디스패치 ≡ 인스턴스별(비트 동일, URP·compute 필요)
             sb.AppendLine(AlphaCutoutTests.RunAll());             // α 알파 컷아웃 any-hit: RayTriUV≡RayTri, CPU 해석적, Burst≡CPU, OFF 회귀
             sb.AppendLine(AlphaGpuCompareTests.RunAll());         // α GPU 알파 any-hit ≡ Burst(CSDirect, 무작위 없음 → 정확 일치·compute 지원 필요)
             sb.AppendLine(AtlasHdrOutputTests.RunAll());          // step8 최종 인코딩 RGBAHalf: 숨김 큐브 실베이크 HDR/LDR 대조(URP 셰이더 필요)
@@ -125,6 +127,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
         [ContextMenu("Run GPU SH Bake Compare (SH-G)")]
         public void RunGpuSHBakeCompare() => Debug.Log(GpuSHBakeCompareTests.RunAll(), this);
+
+        [ContextMenu("Run GPU Batch Tests (G6-3b _ G6-4)")]
+        public void RunGpuBatchTests() => Debug.Log(GpuBakeLimitsTests.RunAll() + "\n" + AtlasBatchBakeTests.RunAll(), this);
 
         [ContextMenu("Run Alpha Cutout Tests (a)")]
         public void RunAlphaCutoutTests() => Debug.Log(AlphaCutoutTests.RunAll(), this);

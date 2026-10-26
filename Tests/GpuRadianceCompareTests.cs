@@ -113,6 +113,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                     cs.SetBuffer(k, "_Valid", valBuf);
                     cs.SetBuffer(k, "_Seeds", seedBuf);
                     cs.SetInt("_Count", n);
+                    cs.SetInt("_Base", 0);      // G6-4: CSRadiance 분할 오프셋 — 공유 ComputeShader 상태라 명시
                     cs.SetInt("_AoSamples", q.AoSamples);
                     cs.SetInt("_IndirectSamples", q.IndirectSamples);
                     cs.SetInt("_MaxBounces", q.MaxBounces);

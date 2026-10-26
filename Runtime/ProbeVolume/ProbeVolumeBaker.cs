@@ -268,8 +268,12 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 if (cs != null && cs.HasKernel(kName) && grid.Count <= ProbeGrid.MaxGpuProbes)
                 {
                     using var gpu = new GpuScene(bScene);
-                    sh = grid.BakeGpu(gpu, cs, cs.FindKernel(kName), sunDL, sky, q, dirCount, seed);
-                    usedBackend = "Gpu";
+                    if (gpu.TraversalFits)
+                    {
+                        sh = grid.BakeGpu(gpu, cs, cs.FindKernel(kName), sunDL, sky, q, dirCount, seed);
+                        usedBackend = "Gpu";
+                    }
+                    else Debug.LogWarning($"[ProbeVolumeBaker] BVH 깊이(스택 {gpu.RequiredStack}칸 필요) > GPU 순회 스택 {GpuBakeLimits.TraversalStack} → Burst 폴백.", this);
                 }
                 else Debug.LogWarning("[ProbeVolumeBaker] GPU 사용 불가(compute 미지원/PathTrace 로드/커널/프로브 수) → Burst 폴백.", this);
             }

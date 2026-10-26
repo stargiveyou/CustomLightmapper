@@ -136,6 +136,14 @@ namespace HuskyLibs.CustomLightmapper.Bake
         [Tooltip("재샘플된 텍셀을 마젠타로 칠해 마스크를 눈으로 확인(라이팅 값 대신). 튜닝용 — 켜면 결과 아틀라스는 못 쓴다.")]
         public bool ssaaDebugMask = false;
 
+        [Header("Bake 배치 · GPU 분할 (G6-3b · G6-4)")]
+        [Tooltip("인스턴스들의 valid lumel 을 이 수까지 모아 1패스·SSAA 를 한 번에 굽는다(GPU = 1 업로드·1 readback, Burst = 1 잡). " +
+                 "0 = 인스턴스마다(구 거동). 결과는 배치 크기와 무관하게 비트 동일 — 메모리(점당 ~28B + lumel 맵)와 진행 표시 간격만 달라진다.")]
+        [Min(0)] public int bakeBatchLumels = 1 << 20;
+        [Tooltip("GPU 디스패치 1회당 점 수. 작을수록 긴 단일 디스패치의 TDR(GPU 타임아웃) 위험↓·디스패치 수↑. 결과는 분할과 무관하게 비트 동일. " +
+                 "한 디스패치 한도(65535 그룹 × 64 ≈ 4.19M 점)를 넘지 않게 자동 제한.")]
+        [Min(64)] public int gpuDispatchChunk = GpuBakeLimits.DefaultChunk;
+
         [Header("Alpha Cutout (α) — 잎·펜스 등 컷아웃 차폐")]
         [Tooltip("컷아웃 머티리얼의 알파를 차폐 판정에 반영한다. 끄면 쿼드 전체가 불투명 판(기존 거동).")]
         public bool alphaCutoutShadows = true;
@@ -236,6 +244,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
         // 검증(Tests 어셈블리)용 결과 접근 — 베이크 결과 아틀라스·적용 머티리얼(둘 다 DontSave 런타임 객체)
         internal Texture2DArray Atlas => atlas;
         internal Material SharedMaterial => sharedMat;
+        /// <summary>마지막 베이크가 실제로 쓴 조도 백엔드("Gpu"/"Burst"/"CPU", 매핑 모드면 null) — 폴백 여부 확인용.</summary>
+        internal string LastBakeBackend { get; private set; }
 
         // 원복용 — 적용한 렌더러와 그 원본 메시/머티리얼
         [SerializeField] MeshFilter[] _appliedFilters;
@@ -284,6 +294,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
             // 최종 인코딩(1회 결정): 라이팅 모드 + hdrOutput → RGBAHalf 선형 HDR. 미지원 플랫폼은 RGBA32 폴백.
             _hdrAtlas = hdrOutput && (mode == BakeMode.Radiance || mode == BakeMode.RadianceGI);
+            LastBakeBackend = null;
             if (_hdrAtlas && !SystemInfo.SupportsTextureFormat(TextureFormat.RGBAHalf))
             {
                 Debug.LogWarning("[AtlasApply] RGBAHalf 미지원 플랫폼 — RGBA32(0~1 클램프)로 폴백.", this);
@@ -344,6 +355,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 Debug.LogWarning("[AtlasApply] RadianceGI 경로추적 베이크 — 매우 느림. atlasResolution↓(128~256)·indirectSamples↓(16~32)·maxBounces 1~2 권장.", this);
             }
             swScene.Stop();
+            LastBakeBackend = mode == BakeMode.Radiance ? "CPU"
+                            : mode == BakeMode.RadianceGI ? (_gpuReady ? "Gpu" : _burstReady ? "Burst" : "CPU")
+                            : null;
 
             var appliedF = new MeshFilter[filters.Length];
             var origMesh = new Mesh[filters.Length];
@@ -364,56 +378,44 @@ namespace HuskyLibs.CustomLightmapper.Bake
             int ssaaTexels = 0;
             long ssaaSubSamples = 0, ssaaBaseTexels = 0;
 
-            // 3) 인스턴스마다 파라미터화→조립→텍셀복원→영역 blit→메시/ST 적용
-            swBake.Start();
-            for (int i = 0; i < filters.Length; i++)
+            // 3) 인스턴스마다 파라미터화→조립→텍셀복원 → (배치) 조도 베이크 → 영역 blit→메시/ST 적용
+            //   G6-3b: 준비된 인스턴스를 bakeBatchLumels(valid lumel 수)까지 모아 1패스·SSAA 2패스를 한 번에 굽는다
+            //   (GPU = 1 업로드·분할 디스패치·1 readback, Burst = 1 잡). 텍셀 조도는 점별 독립(점·노멀·시드 — 시드는 인스턴스 안
+            //   lumel 인덱스 기준)이라 배치 크기와 무관하게 비트 동일. blit·시임·메시 적용은 배치 안에서도 인스턴스 순서 그대로.
+            var pending = new System.Collections.Generic.List<PendingBake>();
+            long pendingLumels = 0;
+            int batches = 0, prepared = 0;
+
+            void Flush()
             {
-                var mf = filters[i];
-                // 이전 베이크/에셋 적용으로 uv2 메시·라이트맵 머티리얼이 들어가 있어도 진짜 원본 기준으로 처리(재베이크·복원·저장 정합)
-                OriginalOf(mf, out var src, out var srcMat);
-                Vector4 st = alloc.Instances[i].ScaleOffset;
-                int page = Mathf.Clamp(alloc.Instances[i].LightmapIndex, 0, pages - 1);
-
-                // ST → 아틀라스 픽셀 영역 (Allocate 가 sd/r, rx/r 형태라 정수 복원 정확)
-                int sidePx = Mathf.Max(1, Mathf.RoundToInt(st.x * res));
-                int ox = Mathf.RoundToInt(st.z * res);
-                int oy = Mathf.RoundToInt(st.w * res);
-
-                Mesh uv2mesh;
-                LumelMap lumel;
-                SeamTable seams = null;
-                try
+                if (pending.Count == 0) return;
+                batches++;
+#if UNITY_EDITOR
+                UnityEditor.EditorUtility.DisplayProgressBar("AtlasApply 베이크",
+                    $"배치 {batches} — 인스턴스 {prepared}/{filters.Length} (lumel {pendingLumels})", (float)prepared / filters.Length);
+#endif
+                var rads = BakeLumelsBatch(pending);
+                if (rads != null)
                 {
-                    var pr = ParameterizationPipeline.Run(src, segmentation, flatten);
-                    if (pr.Charts == null || pr.Charts.Length == 0) { Debug.LogWarning($"[AtlasApply] '{mf.name}' 차트 0개 — 건너뜀.", mf); continue; }
-                    DensityNormalizer.Normalize(pr.Charts);
-                    ShelfPacker.Pack(pr.Charts, chartGutter);
-                    (uv2mesh, seams) = UVAssembly.Assemble(pr.Charts, src);
-                    uv2mesh.hideFlags = HideFlags.DontSave;
-                    // 영역 크기에 맞춰 래스터 → 아틀라스에 1:1 blit
-                    lumel = TexelMapper.Map(uv2mesh, sidePx, mf.transform.localToWorldMatrix);
+                    for (int k = 0; k < pending.Count; k++) ssaaBaseTexels += CountValid(pending[k].lumel);
+                    ApplySsaaBatch(pending, rads, ref ssaaTexels, ref ssaaSubSamples);
                 }
-                catch (System.Exception e)
-                {
-                    Debug.LogError($"[AtlasApply] '{mf.name}' 처리 실패: {e.Message}", mf);
-                    continue;
-                }
+                for (int k = 0; k < pending.Count; k++) FinishInstance(pending[k], rads?[k]);
+                pending.Clear();
+                pendingLumels = 0;
+            }
 
+            // 구운 조도(rad)를 아틀라스에 blit + 시임 입력 누적 + 렌더러에 uv2 메시·ST 적용(구 루프 본문 그대로)
+            void FinishInstance(PendingBake pb, Vector3[] rad)
+            {
+                int i = pb.index;
+                var mf = pb.mf;
+                var uv2mesh = pb.uv2mesh;
+                var seams = pb.seams;
+                int page = pb.page, ox = pb.ox, oy = pb.oy, sidePx = pb.sidePx;
                 Color tint = Color.HSVToRGB((i * 0.6180339887f) % 1f, 0.65f, 1f); // 황금비 분산 → 인접 인스턴스 색 분리
 
-                // 라이팅 모드: 이 인스턴스의 valid lumel 을 한 번에 베이크(li 인덱스로 산란).
-                //   CPU/Burst/GPU 모두 동일 시드(seed + li*const)·동일 pts(worldPos+wn*surfaceBias) → 교차검증 가능.
-                //   ⚠ SSAA 가 1패스 결과를 보고 엣지를 찾으므로, Radiance 모드도 BlitRegion 인라인 평가가 아니라
-                //     여기서 선-베이크한다(값은 인라인 경로와 동일 — 같은 시드·같은 원점·같은 함수).
-                Vector3[] rad = BakeLumels(lumel);
-                if (rad != null)
-                {
-                    ssaaBaseTexels += CountValid(lumel);
-                    ApplySsaa(uv2mesh, mf.transform.localToWorldMatrix, lumel, sidePx, rad,
-                              ref ssaaTexels, ref ssaaSubSamples);
-                }
-
-                BlitRegion(slices[page], validMask[page], res, ox, oy, sidePx, lumel, tint, rad,
+                BlitRegion(slices[page], validMask[page], res, ox, oy, sidePx, pb.lumel, tint, rad,
                            doDenoise ? guideN[page] : null, doDenoise ? guideP[page] : null);
 
                 // 시임 스티칭 입력 누적 — 블릿과 동일한 (ox,oy,sidePx,res) 매핑이라 텍셀이 정확히 정렬.
@@ -463,9 +465,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 // 렌더러에 조립 메시 + ST 적용 (원본 보관)
                 var rnd = mf.GetComponent<MeshRenderer>();
                 appliedF[i] = mf;
-                origMesh[i] = src;
-                origMat[i] = srcMat;
-                _lastBake.Add(new BakeRecord { filter = mf, source = src, sourceMat = srcMat, uv2 = uv2mesh, st = st, page = page });
+                origMesh[i] = pb.src;
+                origMat[i] = pb.srcMat;
+                _lastBake.Add(new BakeRecord { filter = mf, source = pb.src, sourceMat = pb.srcMat, uv2 = uv2mesh, st = pb.st, page = page });
 
                 mf.sharedMesh = uv2mesh;
                 if (rnd != null)
@@ -473,14 +475,66 @@ namespace HuskyLibs.CustomLightmapper.Bake
                     rnd.sharedMaterial = sharedMat;
                     var mpb = new MaterialPropertyBlock();
                     rnd.GetPropertyBlock(mpb);
-                    mpb.SetVector("_LightmapST", st);
+                    mpb.SetVector("_LightmapST", pb.st);
                     mpb.SetFloat("_LightmapIndex", page);
                     rnd.SetPropertyBlock(mpb);
                 }
             }
 
+            swBake.Start();
+            try
+            {
+                for (int i = 0; i < filters.Length; i++)
+                {
+                    var mf = filters[i];
+                    // 이전 베이크/에셋 적용으로 uv2 메시·라이트맵 머티리얼이 들어가 있어도 진짜 원본 기준으로 처리(재베이크·복원·저장 정합)
+                    OriginalOf(mf, out var src, out var srcMat);
+                    Vector4 st = alloc.Instances[i].ScaleOffset;
+                    int page = Mathf.Clamp(alloc.Instances[i].LightmapIndex, 0, pages - 1);
 
+                    // ST → 아틀라스 픽셀 영역 (Allocate 가 sd/r, rx/r 형태라 정수 복원 정확)
+                    int sidePx = Mathf.Max(1, Mathf.RoundToInt(st.x * res));
+                    int ox = Mathf.RoundToInt(st.z * res);
+                    int oy = Mathf.RoundToInt(st.w * res);
 
+                    Mesh uv2mesh;
+                    LumelMap lumel;
+                    SeamTable seams = null;
+                    try
+                    {
+                        var pr = ParameterizationPipeline.Run(src, segmentation, flatten);
+                        if (pr.Charts == null || pr.Charts.Length == 0) { Debug.LogWarning($"[AtlasApply] '{mf.name}' 차트 0개 — 건너뜀.", mf); continue; }
+                        DensityNormalizer.Normalize(pr.Charts);
+                        ShelfPacker.Pack(pr.Charts, chartGutter);
+                        (uv2mesh, seams) = UVAssembly.Assemble(pr.Charts, src);
+                        uv2mesh.hideFlags = HideFlags.DontSave;
+                        // 영역 크기에 맞춰 래스터 → 아틀라스에 1:1 blit
+                        lumel = TexelMapper.Map(uv2mesh, sidePx, mf.transform.localToWorldMatrix);
+                    }
+                    catch (System.Exception e)
+                    {
+                        Debug.LogError($"[AtlasApply] '{mf.name}' 처리 실패: {e.Message}", mf);
+                        continue;
+                    }
+
+                    prepared++;
+                    pending.Add(new PendingBake
+                    {
+                        index = i, mf = mf, src = src, srcMat = srcMat, st = st,
+                        page = page, sidePx = sidePx, ox = ox, oy = oy,
+                        uv2mesh = uv2mesh, lumel = lumel, seams = seams,
+                    });
+                    pendingLumels += CountValid(lumel);
+                    if (pendingLumels >= bakeBatchLumels) Flush();   // 0 = 인스턴스마다(구 거동)
+                }
+                Flush();
+            }
+            finally
+            {
+#if UNITY_EDITOR
+                UnityEditor.EditorUtility.ClearProgressBar();
+#endif
+            }
 
             swBake.Stop();
             swPost.Start();
@@ -604,6 +658,11 @@ namespace HuskyLibs.CustomLightmapper.Bake
                          + (ssaaDebugMask ? " ⚠DEBUG_MASK" : "");
             }
 
+            // G6-3b 배치·G6-4 분할 — 조도 베이크 호출 수(1패스 기준) = 배치 수
+            string batchInfo = (mode == BakeMode.Radiance || mode == BakeMode.RadianceGI)
+                ? $", batch={batches}×(≤{bakeBatchLumels} lumels){(_gpuReady ? $" gpuChunk={gpuDispatchChunk}" : "")}"
+                : "";
+
             swTotal.Stop();
             // 시간: 총계 + 단계별. bake 가 레이트레이싱이므로 알파/원반 샘플링 비용은 여기서 본다.
             string timeInfo =
@@ -612,7 +671,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 $" | bake(레이트레이싱)={swBake.Elapsed.TotalSeconds:F2}s" +
                 $" | post(denoise+stitch+dilate)={swPost.Elapsed.TotalSeconds:F2}s";
 
-            Debug.Log($"[AtlasApply] {filters.Length} insts → atlas {res}×{res}×{pages} {atlasFormat}, util={alloc.Utilization:P1}, mode={mode}{occInfo}{alphaInfo}{directInfo}{ssaaInfo}{denoiseInfo}{stitchInfo}{dilateInfo}" +
+            Debug.Log($"[AtlasApply] {filters.Length} insts → atlas {res}×{res}×{pages} {atlasFormat}, util={alloc.Utilization:P1}, mode={mode}{occInfo}{alphaInfo}{directInfo}{ssaaInfo}{batchInfo}{denoiseInfo}{stitchInfo}{dilateInfo}" +
                       (alloc.Overflow ? "  ⚠ overflow(클램프됨)" : "") + timeInfo, this);
 
             // NativeArray 보유 차폐자/씬 해제(BlitRegion 은 위 루프에서 끝났으므로 안전)
@@ -719,37 +778,66 @@ namespace HuskyLibs.CustomLightmapper.Bake
             return c;
         }
 
-        // 라이팅 모드 텍셀 조도를 한 번에 베이크 → li 인덱스로 산란한 Vector3[] 반환(invalid = zero).
+        // G6-3b 배치 대기열 한 칸 — 준비(파라미터화·텍셀 복원)가 끝나 조도 베이크·blit 을 기다리는 인스턴스.
+        sealed class PendingBake
+        {
+            public int index;
+            public MeshFilter mf;
+            public Mesh src;
+            public Material srcMat;
+            public Vector4 st;
+            public int page, sidePx, ox, oy;
+            public Mesh uv2mesh;
+            public LumelMap lumel;
+            public SeamTable seams;
+        }
+
+        // 라이팅 모드 텍셀 조도를 배치 전체에서 한 번에 베이크 → 인스턴스별 li 인덱스 Vector3[](invalid = zero).
         //   라이팅 모드가 아니면 null(BlitRegion 이 디버그 색을 칠한다).
-        //   시드 = LightmapSSAA.TexelSeed(seed, li) = 기존 seed + li*2654435761u 규약 그대로 →
-        //   기존 백엔드 교차검증(CPU/Burst/GPU Diff 메뉴)이 그대로 성립한다.
-        Vector3[] BakeLumels(in LumelMap lm)
+        //   시드 = LightmapSSAA.TexelSeed(seed, li) — li 는 인스턴스 안 lumel 인덱스 = 기존 seed + li*2654435761u 규약 그대로 →
+        //   배치와 무관하고, 기존 백엔드 교차검증(CPU/Burst/GPU Diff 메뉴)이 그대로 성립한다.
+        Vector3[][] BakeLumelsBatch(System.Collections.Generic.List<PendingBake> batch)
         {
             if (mode != BakeMode.Radiance && mode != BakeMode.RadianceGI) return null;
 
-            int total = (lm.Valid != null) ? lm.Valid.Length : 0;
-            var result = new Vector3[total];   // invalid lumel = zero(BlitRegion 이 valid 만 칠함)
-            if (total == 0) return result;
-
-            var idx = new System.Collections.Generic.List<int>(total);
-            for (int li = 0; li < total; li++) if (lm.Valid[li]) idx.Add(li);
-            int n = idx.Count;
+            var result = new Vector3[batch.Count][];
+            int n = 0;
+            for (int b = 0; b < batch.Count; b++)
+            {
+                var lm = batch[b].lumel;
+                result[b] = new Vector3[lm.Valid != null ? lm.Valid.Length : 0];   // invalid lumel = zero(BlitRegion 이 valid 만 칠함)
+                n += CountValid(lm);
+            }
             if (n == 0) return result;
 
             var pts = new Vector3[n];
             var nrm = new Vector3[n];
             var sds = new uint[n];
-            for (int k = 0; k < n; k++)
+            int k = 0;
+            for (int b = 0; b < batch.Count; b++)
             {
-                int li = idx[k];
-                Vector3 wn = lm.WorldNormal[li];
-                pts[k] = lm.WorldPos[li] + wn * surfaceBias;   // 세 백엔드 공통 평가 원점
-                nrm[k] = wn;
-                sds[k] = LightmapSSAA.TexelSeed(seed, li);
+                var lm = batch[b].lumel;
+                if (lm.Valid == null) continue;
+                for (int li = 0; li < lm.Valid.Length; li++)
+                {
+                    if (!lm.Valid[li]) continue;
+                    Vector3 wn = lm.WorldNormal[li];
+                    pts[k] = lm.WorldPos[li] + wn * surfaceBias;   // 세 백엔드 공통 평가 원점
+                    nrm[k] = wn;
+                    sds[k] = LightmapSSAA.TexelSeed(seed, li);
+                    k++;
+                }
             }
 
             var rad = BakePoints(pts, nrm, sds, n);
-            for (int k = 0; k < n; k++) result[idx[k]] = rad[k];
+            k = 0;
+            for (int b = 0; b < batch.Count; b++)
+            {
+                var lm = batch[b].lumel;
+                if (lm.Valid == null) continue;
+                for (int li = 0; li < lm.Valid.Length; li++)
+                    if (lm.Valid[li]) result[b][li] = rad[k++];
+            }
             return result;
         }
 
@@ -771,7 +859,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
             // RadianceGI: GPU → Burst → CPU 순으로 가용 백엔드
             if (_gpuReady)
-                return DispatchRadianceGpu(_gpuScene, _pathCS, _kRadiance, _sun, _burstSky, _giQ, pts, nrm, seeds, n, _gpuIo);
+                return DispatchRadianceGpu(_gpuScene, _pathCS, _kRadiance, _sun, _burstSky, _giQ, pts, nrm, seeds, n, _gpuIo, gpuDispatchChunk);
 
             if (_burstReady)
             {
@@ -798,14 +886,60 @@ namespace HuskyLibs.CustomLightmapper.Bake
         //   아틀라스 해상도도 valid 마스크도 안 건드리므로 이후 denoise/stitch/dilate/ST 는 전부 그대로다.
         //   1패스 값은 엣지 텍셀에서 버린다 — 짝수 S 의 서브샘플 격자에는 중앙점이 없어 재사용하면
         //   가중치가 편향되고, 엣지는 전체의 몇 % 라 버리는 비용이 무시할 수준이다.
-        void ApplySsaa(Mesh uv2mesh, Matrix4x4 l2w, in LumelMap lm, int sidePx, Vector3[] rad,
-                       ref int edgeTexels, ref long subSamples)
+        //   G6-3b: 배치 안 인스턴스들의 서브샘플을 모아(최대 MaxSsaaBatchPoints 점씩) 한 번에 굽는다 — 시드는 (li, s) 별이라 비트 동일.
+        const int MaxSsaaBatchPoints = 1 << 22;   // 4M 점 ≈ 서브샘플 입력 112MB 상한(SSAA Full × 큰 배치의 메모리 보호)
+
+        sealed class SsaaJob
+        {
+            public int batchIndex;
+            public LumelSubsamples ss;
+            public int spt, start, count;
+        }
+
+        void ApplySsaaBatch(System.Collections.Generic.List<PendingBake> batch, Vector3[][] rads, ref int edgeTexels, ref long subSamples)
         {
             if (ssaaMode == SsaaMode.Off || ssaaFactor < 2) return;
             if (mode != BakeMode.Radiance && mode != BakeMode.RadianceGI) return;
-            if (rad == null || lm.Valid == null) return;
+            if (rads == null) return;
 
             int S = Mathf.Clamp(ssaaFactor, 2, 4);
+            var jobs = new System.Collections.Generic.List<SsaaJob>();
+            var pts = new System.Collections.Generic.List<Vector3>();
+            var nrm = new System.Collections.Generic.List<Vector3>();
+            var sds = new System.Collections.Generic.List<uint>();
+            int edgeAcc = 0; long subAcc = 0;
+
+            void BakeAndResolve()
+            {
+                if (jobs.Count == 0) return;
+                var sub = BakePoints(pts.ToArray(), nrm.ToArray(), sds.ToArray(), pts.Count);
+                foreach (var job in jobs)
+                {
+                    ResolveSsaa(job, sub, rads[job.batchIndex]);
+                    edgeAcc += job.ss.SlotCount;
+                    subAcc += job.count;
+                }
+                jobs.Clear(); pts.Clear(); nrm.Clear(); sds.Clear();
+            }
+
+            for (int b = 0; b < batch.Count; b++)
+            {
+                var job = BuildSsaaJob(batch[b], b, rads[b], S, pts, nrm, sds);
+                if (job != null) jobs.Add(job);
+                if (pts.Count >= MaxSsaaBatchPoints) BakeAndResolve();
+            }
+            BakeAndResolve();
+            edgeTexels += edgeAcc;
+            subSamples += subAcc;
+        }
+
+        // 인스턴스 1개의 SSAA 서브샘플을 배치 목록에 이어 붙인다. 재샘플할 게 없으면 null(통계도 안 셈 — 구 ApplySsaa 와 같은 조기 반환).
+        SsaaJob BuildSsaaJob(PendingBake pb, int batchIndex, Vector3[] rad, int S,
+                             System.Collections.Generic.List<Vector3> pts, System.Collections.Generic.List<Vector3> nrm,
+                             System.Collections.Generic.List<uint> sds)
+        {
+            var lm = pb.lumel;
+            if (rad == null || lm.Valid == null) return null;
             int spt = S * S;
 
             bool[] mask;
@@ -817,14 +951,14 @@ namespace HuskyLibs.CustomLightmapper.Bake
             {
                 // 이웃 인정 거리: 텍셀 1개 ≈ 1/texelsPerWorldUnit 월드 단위 → 4텍셀까지만 같은 표면으로 본다.
                 float maxDist = 4f / Mathf.Max(0.001f, texelsPerWorldUnit);
-                mask = LightmapSSAA.DetectEdges(lm, rad, sidePx, ssaaEdgeThreshold,
+                mask = LightmapSSAA.DetectEdges(lm, rad, pb.sidePx, ssaaEdgeThreshold,
                                                 Mathf.Cos(ssaaEdgeNormalAngleDeg * Mathf.Deg2Rad),
                                                 maxDist, ssaaEdgeDilate, out _);
             }
 
             int slots = 0;
             for (int i = 0; i < mask.Length; i++) if (mask[i]) slots++;
-            if (slots == 0) return;
+            if (slots == 0) return null;
 
             // 메모리 가드: 서브샘플 저장 ≈ slots*S²*25B. Full + 큰 sidePx 조합이 수백 MB 로 튀는 것을 막는다.
             long estBytes = (long)slots * spt * 25L;
@@ -832,18 +966,14 @@ namespace HuskyLibs.CustomLightmapper.Bake
             {
                 Debug.LogWarning($"[AtlasApply] SSAA 스킵 — 서브샘플 버퍼 추정 {estBytes / (1024 * 1024)}MB (>512MB). " +
                                  "ssaaMode=Adaptive 로 낮추거나 ssaaFactor/atlasResolution 을 줄이세요.", this);
-                return;
+                return null;
             }
 
-            var ss = TexelMapper.MapSubsamples(uv2mesh, sidePx, l2w, S, mask);
-            if (ss.SlotCount == 0) return;
+            var ss = TexelMapper.MapSubsamples(pb.uv2mesh, pb.sidePx, pb.mf.transform.localToWorldMatrix, S, mask);
+            if (ss.SlotCount == 0) return null;
 
-            // 유효 서브샘플만 압축해 한 번에 베이크(1패스와 같은 백엔드·같은 원점 규약).
-            int cap = ss.SlotCount * spt;
-            var pts = new Vector3[cap];
-            var nrm = new Vector3[cap];
-            var sds = new uint[cap];
-            int n = 0;
+            // 유효 서브샘플만 압축해 배치 목록에 추가(1패스와 같은 백엔드·같은 원점 규약).
+            int start = pts.Count;
             for (int slot = 0; slot < ss.SlotCount; slot++)
             {
                 int li = ss.TexelOfSlot[slot];
@@ -852,18 +982,22 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 {
                     if (!ss.Valid[b + s]) continue;
                     Vector3 wn = ss.WorldNormal[b + s];
-                    pts[n] = ss.WorldPos[b + s] + wn * surfaceBias;
-                    nrm[n] = wn;
-                    sds[n] = LightmapSSAA.SubSeed(seed, li, s);   // 서브샘플마다 다른 MC 노이즈 → 평균이 AA+디노이즈 겸함
-                    n++;
+                    pts.Add(ss.WorldPos[b + s] + wn * surfaceBias);
+                    nrm.Add(wn);
+                    sds.Add(LightmapSSAA.SubSeed(seed, li, s));   // 서브샘플마다 다른 MC 노이즈 → 평균이 AA+디노이즈 겸함
                 }
             }
-            if (n == 0) return;
+            int count = pts.Count - start;
+            if (count == 0) return null;
+            return new SsaaJob { batchIndex = batchIndex, ss = ss, spt = spt, start = start, count = count };
+        }
 
-            var sub = BakePoints(pts, nrm, sds, n);
-
-            // 평균 → 텍셀 덮어쓰기. 유효 서브샘플 0인 텍셀(중앙만 아슬하게 걸린 얇은 삼각형)은 1패스 값 유지.
-            int cursor = 0;
+        // 평균 → 텍셀 덮어쓰기. 유효 서브샘플 0인 텍셀(중앙만 아슬하게 걸린 얇은 삼각형)은 1패스 값 유지.
+        void ResolveSsaa(SsaaJob job, Vector3[] sub, Vector3[] rad)
+        {
+            var ss = job.ss;
+            int spt = job.spt;
+            int cursor = job.start;
             for (int slot = 0; slot < ss.SlotCount; slot++)
             {
                 int b = slot * spt;
@@ -878,9 +1012,6 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 if (cnt > 0) rad[li] = sum / cnt;
                 if (ssaaDebugMask) rad[li] = new Vector3(1f, 0f, 1f);   // 마스크 가시화(마젠타)
             }
-
-            edgeTexels += ss.SlotCount;
-            subSamples += n;
         }
 
         // 재사용 GPU I/O 버퍼 홀더(grow-on-demand). per-instance 반복 DispatchRadianceGpu 에서
@@ -920,10 +1051,13 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
         // CSRadiance 디스패치 공통(BakePoints·Backend Diff 재사용). 입력 pts/nrm/seeds 는 길이 n.
         //   버퍼는 재사용 홀더 io 로 grow-on-demand(초과 시에만 재할당). uniform 규약은 BurstRadianceBaker 정합.
-        //   ⚠ 데이터 경로 불변: 앞 n개만 업로드/읽기 + Dispatch (n+63)/64 + _Count=n 가드 → 이전 GetData 판과 바이트 동일.
+        //   ⚠ 데이터 경로 불변: 앞 n개만 업로드/읽기 + _Count=n 가드 → 이전 GetData 판과 바이트 동일.
+        //   G6-4 분할: 한 번 업로드 → chunk 점씩 _Base 만 바꿔 연속 Dispatch(동기화 없음) → 1회 readback.
+        //     한 Dispatch 그룹 한도(65535×64 ≈ 4.19M 점 — 큰 인스턴스·SSAA Full 이 넘던 한도) 해소 + 긴 단일 디스패치 TDR 위험 완화.
+        //     스레드 i = 점 _Base+i, 시드는 점별 → chunk 와 무관하게 비트 동일. _Base 는 끝나면 0 으로 복원(공유 ComputeShader 상태).
         internal static Vector3[] DispatchRadianceGpu(GpuScene gpuScene, ComputeShader cs, int kernel,
             DirectionalLight sun, BurstSky sky, BakeQualitySettings q,
-            Vector3[] pts, Vector3[] nrm, uint[] seeds, int n, GpuIoBuffers io)
+            Vector3[] pts, Vector3[] nrm, uint[] seeds, int n, GpuIoBuffers io, int chunk = GpuBakeLimits.DefaultChunk)
         {
             var result = new Vector3[n];
             if (n == 0) return result;
@@ -960,8 +1094,15 @@ namespace HuskyLibs.CustomLightmapper.Bake
             cs.SetVector("_SkyBottom", sky.B);
             cs.SetBuffer(kernel, "_RadianceOut", io.Radiance);
 
-            int groups = (n + 63) / 64;
-            cs.Dispatch(kernel, groups, 1, 1);
+            try
+            {
+                foreach (var (start, count) in GpuBakeLimits.Tiles(n, chunk))
+                {
+                    cs.SetInt("_Base", start);
+                    cs.Dispatch(kernel, GpuBakeLimits.Groups(count), 1, 1);
+                }
+            }
+            finally { cs.SetInt("_Base", 0); }
 
             // AsyncGPUReadback: Radiance 앞 n*12 바이트(=앞 n개 Vector3)만 요청 → capacity>n 이어도 정확히 n개.
             //   커널은 [0,n) 만 기록(초과 스레드 가드)하므로 재사용 버퍼의 잔여 [n,capacity) 는 읽지 않아 오염 무관.
@@ -1303,8 +1444,20 @@ namespace HuskyLibs.CustomLightmapper.Bake
                         else
                         {
                             _gpuScene = new GpuScene(_burstScene);   // 생성자에서 SoA → ComputeBuffer 업로드
-                            _gpuIo = new GpuIoBuffers();             // 재사용 I/O 버퍼 홀더(첫 Dispatch 에서 grow-on-demand 할당)
-                            _gpuReady = true;
+                            if (!_gpuScene.TraversalFits)
+                            {
+                                // 순회 스택(BVH_STACK 32) 초과 트리는 GPU 결과가 틀린다 → Burst(스택 64) 폴백
+                                Debug.LogWarning($"[AtlasApply] BVH 깊이(스택 {_gpuScene.RequiredStack}칸 필요, TLAS {_gpuScene.TlasDepth} · BLAS 최대 {_gpuScene.MaxBlasDepth}) " +
+                                                 $"> GPU 순회 스택 {GpuBakeLimits.TraversalStack} — RadianceGI GPU 백엔드 → Burst 폴백.", this);
+                                _gpuScene.Dispose();
+                                _gpuScene = null;
+                                _pathCS = null;
+                            }
+                            else
+                            {
+                                _gpuIo = new GpuIoBuffers();             // 재사용 I/O 버퍼 홀더(첫 Dispatch 에서 grow-on-demand 할당)
+                                _gpuReady = true;
+                            }
                         }
                     }
                 }

@@ -144,6 +144,11 @@ indirect 셰이더: SH9를 표면 노멀로 평가 + 직사광(실시간) → �
             {
                 shCs = Resources.Load<ComputeShader>("PathTrace"); // Shaders/Resources 배치 → 에디터·빌드 공통 로드
                 if (shCs != null) { kSH = shCs.FindKernel(multiBounce ? "CSSHBakeMulti" : "CSSHBake"); if (kSH >= 0) { gpuScene = new GpuScene(bScene); useGpu = true; } }
+                if (useGpu && !gpuScene.TraversalFits)   // G6-4: 순회 스택(32) 초과 트리 → Burst
+                {
+                    Debug.LogWarning($"[SHRenderDemo] BVH 깊이(스택 {gpuScene.RequiredStack}칸 필요) > GPU 순회 스택 {GpuBakeLimits.TraversalStack} → Burst 폴백.", this);
+                    gpuScene.Dispose(); gpuScene = null; useGpu = false;
+                }
             }
             if (shBakeBackend == ShBakeBackend.Gpu && !useGpu)
                 Debug.LogWarning("[SHRenderDemo] GPU SH 백엔드 사용 불가(compute 미지원/셰이더 로드/커널 미발견) → Burst 폴백.", this);
