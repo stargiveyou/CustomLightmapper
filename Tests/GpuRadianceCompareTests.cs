@@ -28,7 +28,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         const uint  BaseSeed  = 0xC0FFEEu;
         const float AoMaxDist = 5f;
 
-        static ComputeShader LoadCompute()
+        internal static ComputeShader LoadCompute()
         {
             return Resources.Load<ComputeShader>("PathTrace"); // Shaders/Resources 배치 → 에디터·빌드 공통 로드
         }
@@ -235,7 +235,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         }
 
         // ── 씬(BurstRadianceCompareTests.BuildScene 동일): enclosing 박스 + 회전·비균등 인스턴스 ──
-        static void BuildScene(out Tri[][] meshes, out Vector3[] albedo, out TwoLevelBVH.Instance[] insts)
+        internal static void BuildScene(out Tri[][] meshes, out Vector3[] albedo, out TwoLevelBVH.Instance[] insts)
         {
             var rng = new System.Random(20240629);
             meshes = new Tri[][]
@@ -265,7 +265,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             insts = list.ToArray();
         }
 
-        static void CollectSurfaceSamples(Tri[][] meshes, TwoLevelBVH.Instance[] insts, int maxCount,
+        internal static void CollectSurfaceSamples(Tri[][] meshes, TwoLevelBVH.Instance[] insts, int maxCount,
             out Vector3[] pts, out Vector3[] nrm)
         {
             var lp = new List<Vector3>(maxCount);
@@ -298,7 +298,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             nrm = ln.ToArray();
         }
 
-        static DirectionalLight Sun() => new DirectionalLight
+        internal static DirectionalLight Sun() => new DirectionalLight
         {
             Direction = new Vector3(-0.4f, -1f, -0.25f).normalized,
             Color = new Vector3(1f, 0.95f, 0.8f),

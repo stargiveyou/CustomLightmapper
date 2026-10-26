@@ -144,6 +144,27 @@ namespace HuskyLibs.CustomLightmapper.Bake
                  "한 디스패치 한도(65535 그룹 × 64 ≈ 4.19M 점)를 넘지 않게 자동 제한.")]
         [Min(64)] public int gpuDispatchChunk = GpuBakeLimits.DefaultChunk;
 
+        [Header("적응 샘플링 · 진행형 (RadianceGI)")]
+        [Tooltip("간접광을 패스(samplesPerPass spp)로 나눠 누적하고, 매 패스 끝에 텍셀별 표준오차가 adaptiveThreshold × 텍셀 휘도 이하로 " +
+                 "수렴한 텍셀은 더 쏘지 않는다(indirectSamples = 상한). 밝고 트인 면은 일찍 멈추고 그림자 경계·구석만 상한까지 — 같은 상한에서 레이 절감, " +
+                 "같은 시간이면 상한을 올려 노이즈↓. 끄면 전 텍셀 indirectSamples(구 거동과 비트 동일). CPU/Burst/GPU 공통(판정은 관리 코드라 백엔드 무관).")]
+        public bool adaptiveSampling = false;
+        [Tooltip("패스당 간접 경로 수. 적응 판정·진행형 미리보기의 간격. 작을수록 판정이 촘촘(조기 종료↑)하지만 패스 오버헤드↑.")]
+        [Min(1)] public int samplesPerPass = 8;
+        [Tooltip("이 spp 이전에는 수렴 판정을 하지 않는다(분산 추정이 믿을 만해지는 최소 표본). 16~32 권장.")]
+        [Min(2)] public int adaptiveMinSamples = 16;
+        [Tooltip("수렴 기준: 평균 휘도의 표준오차 ≤ 이 값 × (직사+간접) 텍셀 휘도. 0.02~0.05 권장 — 작을수록 품질↑ 비용↑.")]
+        [Range(0.001f, 0.5f)] public float adaptiveThreshold = 0.03f;
+        [Tooltip("진행형 미리보기(우클릭 'Bake Progressive (Preview)')에서 이 패스 수마다 아틀라스를 다시 합성(denoise·스티칭·dilation 포함)해 화면 갱신.")]
+        [Min(1)] public int progressivePreviewEveryPasses = 1;
+
+        [Header("GPU 후처리 (시임 스티칭 · Dilation)")]
+        [Tooltip("시임 스티칭(Tier1·Tier2) + dilation 을 컴퓨트 셰이더로(LightmapPost.compute). 결과 = CPU 판(나눗셈 ULP 차이만). " +
+                 "compute 미지원·셰이더 로드 실패 시 CPU 판으로 폴백. denoise 는 CPU(Burst/C#) 그대로.")]
+        public bool gpuPostProcess = false;
+        [Tooltip("GPU 후처리용 LightmapPost.compute. 비우면 Resources → (에디터) 패키지 경로에서 찾음.")]
+        public ComputeShader postShader;
+
         [Header("Alpha Cutout (α) — 잎·펜스 등 컷아웃 차폐")]
         [Tooltip("컷아웃 머티리얼의 알파를 차폐 판정에 반영한다. 끄면 쿼드 전체가 불투명 판(기존 거동).")]
         public bool alphaCutoutShadows = true;
@@ -213,6 +234,12 @@ namespace HuskyLibs.CustomLightmapper.Bake
         int _kRadiance = -1;
         bool _gpuReady;
         GpuIoBuffers _gpuIo;   // 재사용 GPU I/O 버퍼(_gpuScene 과 동일 수명). per-instance Dispatch 의 5×N alloc/dispose 제거.
+        int _kAccum = -1;          // CSRadianceAccum(적응·진행형 이어 굽기)
+        GpuPathAccum _gpuAccum;    // 이어 굽기 상주 버퍼(_gpuScene 과 동일 수명, 배치마다 다시 Bind)
+
+        // 적응 샘플링 · 진행형 통계(완료 로그용): 실제 경로 수 / 상한(점 × indirectSamples) / 누적기에 넣은 점 수
+        long _accumSamples, _accumBudget, _accumPoints;
+        bool _accumUsed;
 
         [Header("Bake Result (저장 · 런타임 로드)")]
         [Tooltip("베이크 결과 에셋(SO). applyOnEnable 이면 OnEnable 에 이걸로 적용 — 플레이/빌드에서 베이크 없이 동작.")]
@@ -233,6 +260,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         [SerializeField] bool overflow;
         [SerializeField] Texture2DArray atlas;
         [SerializeField] Material sharedMat;
+        [SerializeField] string progressiveStatus;
 
         // 이번 베이크의 아틀라스 인코딩(BakeAndApply 에서 1회 결정 → BlitRegion·아틀라스 생성이 공유)
         bool _hdrAtlas;
@@ -246,6 +274,11 @@ namespace HuskyLibs.CustomLightmapper.Bake
         internal Material SharedMaterial => sharedMat;
         /// <summary>마지막 베이크가 실제로 쓴 조도 백엔드("Gpu"/"Burst"/"CPU", 매핑 모드면 null) — 폴백 여부 확인용.</summary>
         internal string LastBakeBackend { get; private set; }
+        /// <summary>마지막 베이크의 적응·진행형 누적 통계: 실제 간접 경로 수 / 상한(점 × indirectSamples). 누적기를 안 썼으면 0.</summary>
+        internal long LastAccumSamples => _accumSamples;
+        internal long LastAccumBudget => _accumBudget;
+        /// <summary>마지막 합성의 스티칭·dilation 실행 위치("GPU"/"CPU").</summary>
+        internal string LastPostBackend { get; private set; }
 
         // 원복용 — 적용한 렌더러와 그 원본 메시/머티리얼
         [SerializeField] MeshFilter[] _appliedFilters;
@@ -260,9 +293,47 @@ namespace HuskyLibs.CustomLightmapper.Bake
             MaxPages = Mathf.Max(1, maxPages),
         };
 
+        // ───────────────────── 베이크 실행(동기 BakeAndApply · 진행형 미리보기 공용 단계) ─────────────────────
+        //   BeginRun(할당·버퍼·씬) → PrepareInstance(파라미터화·텍셀 복원) → 조도(배치 FlushBatch / 진행형 누적)
+        //   → FinishInstance(blit + 시임 입력 + 메시 적용) → Compose(denoise·stitch·dilate·아틀라스) → EndRun(기록·로그·해제·저장).
+        //   진행형은 같은 단계를 쓰되 조도를 패스마다 누적하고 ResetCanvas + BlitInstance + Compose 로 미리보기를 다시 만든다.
+        sealed class BakeRun
+        {
+            public MeshFilter[] filters;
+            public AllocationResult alloc;
+            public int res, pages;
+            public Color[][] slices;
+            public bool[][] validMask;
+            public bool doDenoise;
+            public Vector3[][] guideN, guideP;
+            public MeshFilter[] appliedF;
+            public Mesh[] origMesh;
+            public Material[] origMat;
+            // 시임 스티칭 입력(페이지별 누적): Tier1=텍셀 인덱스 그룹, Tier2=텍셀좌표 segment 그룹
+            public System.Collections.Generic.List<int[]>[] seamTexelGroups;
+            public System.Collections.Generic.List<LightmapSeamStitch.Seg[]>[] seamSegGroups;
+            // SSAA 통계(완료 로그용): 재샘플된 텍셀 수 / 그 텍셀에서 쏜 서브샘플 수 / 전체 valid 텍셀 수
+            public int ssaaTexels;
+            public long ssaaSubSamples, ssaaBaseTexels;
+            public int batches, prepared;
+            public int stitchT1, stitchT2;
+            public bool postOnGpu;
+            public readonly System.Diagnostics.Stopwatch swTotal = new System.Diagnostics.Stopwatch();
+            public readonly System.Diagnostics.Stopwatch swScene = new System.Diagnostics.Stopwatch();
+            public readonly System.Diagnostics.Stopwatch swBake = new System.Diagnostics.Stopwatch();
+            public readonly System.Diagnostics.Stopwatch swPost = new System.Diagnostics.Stopwatch();
+            // 진행형 미리보기
+            public System.Collections.Generic.List<PendingBake> all;
+            public ProgressiveAccumulator acc;
+            public IPathAccumBackend accBackend;
+            public bool accOwned;
+            public int passesSinceCompose, previews;
+        }
+
         [ContextMenu("Bake & Apply")]
         public void BakeAndApply()
         {
+            CancelProgressive(finalize: false);
             var filters = ResolveTargets();
             if (filters.Length == 0)
             {
@@ -270,14 +341,49 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 return;
             }
 
+            var r = BeginRun(filters);
+
+            // 3) 인스턴스마다 파라미터화→조립→텍셀복원 → (배치) 조도 베이크 → 영역 blit→메시/ST 적용
+            //   G6-3b: 준비된 인스턴스를 bakeBatchLumels(valid lumel 수)까지 모아 1패스·SSAA 2패스를 한 번에 굽는다
+            //   (GPU = 1 업로드·분할 디스패치·1 readback, Burst = 1 잡). 텍셀 조도는 점별 독립(점·노멀·시드 — 시드는 인스턴스 안
+            //   lumel 인덱스 기준)이라 배치 크기와 무관하게 비트 동일. blit·시임·메시 적용은 배치 안에서도 인스턴스 순서 그대로.
+            var pending = new System.Collections.Generic.List<PendingBake>();
+            long pendingLumels = 0;
+            r.swBake.Start();
+            try
+            {
+                for (int i = 0; i < filters.Length; i++)
+                {
+                    var pb = PrepareInstance(r, i);
+                    if (pb == null) continue;
+                    pending.Add(pb);
+                    pendingLumels += CountValid(pb.lumel);
+                    if (pendingLumels >= bakeBatchLumels) { FlushBatch(r, pending, pendingLumels); pendingLumels = 0; }   // 0 = 인스턴스마다(구 거동)
+                }
+                FlushBatch(r, pending, pendingLumels);
+            }
+            finally
+            {
+#if UNITY_EDITOR
+                UnityEditor.EditorUtility.ClearProgressBar();
+#endif
+            }
+            r.swBake.Stop();
+
+            Compose(r);
+            EndRun(r, saveBakeResult);
+        }
+
+        // 1) 할당 → 2) 페이지 버퍼·가이드 → 씬(차폐자/GI 씬·광원) 1회 구성. 메시 스왑 전에 원본 sharedMesh 로 빌드.
+        BakeRun BeginRun(MeshFilter[] filters)
+        {
             // 베이크 시간 계측 — 단계별로 나눠야 α(알파 컷아웃)/원반 샘플링의 비용을 분리해서 볼 수 있다.
             //   scene = 씬 구성(BVH 빌드 + 알파 마스크 굽기) / bake = 레이트레이싱 루프 / post = 디노이즈·스티치·디레이트
-            var swTotal = System.Diagnostics.Stopwatch.StartNew();
-            var swScene = new System.Diagnostics.Stopwatch();
-            var swBake = new System.Diagnostics.Stopwatch();
-            var swPost = new System.Diagnostics.Stopwatch();
+            var r = new BakeRun { filters = filters };
+            r.swTotal.Start();
 
             _lastBake.Clear();
+            _accumSamples = 0; _accumBudget = 0; _accumPoints = 0; _accumUsed = false;
             // 1) 인스턴스별 월드 표면적 → 할당(ST + 페이지)
             var insts = new LightmapInstance[filters.Length];
             for (int i = 0; i < filters.Length; i++)
@@ -288,9 +394,10 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 };
 
             var settings = BuildSettings();
-            var alloc = LightmapAllocator.Allocate(insts, settings);
-            int res = settings.AtlasResolution;
-            int pages = Mathf.Max(1, alloc.PageCount);
+            r.alloc = LightmapAllocator.Allocate(insts, settings);
+            r.res = settings.AtlasResolution;
+            r.pages = Mathf.Max(1, r.alloc.PageCount);
+            int res = r.res, pages = r.pages;
 
             // 최종 인코딩(1회 결정): 라이팅 모드 + hdrOutput → RGBAHalf 선형 HDR. 미지원 플랫폼은 RGBA32 폴백.
             _hdrAtlas = hdrOutput && (mode == BakeMode.Radiance || mode == BakeMode.RadianceGI);
@@ -303,27 +410,25 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
             // 2) 페이지별 픽셀 버퍼를 배경색으로 초기화 (Linear 아틀라스라 표시색을 linear 로 저장)
             //    validMask: blit 로 실제 칠해진 텍셀 표시 → dilation 의 소스/보존 기준.
-            var slices = new Color[pages][];
-            var validMask = new bool[pages][];
-            Color bgLin = background.linear;
+            r.slices = new Color[pages][];
+            r.validMask = new bool[pages][];
             for (int p = 0; p < pages; p++)
             {
-                slices[p] = new Color[res * res];
-                validMask[p] = new bool[res * res]; // 기본 false(=배경)
-                for (int k = 0; k < slices[p].Length; k++) slices[p][k] = bgLin;
+                r.slices[p] = new Color[res * res];
+                r.validMask[p] = new bool[res * res]; // 기본 false(=배경)
             }
+            ResetCanvas(r);
 
             // Denoise 가이드(텍셀별 월드 노멀·위치) — 라이팅 모드에서만 수집(BlitRegion 이 채움).
-            bool doDenoise = denoise && (mode == BakeMode.Radiance || mode == BakeMode.RadianceGI);
-            Vector3[][] guideN = null, guideP = null;
-            if (doDenoise)
+            r.doDenoise = denoise && (mode == BakeMode.Radiance || mode == BakeMode.RadianceGI);
+            if (r.doDenoise)
             {
-                guideN = new Vector3[pages][];
-                guideP = new Vector3[pages][];
+                r.guideN = new Vector3[pages][];
+                r.guideP = new Vector3[pages][];
                 for (int p = 0; p < pages; p++)
                 {
-                    guideN[p] = new Vector3[res * res];
-                    guideP[p] = new Vector3[res * res];
+                    r.guideN[p] = new Vector3[res * res];
+                    r.guideP[p] = new Vector3[res * res];
                 }
             }
 
@@ -331,7 +436,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
             // Radiance 모드: 씬 전체(모든 인스턴스) 차폐자 + 광원 1회 구성 → 인스턴스 간 그림자 반영.
             // 메시 스왑 전에 원본 sharedMesh 로 빌드(지오메트리는 uv2 메시와 동일 좌표).
-            swScene.Start();
+            r.swScene.Start();
             if (mode == BakeMode.Radiance)
             {
                 var occTris = BuildWorldTris(ResolveOccluderUnion(filters));
@@ -354,195 +459,199 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 BuildGiScene(ResolveOccluderUnion(filters));
                 Debug.LogWarning("[AtlasApply] RadianceGI 경로추적 베이크 — 매우 느림. atlasResolution↓(128~256)·indirectSamples↓(16~32)·maxBounces 1~2 권장.", this);
             }
-            swScene.Stop();
+            r.swScene.Stop();
             LastBakeBackend = mode == BakeMode.Radiance ? "CPU"
                             : mode == BakeMode.RadianceGI ? (_gpuReady ? "Gpu" : _burstReady ? "Burst" : "CPU")
                             : null;
 
-            var appliedF = new MeshFilter[filters.Length];
-            var origMesh = new Mesh[filters.Length];
-            var origMat = new Material[filters.Length];
+            r.appliedF = new MeshFilter[filters.Length];
+            r.origMesh = new Mesh[filters.Length];
+            r.origMat = new Material[filters.Length];
 
-            // 시임 스티칭 입력(페이지별 누적): Tier1=텍셀 인덱스 그룹, Tier2=텍셀좌표 segment 그룹.
             // 인스턴스마다 자기 ST 영역(ox,oy,sidePx) 기준으로 아틀라스 전역 인덱스/좌표를 만들어 페이지에 모은다.
-            var seamTexelGroups = new System.Collections.Generic.List<int[]>[pages];
-            var seamSegGroups = new System.Collections.Generic.List<LightmapSeamStitch.Seg[]>[pages];
+            r.seamTexelGroups = new System.Collections.Generic.List<int[]>[pages];
+            r.seamSegGroups = new System.Collections.Generic.List<LightmapSeamStitch.Seg[]>[pages];
             for (int p = 0; p < pages; p++)
             {
-                seamTexelGroups[p] = new System.Collections.Generic.List<int[]>();
-                seamSegGroups[p] = new System.Collections.Generic.List<LightmapSeamStitch.Seg[]>();
+                r.seamTexelGroups[p] = new System.Collections.Generic.List<int[]>();
+                r.seamSegGroups[p] = new System.Collections.Generic.List<LightmapSeamStitch.Seg[]>();
             }
+            return r;
+        }
 
-            // SSAA 통계(완료 로그용): 재샘플된 텍셀 수 / 그 텍셀에서 쏜 서브샘플 수 / 전체 valid 텍셀 수.
-            //   레이 배수 = (baseTexels - ssaaTexels + ssaaSubSamples) / baseTexels — 실제 비용 증가율.
-            int ssaaTexels = 0;
-            long ssaaSubSamples = 0, ssaaBaseTexels = 0;
-
-            // 3) 인스턴스마다 파라미터화→조립→텍셀복원 → (배치) 조도 베이크 → 영역 blit→메시/ST 적용
-            //   G6-3b: 준비된 인스턴스를 bakeBatchLumels(valid lumel 수)까지 모아 1패스·SSAA 2패스를 한 번에 굽는다
-            //   (GPU = 1 업로드·분할 디스패치·1 readback, Burst = 1 잡). 텍셀 조도는 점별 독립(점·노멀·시드 — 시드는 인스턴스 안
-            //   lumel 인덱스 기준)이라 배치 크기와 무관하게 비트 동일. blit·시임·메시 적용은 배치 안에서도 인스턴스 순서 그대로.
-            var pending = new System.Collections.Generic.List<PendingBake>();
-            long pendingLumels = 0;
-            int batches = 0, prepared = 0;
-
-            void Flush()
+        // 페이지 버퍼 = 배경색, valid = false (진행형은 미리보기마다 다시 칠하려고 반복 호출).
+        void ResetCanvas(BakeRun r)
+        {
+            Color bgLin = background.linear;
+            for (int p = 0; p < r.pages; p++)
             {
-                if (pending.Count == 0) return;
-                batches++;
-#if UNITY_EDITOR
-                UnityEditor.EditorUtility.DisplayProgressBar("AtlasApply 베이크",
-                    $"배치 {batches} — 인스턴스 {prepared}/{filters.Length} (lumel {pendingLumels})", (float)prepared / filters.Length);
-#endif
-                var rads = BakeLumelsBatch(pending);
-                if (rads != null)
-                {
-                    for (int k = 0; k < pending.Count; k++) ssaaBaseTexels += CountValid(pending[k].lumel);
-                    ApplySsaaBatch(pending, rads, ref ssaaTexels, ref ssaaSubSamples);
-                }
-                for (int k = 0; k < pending.Count; k++) FinishInstance(pending[k], rads?[k]);
-                pending.Clear();
-                pendingLumels = 0;
+                var s = r.slices[p];
+                for (int k = 0; k < s.Length; k++) s[k] = bgLin;
+                System.Array.Clear(r.validMask[p], 0, r.validMask[p].Length);
             }
+        }
 
-            // 구운 조도(rad)를 아틀라스에 blit + 시임 입력 누적 + 렌더러에 uv2 메시·ST 적용(구 루프 본문 그대로)
-            void FinishInstance(PendingBake pb, Vector3[] rad)
-            {
-                int i = pb.index;
-                var mf = pb.mf;
-                var uv2mesh = pb.uv2mesh;
-                var seams = pb.seams;
-                int page = pb.page, ox = pb.ox, oy = pb.oy, sidePx = pb.sidePx;
-                Color tint = Color.HSVToRGB((i * 0.6180339887f) % 1f, 0.65f, 1f); // 황금비 분산 → 인접 인스턴스 색 분리
+        // 인스턴스 i 파라미터화 → 패킹 → uv2 조립 → 텍셀 복원. 건너뛰면 null.
+        PendingBake PrepareInstance(BakeRun r, int i)
+        {
+            var mf = r.filters[i];
+            // 이전 베이크/에셋 적용으로 uv2 메시·라이트맵 머티리얼이 들어가 있어도 진짜 원본 기준으로 처리(재베이크·복원·저장 정합)
+            OriginalOf(mf, out var src, out var srcMat);
+            Vector4 st = r.alloc.Instances[i].ScaleOffset;
+            int page = Mathf.Clamp(r.alloc.Instances[i].LightmapIndex, 0, r.pages - 1);
 
-                BlitRegion(slices[page], validMask[page], res, ox, oy, sidePx, pb.lumel, tint, rad,
-                           doDenoise ? guideN[page] : null, doDenoise ? guideP[page] : null);
+            // ST → 아틀라스 픽셀 영역 (Allocate 가 sd/r, rx/r 형태라 정수 복원 정확)
+            int sidePx = Mathf.Max(1, Mathf.RoundToInt(st.x * r.res));
+            int ox = Mathf.RoundToInt(st.z * r.res);
+            int oy = Mathf.RoundToInt(st.w * r.res);
 
-                // 시임 스티칭 입력 누적 — 블릿과 동일한 (ox,oy,sidePx,res) 매핑이라 텍셀이 정확히 정렬.
-                // 노멀 게이팅: 시임 양쪽 노멀이 seamMaxAngleDeg 이내(부드러운 시임)일 때만 스티칭 →
-                //   하드 엣지(문틈·필러·큐브 모서리)에서 서로 다른 면을 평균해 생기는 밝은 테두리(rim) 방지.
-                if ((seamStitchTier1 || seamStitchTier2) && seams != null && seams.Groups.Count > 0)
-                {
-                    var uv2s = uv2mesh.uv2; // 패킹 라이트맵 UV(채널1) — TexelMapper 와 동일 소스
-                    var nrm = uv2mesh.normals; // 게이팅용 노멀(TexelMapper.Map 이 보장). 없으면 게이팅 비활성.
-                    if (nrm == null || nrm.Length != uv2mesh.vertexCount) nrm = null;
-                    float cosThresh = Mathf.Cos(seamMaxAngleDeg * Mathf.Deg2Rad);
-
-                    if (uv2s != null && uv2s.Length == uv2mesh.vertexCount)
-                    {
-                        if (seamStitchTier1)
-                        {
-                            foreach (var grp in seams.Groups)
-                            {
-                                if (grp == null || grp.Length < 2) continue;
-                                if (nrm != null && !NormalsAgree(grp, nrm, cosThresh)) continue; // 하드 엣지 → 스킵
-                                var texels = new int[grp.Length];
-                                int n = 0;
-                                for (int k = 0; k < grp.Length; k++)
-                                {
-                                    int v = grp[k];
-                                    if (v < 0 || v >= uv2s.Length) continue;
-                                    int ti = LightmapSeamStitch.Uv2ToTexelIndex(uv2s[v], ox, oy, sidePx, res);
-                                    if (ti >= 0) texels[n++] = ti;
-                                }
-                                if (n >= 2)
-                                {
-                                    if (n != texels.Length) System.Array.Resize(ref texels, n);
-                                    seamTexelGroups[page].Add(texels);
-                                }
-                            }
-                        }
-                        if (seamStitchTier2)
-                        {
-                            var egs = SeamEdgeBuilder.Build(uv2mesh.triangles, uv2mesh.vertexCount, seams.Groups);
-                            if (nrm != null) egs = SeamEdgeBuilder.FilterByNormal(egs, nrm, seamMaxAngleDeg); // 하드 엣지 제외
-                            var segGroups = SeamEdgeBuilder.BuildSegments(egs, uv2s, ox, oy, sidePx);
-                            if (segGroups.Count > 0) seamSegGroups[page].AddRange(segGroups);
-                        }
-                    }
-                }
-
-                // 렌더러에 조립 메시 + ST 적용 (원본 보관)
-                var rnd = mf.GetComponent<MeshRenderer>();
-                appliedF[i] = mf;
-                origMesh[i] = pb.src;
-                origMat[i] = pb.srcMat;
-                _lastBake.Add(new BakeRecord { filter = mf, source = pb.src, sourceMat = pb.srcMat, uv2 = uv2mesh, st = pb.st, page = page });
-
-                mf.sharedMesh = uv2mesh;
-                if (rnd != null)
-                {
-                    rnd.sharedMaterial = sharedMat;
-                    var mpb = new MaterialPropertyBlock();
-                    rnd.GetPropertyBlock(mpb);
-                    mpb.SetVector("_LightmapST", pb.st);
-                    mpb.SetFloat("_LightmapIndex", page);
-                    rnd.SetPropertyBlock(mpb);
-                }
-            }
-
-            swBake.Start();
+            Mesh uv2mesh;
+            LumelMap lumel;
+            SeamTable seams = null;
             try
             {
-                for (int i = 0; i < filters.Length; i++)
-                {
-                    var mf = filters[i];
-                    // 이전 베이크/에셋 적용으로 uv2 메시·라이트맵 머티리얼이 들어가 있어도 진짜 원본 기준으로 처리(재베이크·복원·저장 정합)
-                    OriginalOf(mf, out var src, out var srcMat);
-                    Vector4 st = alloc.Instances[i].ScaleOffset;
-                    int page = Mathf.Clamp(alloc.Instances[i].LightmapIndex, 0, pages - 1);
-
-                    // ST → 아틀라스 픽셀 영역 (Allocate 가 sd/r, rx/r 형태라 정수 복원 정확)
-                    int sidePx = Mathf.Max(1, Mathf.RoundToInt(st.x * res));
-                    int ox = Mathf.RoundToInt(st.z * res);
-                    int oy = Mathf.RoundToInt(st.w * res);
-
-                    Mesh uv2mesh;
-                    LumelMap lumel;
-                    SeamTable seams = null;
-                    try
-                    {
-                        var pr = ParameterizationPipeline.Run(src, segmentation, flatten);
-                        if (pr.Charts == null || pr.Charts.Length == 0) { Debug.LogWarning($"[AtlasApply] '{mf.name}' 차트 0개 — 건너뜀.", mf); continue; }
-                        DensityNormalizer.Normalize(pr.Charts);
-                        ShelfPacker.Pack(pr.Charts, chartGutter);
-                        (uv2mesh, seams) = UVAssembly.Assemble(pr.Charts, src);
-                        uv2mesh.hideFlags = HideFlags.DontSave;
-                        // 영역 크기에 맞춰 래스터 → 아틀라스에 1:1 blit
-                        lumel = TexelMapper.Map(uv2mesh, sidePx, mf.transform.localToWorldMatrix);
-                    }
-                    catch (System.Exception e)
-                    {
-                        Debug.LogError($"[AtlasApply] '{mf.name}' 처리 실패: {e.Message}", mf);
-                        continue;
-                    }
-
-                    prepared++;
-                    pending.Add(new PendingBake
-                    {
-                        index = i, mf = mf, src = src, srcMat = srcMat, st = st,
-                        page = page, sidePx = sidePx, ox = ox, oy = oy,
-                        uv2mesh = uv2mesh, lumel = lumel, seams = seams,
-                    });
-                    pendingLumels += CountValid(lumel);
-                    if (pendingLumels >= bakeBatchLumels) Flush();   // 0 = 인스턴스마다(구 거동)
-                }
-                Flush();
+                var pr = ParameterizationPipeline.Run(src, segmentation, flatten);
+                if (pr.Charts == null || pr.Charts.Length == 0) { Debug.LogWarning($"[AtlasApply] '{mf.name}' 차트 0개 — 건너뜀.", mf); return null; }
+                DensityNormalizer.Normalize(pr.Charts);
+                ShelfPacker.Pack(pr.Charts, chartGutter);
+                (uv2mesh, seams) = UVAssembly.Assemble(pr.Charts, src);
+                uv2mesh.hideFlags = HideFlags.DontSave;
+                // 영역 크기에 맞춰 래스터 → 아틀라스에 1:1 blit
+                lumel = TexelMapper.Map(uv2mesh, sidePx, mf.transform.localToWorldMatrix);
             }
-            finally
+            catch (System.Exception e)
             {
-#if UNITY_EDITOR
-                UnityEditor.EditorUtility.ClearProgressBar();
-#endif
+                Debug.LogError($"[AtlasApply] '{mf.name}' 처리 실패: {e.Message}", mf);
+                return null;
             }
 
-            swBake.Stop();
-            swPost.Start();
+            r.prepared++;
+            return new PendingBake
+            {
+                index = i, mf = mf, src = src, srcMat = srcMat, st = st,
+                page = page, sidePx = sidePx, ox = ox, oy = oy,
+                uv2mesh = uv2mesh, lumel = lumel, seams = seams,
+            };
+        }
+
+        // 배치 1개: 조도(1패스 + SSAA) → 인스턴스 순서대로 FinishInstance. pending 은 비운다.
+        void FlushBatch(BakeRun r, System.Collections.Generic.List<PendingBake> pending, long pendingLumels)
+        {
+            if (pending.Count == 0) return;
+            r.batches++;
+#if UNITY_EDITOR
+            UnityEditor.EditorUtility.DisplayProgressBar("AtlasApply 베이크",
+                $"배치 {r.batches} — 인스턴스 {r.prepared}/{r.filters.Length} (lumel {pendingLumels})", (float)r.prepared / r.filters.Length);
+#endif
+            var rads = BakeLumelsBatch(pending);
+            if (rads != null)
+            {
+                for (int k = 0; k < pending.Count; k++) r.ssaaBaseTexels += CountValid(pending[k].lumel);
+                ApplySsaaBatch(pending, rads, ref r.ssaaTexels, ref r.ssaaSubSamples);
+            }
+            for (int k = 0; k < pending.Count; k++) FinishInstance(r, pending[k], rads?[k]);
+            pending.Clear();
+        }
+
+        // 구운 조도(rad)를 아틀라스에 blit + 시임 입력 누적 + 렌더러에 uv2 메시·ST 적용
+        void FinishInstance(BakeRun r, PendingBake pb, Vector3[] rad)
+        {
+            BlitInstance(r, pb, rad);
+            RegisterInstance(r, pb);
+        }
+
+        void BlitInstance(BakeRun r, PendingBake pb, Vector3[] rad)
+        {
+            int page = pb.page;
+            Color tint = Color.HSVToRGB((pb.index * 0.6180339887f) % 1f, 0.65f, 1f); // 황금비 분산 → 인접 인스턴스 색 분리
+            BlitRegion(r.slices[page], r.validMask[page], r.res, pb.ox, pb.oy, pb.sidePx, pb.lumel, tint, rad,
+                       r.doDenoise ? r.guideN[page] : null, r.doDenoise ? r.guideP[page] : null);
+        }
+
+        // 시임 스티칭 입력 누적(지오메트리만 — 조도와 무관해 인스턴스당 1회) + 메시·머티리얼·ST 적용
+        void RegisterInstance(BakeRun r, PendingBake pb)
+        {
+            int i = pb.index;
+            var mf = pb.mf;
+            var uv2mesh = pb.uv2mesh;
+            var seams = pb.seams;
+            int page = pb.page, ox = pb.ox, oy = pb.oy, sidePx = pb.sidePx, res = r.res;
+
+            // 시임 스티칭 입력 누적 — 블릿과 동일한 (ox,oy,sidePx,res) 매핑이라 텍셀이 정확히 정렬.
+            // 노멀 게이팅: 시임 양쪽 노멀이 seamMaxAngleDeg 이내(부드러운 시임)일 때만 스티칭 →
+            //   하드 엣지(문틈·필러·큐브 모서리)에서 서로 다른 면을 평균해 생기는 밝은 테두리(rim) 방지.
+            if ((seamStitchTier1 || seamStitchTier2) && seams != null && seams.Groups.Count > 0)
+            {
+                var uv2s = uv2mesh.uv2; // 패킹 라이트맵 UV(채널1) — TexelMapper 와 동일 소스
+                var nrm = uv2mesh.normals; // 게이팅용 노멀(TexelMapper.Map 이 보장). 없으면 게이팅 비활성.
+                if (nrm == null || nrm.Length != uv2mesh.vertexCount) nrm = null;
+                float cosThresh = Mathf.Cos(seamMaxAngleDeg * Mathf.Deg2Rad);
+
+                if (uv2s != null && uv2s.Length == uv2mesh.vertexCount)
+                {
+                    if (seamStitchTier1)
+                    {
+                        foreach (var grp in seams.Groups)
+                        {
+                            if (grp == null || grp.Length < 2) continue;
+                            if (nrm != null && !NormalsAgree(grp, nrm, cosThresh)) continue; // 하드 엣지 → 스킵
+                            var texels = new int[grp.Length];
+                            int n = 0;
+                            for (int k = 0; k < grp.Length; k++)
+                            {
+                                int v = grp[k];
+                                if (v < 0 || v >= uv2s.Length) continue;
+                                int ti = LightmapSeamStitch.Uv2ToTexelIndex(uv2s[v], ox, oy, sidePx, res);
+                                if (ti >= 0) texels[n++] = ti;
+                            }
+                            if (n >= 2)
+                            {
+                                if (n != texels.Length) System.Array.Resize(ref texels, n);
+                                r.seamTexelGroups[page].Add(texels);
+                            }
+                        }
+                    }
+                    if (seamStitchTier2)
+                    {
+                        var egs = SeamEdgeBuilder.Build(uv2mesh.triangles, uv2mesh.vertexCount, seams.Groups);
+                        if (nrm != null) egs = SeamEdgeBuilder.FilterByNormal(egs, nrm, seamMaxAngleDeg); // 하드 엣지 제외
+                        var segGroups = SeamEdgeBuilder.BuildSegments(egs, uv2s, ox, oy, sidePx);
+                        if (segGroups.Count > 0) r.seamSegGroups[page].AddRange(segGroups);
+                    }
+                }
+            }
+
+            // 렌더러에 조립 메시 + ST 적용 (원본 보관)
+            var rnd = mf.GetComponent<MeshRenderer>();
+            r.appliedF[i] = mf;
+            r.origMesh[i] = pb.src;
+            r.origMat[i] = pb.srcMat;
+            _lastBake.Add(new BakeRecord { filter = mf, source = pb.src, sourceMat = pb.srcMat, uv2 = uv2mesh, st = pb.st, page = page });
+
+            mf.sharedMesh = uv2mesh;
+            if (rnd != null)
+            {
+                rnd.sharedMaterial = sharedMat;
+                var mpb = new MaterialPropertyBlock();
+                rnd.GetPropertyBlock(mpb);
+                mpb.SetVector("_LightmapST", pb.st);
+                mpb.SetFloat("_LightmapIndex", page);
+                rnd.SetPropertyBlock(mpb);
+            }
+        }
+
+        // 후처리(denoise → 시임 스티칭 → dilation) + 아틀라스 텍스처 생성/갱신. 페이지 버퍼를 제자리 변경한다.
+        void Compose(BakeRun r)
+        {
+            int res = r.res, pages = r.pages;
+            var slices = r.slices;
+            var validMask = r.validMask;
+            r.swPost.Start();
 
             // 3.3) Denoise — MC 노이즈(그레인)를 노멀·위치·색 가이드 에지 보존 필터로 평활.
             //      Seam Stitch 전: 경계 텍셀 값을 먼저 안정화한 뒤 스티칭·확장해야 시임이 매끈하다.
             //      가이드는 valid 텍셀에서만 유효 — 필터도 valid 만 읽고 씀(배경/거터 불변, dilation 소스 마스크 불변).
-            if (doDenoise)
+            if (r.doDenoise)
             {
                 var dq = new DenoiseSettings
                 {
@@ -554,46 +663,19 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 for (int p = 0; p < pages; p++)
                 {
                     if (denoiseBurst)
-                        LightmapDenoiseBurstJob.Denoise(slices[p], validMask[p], guideN[p], guideP[p], res, res, dq);
+                        LightmapDenoiseBurstJob.Denoise(slices[p], validMask[p], r.guideN[p], r.guideP[p], res, res, dq);
                     else
-                        LightmapDenoise.Denoise(slices[p], validMask[p], guideN[p], guideP[p], res, res, dq);
+                        LightmapDenoise.Denoise(slices[p], validMask[p], r.guideN[p], r.guideP[p], res, res, dq);
                 }
             }
 
-            // 3.4) Seam Stitch — 차트 경계 정점(Tier1)/모서리(Tier2)의 불연속을 valid 텍셀 평균으로 제거.
-            //      Dilation 보다 먼저: 경계값을 먼저 일치시킨 뒤 그 값을 거터로 확장해야 한다.
-            int stitchT1 = 0, stitchT2 = 0;
-            if (seamStitchTier1 || seamStitchTier2)
-            {
-                for (int p = 0; p < pages; p++)
-                {
-                    if (seamStitchTier1 && seamTexelGroups[p].Count > 0)
-                    {
-                        LightmapSeamStitch.Stitch(slices[p], validMask[p], seamTexelGroups[p]);
-                        stitchT1 += seamTexelGroups[p].Count;
-                    }
-                    if (seamStitchTier2 && seamSegGroups[p].Count > 0)
-                    {
-                        LightmapSeamStitch.StitchEdges(slices[p], validMask[p], res, seamSegGroups[p], Mathf.Max(1, seamStitchIterations));
-                        stitchT2 += seamSegGroups[p].Count;
-                    }
-                }
-            }
+            // 3.4) Seam Stitch → 3.5) Dilation. GPU 후처리(gpuPostProcess)는 페이지마다 T1→T2→dilate 를 한 번에(실패 시 CPU).
+            r.stitchT1 = r.stitchT2 = 0;
+            r.postOnGpu = gpuPostProcess && StitchAndDilateGpu(r);
+            if (!r.postOnGpu) StitchAndDilateCpu(r);
+            LastPostBackend = r.postOnGpu ? "GPU" : "CPU";
 
-            // 3.5) Push-Pull Dilation — 거터/배경 텍셀을 인접 valid 평균으로 확장해 검은 시임 제거.
-            //      페이지별 독립 처리(같은 페이지에 여러 인스턴스가 들어가도 차트 간 거터를 함께 메움).
-            if (dilate && dilateIterations > 0)
-            {
-                for (int p = 0; p < pages; p++)
-                {
-                    if (dilateBurst)
-                        LightmapPostProcessBurstJob.Dilate(slices[p], validMask[p], res, res, dilateIterations);
-                    else
-                        LightmapPostProcess.Dilate(slices[p], validMask[p], res, res, dilateIterations);
-                }
-            }
-
-            swPost.Stop();
+            r.swPost.Stop();
 
             // 4) 아틀라스 텍스처 생성/갱신 — 라이팅 모드는 RGBAHalf(8B/texel, 1024² 페이지 8MB), 그 외 RGBA32
             var atlasFormat = _hdrAtlas ? TextureFormat.RGBAHalf : TextureFormat.RGBA32;
@@ -616,23 +698,105 @@ namespace HuskyLibs.CustomLightmapper.Bake
             for (int p = 0; p < pages; p++) atlas.SetPixels(slices[p], p);
             atlas.Apply(false);
             sharedMat.SetTexture("_Lightmaps", atlas);
+        }
 
-            _appliedFilters = appliedF;
-            _originalMeshes = origMesh;
-            _originalMats = origMat;
+        // 3.4) Seam Stitch — 차트 경계 정점(Tier1)/모서리(Tier2)의 불연속을 valid 텍셀 평균으로 제거.
+        //      Dilation 보다 먼저: 경계값을 먼저 일치시킨 뒤 그 값을 거터로 확장해야 한다.
+        // 3.5) Push-Pull Dilation — 거터/배경 텍셀을 인접 valid 평균으로 확장해 검은 시임 제거.
+        //      페이지별 독립 처리(같은 페이지에 여러 인스턴스가 들어가도 차트 간 거터를 함께 메움).
+        void StitchAndDilateCpu(BakeRun r)
+        {
+            int res = r.res, pages = r.pages;
+            if (seamStitchTier1 || seamStitchTier2)
+            {
+                for (int p = 0; p < pages; p++)
+                {
+                    if (seamStitchTier1 && r.seamTexelGroups[p].Count > 0)
+                    {
+                        LightmapSeamStitch.Stitch(r.slices[p], r.validMask[p], r.seamTexelGroups[p]);
+                        r.stitchT1 += r.seamTexelGroups[p].Count;
+                    }
+                    if (seamStitchTier2 && r.seamSegGroups[p].Count > 0)
+                    {
+                        LightmapSeamStitch.StitchEdges(r.slices[p], r.validMask[p], res, r.seamSegGroups[p], Mathf.Max(1, seamStitchIterations));
+                        r.stitchT2 += r.seamSegGroups[p].Count;
+                    }
+                }
+            }
+
+            if (dilate && dilateIterations > 0)
+            {
+                for (int p = 0; p < pages; p++)
+                {
+                    if (dilateBurst)
+                        LightmapPostProcessBurstJob.Dilate(r.slices[p], r.validMask[p], res, res, dilateIterations);
+                    else
+                        LightmapPostProcess.Dilate(r.slices[p], r.validMask[p], res, res, dilateIterations);
+                }
+            }
+        }
+
+        // GPU 후처리(LightmapPost.compute): 페이지마다 업로드 1회 → T1(웨이브) → T2(샘플→수집 Jacobi) → dilation 핑퐁 → readback 1회.
+        //   계획(웨이브·CSR)은 CPU 판과 같은 순서·같은 소스 집합이라 결과 = CPU 판(나눗셈 ULP 차이만). 실패하면 false → CPU 판.
+        bool StitchAndDilateGpu(BakeRun r)
+        {
+            if (!SystemInfo.supportsComputeShaders) return false;
+            var cs = LightmapPostGpu.Resolve(postShader);
+            if (cs == null) { Debug.LogWarning("[AtlasApply] LightmapPost.compute 로드 실패 — 후처리 CPU 폴백.", this); return false; }
+
+            var opt = new LightmapPostGpu.Options
+            {
+                Tier1 = seamStitchTier1,
+                Tier2 = seamStitchTier2,
+                Tier2Iterations = Mathf.Max(1, seamStitchIterations),
+                DilateIterations = dilate ? dilateIterations : 0,
+            };
+            // 전 페이지를 먼저 복사본으로 돌려 하나라도 실패하면 원본을 건드리지 않고 CPU 판으로 넘긴다(부분 적용 방지).
+            var outPx = new Color[r.pages][];
+            var outValid = new bool[r.pages][];
+            int t1 = 0, t2 = 0;
+            for (int p = 0; p < r.pages; p++)
+            {
+                outPx[p] = (Color[])r.slices[p].Clone();
+                outValid[p] = (bool[])r.validMask[p].Clone();
+                if (!LightmapPostGpu.Run(cs, outPx[p], outValid[p], r.res, r.seamTexelGroups[p], r.seamSegGroups[p], opt, out string err))
+                {
+                    Debug.LogWarning($"[AtlasApply] GPU 후처리 실패(페이지 {p}: {err}) — CPU 폴백.", this);
+                    return false;
+                }
+                if (seamStitchTier1) t1 += r.seamTexelGroups[p].Count;
+                if (seamStitchTier2) t2 += r.seamSegGroups[p].Count;
+            }
+            for (int p = 0; p < r.pages; p++) { r.slices[p] = outPx[p]; r.validMask[p] = outValid[p]; }
+            r.stitchT1 = t1; r.stitchT2 = t2;
+            return true;
+        }
+
+        // 기록(원복·저장) · 결과 필드 · 완료 로그 · 씬 해제 · 저장
+        void EndRun(BakeRun r, bool save)
+        {
+            var filters = r.filters;
+            var alloc = r.alloc;
+            int res = r.res, pages = r.pages;
+            var atlasFormat = _hdrAtlas ? TextureFormat.RGBAHalf : TextureFormat.RGBA32;
+
+            _appliedFilters = r.appliedF;
+            _originalMeshes = r.origMesh;
+            _originalMats = r.origMat;
 
             instanceCount = filters.Length;
             pageCount = pages;
             utilization = alloc.Utilization;
             overflow = alloc.Overflow;
 
+            string postTag = r.postOnGpu ? "GPU" : null;
             string dilateInfo = (dilate && dilateIterations > 0)
-                ? $", dilate={dilateIterations}×({(dilateBurst ? "Burst" : "C#")})"
+                ? $", dilate={dilateIterations}×({postTag ?? (dilateBurst ? "Burst" : "C#")})"
                 : ", dilate=off";
             string stitchInfo = (seamStitchTier1 || seamStitchTier2)
-                ? $", stitch(T1={stitchT1},T2={stitchT2})"
+                ? $", stitch(T1={r.stitchT1},T2={r.stitchT2}{(postTag != null ? ",GPU" : "")})"
                 : ", stitch=off";
-            string denoiseInfo = doDenoise
+            string denoiseInfo = r.doDenoise
                 ? $", denoise={denoiseIterations}×({(denoiseBurst ? "Burst" : "C#")})"
                 : ", denoise=off";
             string occInfo = (occluders != null && occluders.Length > 0) ? $", occluders={occluders.Length}" : "";
@@ -646,44 +810,231 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 : ", direct=1×(hard)";
             // SSAA: 재샘플 텍셀 비율과 실제 레이 배수. 배수 = (전체-엣지 + 서브샘플)/전체 — 적응형이 얼마나 싸게 먹혔는지.
             string ssaaInfo;
-            if (ssaaMode == SsaaMode.Off || ssaaFactor < 2 || ssaaBaseTexels == 0)
+            if (ssaaMode == SsaaMode.Off || ssaaFactor < 2 || r.ssaaBaseTexels == 0)
             {
                 ssaaInfo = ", ssaa=off";
             }
             else
             {
-                double pct = 100.0 * ssaaTexels / ssaaBaseTexels;
-                double mult = (double)(ssaaBaseTexels - ssaaTexels + ssaaSubSamples) / ssaaBaseTexels;
-                ssaaInfo = $", ssaa={ssaaMode} {ssaaFactor}×{ssaaFactor}(텍셀 {ssaaTexels}/{ssaaBaseTexels}={pct:F1}%, rays ×{mult:F2})"
+                double pct = 100.0 * r.ssaaTexels / r.ssaaBaseTexels;
+                double mult = (double)(r.ssaaBaseTexels - r.ssaaTexels + r.ssaaSubSamples) / r.ssaaBaseTexels;
+                ssaaInfo = $", ssaa={ssaaMode} {ssaaFactor}×{ssaaFactor}(텍셀 {r.ssaaTexels}/{r.ssaaBaseTexels}={pct:F1}%, rays ×{mult:F2})"
                          + (ssaaDebugMask ? " ⚠DEBUG_MASK" : "");
             }
 
             // G6-3b 배치·G6-4 분할 — 조도 베이크 호출 수(1패스 기준) = 배치 수
             string batchInfo = (mode == BakeMode.Radiance || mode == BakeMode.RadianceGI)
-                ? $", batch={batches}×(≤{bakeBatchLumels} lumels){(_gpuReady ? $" gpuChunk={gpuDispatchChunk}" : "")}"
+                ? $", batch={r.batches}×(≤{bakeBatchLumels} lumels){(_gpuReady ? $" gpuChunk={gpuDispatchChunk}" : "")}"
                 : "";
+            // 적응 샘플링 · 진행형: 실제로 쏜 간접 경로 / 상한(점 × indirectSamples)
+            string accumInfo = "";
+            if (_accumUsed && _accumBudget > 0 && _accumPoints > 0)
+            {
+                double avg = (double)_accumSamples / _accumPoints;
+                accumInfo = $", {(adaptiveSampling ? "adaptive" : "accum")}(spp 평균 {avg:F1}/{_accumBudget / _accumPoints}, 경로 {100.0 * _accumSamples / _accumBudget:F1}%, pass×{Mathf.Max(1, samplesPerPass)})";
+            }
+            if (r.acc != null) accumInfo += $", progressive(패스 {r.acc.Passes}, 미리보기 {r.previews})";
 
-            swTotal.Stop();
+            r.swTotal.Stop();
             // 시간: 총계 + 단계별. bake 가 레이트레이싱이므로 알파/원반 샘플링 비용은 여기서 본다.
             string timeInfo =
-                $"\n  time: total={swTotal.Elapsed.TotalSeconds:F2}s" +
-                $" | scene(BVH+알파마스크)={swScene.Elapsed.TotalSeconds:F2}s" +
-                $" | bake(레이트레이싱)={swBake.Elapsed.TotalSeconds:F2}s" +
-                $" | post(denoise+stitch+dilate)={swPost.Elapsed.TotalSeconds:F2}s";
+                $"\n  time: total={r.swTotal.Elapsed.TotalSeconds:F2}s" +
+                $" | scene(BVH+알파마스크)={r.swScene.Elapsed.TotalSeconds:F2}s" +
+                $" | bake(레이트레이싱)={r.swBake.Elapsed.TotalSeconds:F2}s" +
+                $" | post(denoise+stitch+dilate)={r.swPost.Elapsed.TotalSeconds:F2}s";
 
-            Debug.Log($"[AtlasApply] {filters.Length} insts → atlas {res}×{res}×{pages} {atlasFormat}, util={alloc.Utilization:P1}, mode={mode}{occInfo}{alphaInfo}{directInfo}{ssaaInfo}{batchInfo}{denoiseInfo}{stitchInfo}{dilateInfo}" +
+            Debug.Log($"[AtlasApply] {filters.Length} insts → atlas {res}×{res}×{pages} {atlasFormat}, util={alloc.Utilization:P1}, mode={mode}{occInfo}{alphaInfo}{directInfo}{ssaaInfo}{batchInfo}{accumInfo}{denoiseInfo}{stitchInfo}{dilateInfo}" +
                       (alloc.Overflow ? "  ⚠ overflow(클램프됨)" : "") + timeInfo, this);
 
-            // NativeArray 보유 차폐자/씬 해제(BlitRegion 은 위 루프에서 끝났으므로 안전)
+            DisposeBakeScene();
+
+#if UNITY_EDITOR
+            if (save && (mode == BakeMode.Radiance || mode == BakeMode.RadianceGI)) SaveBakeResult();
+#endif
+        }
+
+        // NativeArray 보유 차폐자/씬·GPU 버퍼 해제(blit 이 끝난 뒤에만)
+        void DisposeBakeScene()
+        {
             if (_occluder is System.IDisposable od) od.Dispose();
             _occluder = null;
             if (_giScene is System.IDisposable gd) gd.Dispose();
             _giScene = null;
-            if (_gpuReady) { _gpuScene.Dispose(); _gpuScene = null; _gpuIo?.Dispose(); _gpuIo = null; _gpuReady = false; _pathCS = null; _kRadiance = -1; }
+            _gpuAccum?.Dispose(); _gpuAccum = null;
+            if (_gpuReady) { _gpuScene.Dispose(); _gpuScene = null; _gpuIo?.Dispose(); _gpuIo = null; _gpuReady = false; _pathCS = null; _kRadiance = -1; _kAccum = -1; }
             if (_burstReady) { _burstScene.Dispose(); _burstReady = false; }
+        }
+
+        // ───────────────────── 진행형 미리보기(저 spp → 누적) ─────────────────────
+        //   RadianceGI 전용. 전 인스턴스를 준비해 lumel 전체를 한 누적기에 묶고(배치 = 1, 메모리 상주), 패스 0(samplesPerPass spp)
+        //   결과로 곧바로 아틀라스·메시를 적용한 뒤 패스마다 같은 RNG 스트림을 이어 누적 → progressivePreviewEveryPasses 마다 다시 합성.
+        //   끝나면 SSAA → 최종 합성 → 저장. 최종 아틀라스 = 같은 설정의 BakeAndApply 와 같다
+        //   (CPU/Burst 비트 동일 · adaptive 면 GPU 도 비트 동일 · 비적응 GPU 는 CSRadiance 대비 통계 일치).
+        //   에디터: "Bake Progressive (Preview)" 가 EditorApplication.update 로 패스를 돌림. 런타임/테스트: BeginProgressive + ProgressiveStep 반복.
+        BakeRun _progressive;
+
+        /// <summary>진행형 베이크가 돌고 있는지.</summary>
+        public bool IsProgressiveRunning => _progressive != null;
+
+        /// <summary>
+        /// 진행형 시작: 준비 + 패스 0 + 첫 미리보기 적용. 이어서 돌 패스가 있으면 true(→ <see cref="ProgressiveStep"/> 반복).
+        /// RadianceGI 가 아니면 일괄 베이크로 대신하고 false.
+        /// </summary>
+        public bool BeginProgressive()
+        {
+            CancelProgressive(finalize: false);
+            if (mode != BakeMode.RadianceGI)
+            {
+                Debug.LogWarning("[AtlasApply] 진행형 미리보기는 RadianceGI 전용 — 일괄 베이크로 실행.", this);
+                BakeAndApply();
+                return false;
+            }
+            var filters = ResolveTargets();
+            if (filters.Length == 0)
+            {
+                Debug.LogWarning("[AtlasApply] 대상 MeshFilter 가 없습니다. targets 지정 또는 자식에 MeshFilter 배치.", this);
+                return false;
+            }
+
+            var r = BeginRun(filters);
+            r.all = new System.Collections.Generic.List<PendingBake>();
+            r.swBake.Start();
+            for (int i = 0; i < filters.Length; i++)
+            {
+                var pb = PrepareInstance(r, i);
+                if (pb != null) r.all.Add(pb);
+            }
+            CollectPoints(r.all, out var pts, out var nrm, out var sds, out int n);
+            r.accBackend = CreateAccumBackend(out r.accOwned);
+            r.acc = new ProgressiveAccumulator(r.accBackend, AccumSettings(), pts, nrm, sds, n);
+            r.acc.Step();                         // 패스 0 — 저 spp 미리보기
+            r.batches = 1;
+            _accumUsed = true;
+            var rads = ScatterRadiance(r.all, r.acc.Result());
+            for (int k = 0; k < r.all.Count; k++) FinishInstance(r, r.all[k], rads[k]);
+            r.swBake.Stop();
+
+            _progressive = r;
+            Compose(r);
+            r.previews = 1;
+            // 진행 중에도 Restore 가 이번 적용분을 되돌리도록 원복 기록을 먼저 갱신
+            _appliedFilters = r.appliedF; _originalMeshes = r.origMesh; _originalMats = r.origMat;
+            UpdateProgressiveStatus(r);
+
+            if (r.acc.Finished) { FinishProgressive(canceled: false); return false; }
+            return true;
+        }
+
+        /// <summary>패스 1회(+ 주기적 미리보기 합성). 끝나면 최종 합성·저장까지 하고 false.</summary>
+        public bool ProgressiveStep()
+        {
+            var r = _progressive;
+            if (r == null) return false;
+            r.swBake.Start();
+            bool more = r.acc.Step();
+            r.swBake.Stop();
+            if (!more) { FinishProgressive(canceled: false); return false; }
+            if (++r.passesSinceCompose >= Mathf.Max(1, progressivePreviewEveryPasses))
+            {
+                Recompose(r, ScatterRadiance(r.all, r.acc.Result()));
+                r.passesSinceCompose = 0;
+                r.previews++;
+            }
+            UpdateProgressiveStatus(r);
+            return true;
+        }
+
+        // 현재 추정으로 페이지 버퍼를 처음부터 다시 칠하고 후처리·업로드(시임 입력·메시 적용은 그대로)
+        void Recompose(BakeRun r, Vector3[][] rads)
+        {
+            ResetCanvas(r);
+            for (int k = 0; k < r.all.Count; k++) BlitInstance(r, r.all[k], rads[k]);
+            Compose(r);
+        }
+
+        // 마무리: canceled 면 현재 spp 로 확정(SSAA·저장 생략), 아니면 SSAA → 최종 합성 → 저장
+        void FinishProgressive(bool canceled)
+        {
+            var r = _progressive;
+            _progressive = null;
+            UnhookProgressive();
+            if (r == null) return;
+
+            var rads = ScatterRadiance(r.all, r.acc.Result());
+            _accumSamples += r.acc.TotalSamples;
+            _accumBudget += (long)r.acc.PointCount * r.acc.MaxSamples;
+            _accumPoints += r.acc.PointCount;
+            if (r.accOwned) r.accBackend.Dispose();
+            r.accBackend = null;
+
+            if (!canceled)
+            {
+                r.swBake.Start();
+                for (int k = 0; k < r.all.Count; k++) r.ssaaBaseTexels += CountValid(r.all[k].lumel);
+                ApplySsaaBatch(r.all, rads, ref r.ssaaTexels, ref r.ssaaSubSamples);
+                r.swBake.Stop();
+            }
+            Recompose(r, rads);
+            r.previews++;
+            progressiveStatus = canceled
+                ? $"취소 — {r.acc.SamplesDone}/{r.acc.MaxSamples} spp 에서 확정"
+                : $"완료 — 패스 {r.acc.Passes}";
+            EndRun(r, save: !canceled && saveBakeResult);
+        }
+
+        // 진행 중 세션 정리. finalize = 현재 spp 로 확정해 적용, 아니면 자원만 해제(메시·아틀라스는 마지막 미리보기 상태로 남음).
+        void CancelProgressive(bool finalize)
+        {
+            if (_progressive == null) return;
+            if (finalize) { FinishProgressive(canceled: true); return; }
+            var r = _progressive;
+            _progressive = null;
+            UnhookProgressive();
+            if (r.accOwned) r.accBackend?.Dispose();
+            r.accBackend = null;
+            DisposeBakeScene();
+            progressiveStatus = "중단";
+        }
+
+        void UpdateProgressiveStatus(BakeRun r)
+        {
+            var a = r.acc;
+            progressiveStatus = $"패스 {a.Passes} · spp {a.SamplesDone}/{a.MaxSamples} · 활성 {a.ActiveCount}/{a.PointCount}";
+        }
+
+        void OnDisable() => CancelProgressive(finalize: false);
 
 #if UNITY_EDITOR
-            if (saveBakeResult && (mode == BakeMode.Radiance || mode == BakeMode.RadianceGI)) SaveBakeResult();
+        [ContextMenu("Bake Progressive (Preview)")]
+        public void BakeProgressive()
+        {
+            if (!BeginProgressive()) return;
+            UnityEditor.EditorApplication.update -= ProgressiveTick;
+            UnityEditor.EditorApplication.update += ProgressiveTick;
+            UnityEditor.AssemblyReloadEvents.beforeAssemblyReload -= OnBeforeAssemblyReload;
+            UnityEditor.AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
+            UnityEditor.SceneView.RepaintAll();
+        }
+
+        [ContextMenu("Cancel Progressive Bake")]
+        public void CancelProgressiveBake() => CancelProgressive(finalize: true);
+
+        void ProgressiveTick()
+        {
+            if (this == null || _progressive == null) { UnhookProgressive(); return; }
+            ProgressiveStep();
+            UnityEditor.SceneView.RepaintAll();
+        }
+
+        // 도메인 리로드 전 Native/GPU 자원 해제(델리게이트·세션은 리로드에서 사라짐)
+        void OnBeforeAssemblyReload() => CancelProgressive(finalize: false);
+#endif
+
+        void UnhookProgressive()
+        {
+#if UNITY_EDITOR
+            UnityEditor.EditorApplication.update -= ProgressiveTick;
+            UnityEditor.AssemblyReloadEvents.beforeAssemblyReload -= OnBeforeAssemblyReload;
 #endif
         }
 
@@ -800,19 +1151,19 @@ namespace HuskyLibs.CustomLightmapper.Bake
         {
             if (mode != BakeMode.Radiance && mode != BakeMode.RadianceGI) return null;
 
-            var result = new Vector3[batch.Count][];
-            int n = 0;
-            for (int b = 0; b < batch.Count; b++)
-            {
-                var lm = batch[b].lumel;
-                result[b] = new Vector3[lm.Valid != null ? lm.Valid.Length : 0];   // invalid lumel = zero(BlitRegion 이 valid 만 칠함)
-                n += CountValid(lm);
-            }
-            if (n == 0) return result;
+            CollectPoints(batch, out var pts, out var nrm, out var sds, out int n);
+            if (n == 0) return ScatterRadiance(batch, null);
+            return ScatterRadiance(batch, BakePointsFull(pts, nrm, sds, n));
+        }
 
-            var pts = new Vector3[n];
-            var nrm = new Vector3[n];
-            var sds = new uint[n];
+        // 배치의 valid lumel 을 인스턴스·li 순서로 압축(평가 원점 = 표면 + surfaceBias·노멀, 시드 = TexelSeed(seed, li)).
+        void CollectPoints(System.Collections.Generic.List<PendingBake> batch, out Vector3[] pts, out Vector3[] nrm, out uint[] sds, out int n)
+        {
+            n = 0;
+            for (int b = 0; b < batch.Count; b++) n += CountValid(batch[b].lumel);
+            pts = new Vector3[n];
+            nrm = new Vector3[n];
+            sds = new uint[n];
             int k = 0;
             for (int b = 0; b < batch.Count; b++)
             {
@@ -828,17 +1179,62 @@ namespace HuskyLibs.CustomLightmapper.Bake
                     k++;
                 }
             }
+        }
 
-            var rad = BakePoints(pts, nrm, sds, n);
-            k = 0;
+        // 압축 조도(CollectPoints 순서) → 인스턴스별 li 인덱스 배열(invalid = zero). rad = null 이면 전부 zero.
+        static Vector3[][] ScatterRadiance(System.Collections.Generic.List<PendingBake> batch, Vector3[] rad)
+        {
+            var result = new Vector3[batch.Count][];
+            int k = 0;
             for (int b = 0; b < batch.Count; b++)
             {
                 var lm = batch[b].lumel;
-                if (lm.Valid == null) continue;
+                result[b] = new Vector3[lm.Valid != null ? lm.Valid.Length : 0];   // invalid lumel = zero(BlitRegion 이 valid 만 칠함)
+                if (rad == null || lm.Valid == null) continue;
                 for (int li = 0; li < lm.Valid.Length; li++)
                     if (lm.Valid[li]) result[b][li] = rad[k++];
             }
             return result;
+        }
+
+        // 1패스·SSAA 공통 진입점: 적응 샘플링이면 누적기(패스 + 수렴 조기 종료), 아니면 일괄 BakePoints(구 경로 그대로).
+        Vector3[] BakePointsFull(Vector3[] pts, Vector3[] nrm, uint[] seeds, int n)
+        {
+            if (!(mode == BakeMode.RadianceGI && adaptiveSampling) || n == 0) return BakePoints(pts, nrm, seeds, n);
+            var backend = CreateAccumBackend(out bool owned);
+            try
+            {
+                var acc = new ProgressiveAccumulator(backend, AccumSettings(), pts, nrm, seeds, n);
+                acc.Run();
+                _accumUsed = true;
+                _accumSamples += acc.TotalSamples;
+                _accumBudget += (long)n * acc.MaxSamples;
+                _accumPoints += n;
+                return acc.Result();
+            }
+            finally { if (owned) backend.Dispose(); }
+        }
+
+        AdaptiveSampling AccumSettings() => new AdaptiveSampling
+        {
+            MaxSamples = _giQ.IndirectSamples,
+            SamplesPerPass = samplesPerPass,
+            Adaptive = adaptiveSampling,
+            MinSamples = adaptiveMinSamples,
+            Threshold = adaptiveThreshold,
+        };
+
+        // 이어 굽기 백엔드: GPU(상주 버퍼 재사용 — 소유권은 베이커) → Burst → CPU. 일괄 경로와 같은 백엔드 우선순위.
+        IPathAccumBackend CreateAccumBackend(out bool owned)
+        {
+            if (_gpuReady && _kAccum >= 0)
+            {
+                owned = false;
+                return _gpuAccum ??= new GpuPathAccum(_gpuScene, _pathCS, _kAccum, _sun, _burstSky, _giQ, gpuDispatchChunk);
+            }
+            owned = true;
+            if (_burstReady) return new BurstPathAccum(_burstScene, _burstSky, _sun, _giQ);
+            return new CpuPathAccum(_giScene, _sun, _sky, _giQ);
         }
 
         // 임의 점 리스트 → 조도. 1패스(텍셀 중앙)와 SSAA 2패스(서브샘플)가 같은 진입점을 쓴다 —
@@ -912,7 +1308,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             void BakeAndResolve()
             {
                 if (jobs.Count == 0) return;
-                var sub = BakePoints(pts.ToArray(), nrm.ToArray(), sds.ToArray(), pts.Count);
+                var sub = BakePointsFull(pts.ToArray(), nrm.ToArray(), sds.ToArray(), pts.Count);   // 적응 샘플링이면 서브샘플도 누적기
                 foreach (var job in jobs)
                 {
                     ResolveSsaa(job, sub, rads[job.batchIndex]);
@@ -1071,27 +1467,12 @@ namespace HuskyLibs.CustomLightmapper.Bake
             io.Valid.SetData(io.ValidScratch, 0, 0, n);   // ValidScratch 는 전 구간 1u → 앞 n개 = 이전 판의 all-1 과 동일
             io.Seeds.SetData(seeds, 0, 0, n);
 
-            gpuScene.Bind(cs, kernel);          // 순회 SRV + _TlasCount
-            gpuScene.BindLighting(cs, kernel);  // _InstNormals, _MeshAlbedo
-            gpuScene.BindAlpha(cs, kernel);     // α: 알파 컷아웃(꺼진 씬은 _AlphaEnabled=0 → 무영향)
+            PathTraceShader.BindRadiance(cs, kernel, gpuScene, sun, sky, q);   // 씬·조명·α + 품질·태양·하늘 uniform(CSRadianceAccum 과 공유)
             cs.SetBuffer(kernel, "_Points", io.Points);
             cs.SetBuffer(kernel, "_Normals", io.Normals);
             cs.SetBuffer(kernel, "_Valid", io.Valid);
             cs.SetBuffer(kernel, "_Seeds", io.Seeds);
             cs.SetInt("_Count", n);
-            cs.SetInt("_IndirectSamples", q.IndirectSamples);
-            cs.SetInt("_MaxBounces", q.MaxBounces);
-            cs.SetInt("_RRStartDepth", q.RRStartDepth);
-            cs.SetFloat("_RayBias", q.RayBias);
-            cs.SetVector("_SunDir", sun.Direction);
-            cs.SetVector("_SunColor", sun.Color);
-            cs.SetFloat("_SunIntensity", sun.Intensity);
-            // 태양 원반 샘플링(1이면 셰이더가 기존 단발 경로를 탄다)
-            cs.SetInt("_DirectSamples", q.DirectSamples);
-            cs.SetFloat("_SunHalfAngle", sun.AngularDiameterDeg * 0.5f * Mathf.Deg2Rad);
-            cs.SetInt("_SkyType", sky.Type);
-            cs.SetVector("_SkyTop", sky.A);
-            cs.SetVector("_SkyBottom", sky.B);
             cs.SetBuffer(kernel, "_RadianceOut", io.Radiance);
 
             try
@@ -1339,6 +1720,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         [ContextMenu("Restore Originals")]
         public void RestoreOriginals()
         {
+            CancelProgressive(finalize: false);
             if (_appliedFilters == null) { Debug.Log("[AtlasApply] 복원할 항목 없음.", this); return; }
             for (int i = 0; i < _appliedFilters.Length; i++)
             {
@@ -1456,6 +1838,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
                             else
                             {
                                 _gpuIo = new GpuIoBuffers();             // 재사용 I/O 버퍼 홀더(첫 Dispatch 에서 grow-on-demand 할당)
+                                // 이어 굽기 커널(적응·진행형). 없으면(구 셰이더 지정) 누적은 Burst 로.
+                                _kAccum = _pathCS.HasKernel("CSRadianceAccum") ? _pathCS.FindKernel("CSRadianceAccum") : -1;
                                 _gpuReady = true;
                             }
                         }

@@ -16,6 +16,8 @@
 //   CSIndirect : Indirect → _IndirectOut[i] (float3)  경로추적 + RR
 //   CSRadiance : Direct+Indirect → _RadianceOut[i] (float3)  라이트맵 조도(1회 readback)
 //                = BurstRadianceBaker.Bake(=Direct+Indirect) 정합. AtlasApplyDebug GPU 백엔드용.
+//   CSRadianceAccum : 이어 굽기(진행형·적응 샘플링) — 점별 RNG 상태·합·휘도 제곱합 in/out(GPU 상주),
+//                _Active 인덱스로 활성 점만. = BurstIndirect.AccumJob 정합(첫 패스는 직사광 + 상태 초기화).
 //   CSSHBake   : per-probe SH9 → _ShOut[i] (GpuSH9=9×float3)  구면 입사조도 SH9 프로젝션
 //                = BurstSHBaker.SHJob 정합(SH-G). RNG 없음(고정 피보나치 _Dirs) → 결정적.
 //   CSSHBakeMulti : per-probe SH9 다바운스(경로추적) → _ShOut[i]
@@ -39,6 +41,7 @@
 #pragma kernel CSDirect
 #pragma kernel CSIndirect
 #pragma kernel CSRadiance
+#pragma kernel CSRadianceAccum
 #pragma kernel CSSHBake
 #pragma kernel CSSHBakeMulti
 
@@ -661,49 +664,54 @@ float3 DirectNEESampled(float3 p, float3 n, uint seed)
 }
 
 // ============================================================================
-// EvalIndirect — BurstIndirect.IndirectJob 경로추적 루프 미러(π 상쇄·NEE·RR).
-//   CSIndirect / CSRadiance 공용(단일 진실원). RNG 상태 s 는 inout(호출측이 _Seeds[i] 로 초기화).
-//   결과는 IndirectSamples 로 평균한 간접 조도(점 알베도 미적용).
+// TracePath — 간접 경로 1개(BurstIndirect.TracePath / RadianceCore.TracePath 미러: π 상쇄·NEE·RR).
+//   EvalIndirect(CSIndirect/CSRadiance)와 CSRadianceAccum(이어 굽기)의 단일 진실원. RNG 상태 s 는 inout.
+// ============================================================================
+float3 TracePath(float3 p, float3 n, inout uint s)
+{
+    float3 acc = float3(0, 0, 0);
+    float3 tp  = float3(1, 1, 1);
+    float3 dir = CosineHemisphere(n, s);
+    float3 o   = p + n * _RayBias;
+
+    // 바운스 루프: b+1>=_MaxBounces 또는 미스 또는 RR 로 반드시 종료(캡은 안전장치).
+    [loop] for (int b = 0; b < 1024; b++)
+    {
+        float3 hp, hn, alb;
+        if (!ClosestHitNA(o, dir, 0.0, hp, hn, alb))   // tmin=0.0 : G5 경로추적 거동 보존
+        {
+            acc += tp * SkyRadiance(dir) * PI;      // 미스: 하늘(π)
+            break;
+        }
+
+        float3 eD = DirectNEE(hp, hn);
+        acc += tp * (alb * eD);
+        tp = tp * alb;                              // throughput *= ρ
+
+        if (b + 1 >= _MaxBounces) break;
+
+        if (b + 1 >= _RRStartDepth)
+        {
+            float pSurv = clamp(max(tp.x, max(tp.y, tp.z)), 0.05, 1.0);
+            if (RngNext(s) > pSurv) break;
+            tp /= pSurv;
+        }
+
+        dir = CosineHemisphere(hn, s);
+        o = hp + hn * _RayBias;
+    }
+    return acc;
+}
+
+// ============================================================================
+// EvalIndirect — BurstIndirect.IndirectJob 미러. CSIndirect / CSRadiance 공용.
+//   RNG 상태 s 는 inout(호출측이 _Seeds[i] 로 초기화). 결과는 IndirectSamples 로 평균한 간접 조도(점 알베도 미적용).
 // ============================================================================
 float3 EvalIndirect(float3 p, float3 n, inout uint s)
 {
     float3 sum = float3(0, 0, 0);
-
     [loop] for (int sp = 0; sp < _IndirectSamples; sp++)
-    {
-        float3 acc = float3(0, 0, 0);
-        float3 tp  = float3(1, 1, 1);
-        float3 dir = CosineHemisphere(n, s);
-        float3 o   = p + n * _RayBias;
-
-        // 바운스 루프: b+1>=_MaxBounces 또는 미스 또는 RR 로 반드시 종료(캡은 안전장치).
-        [loop] for (int b = 0; b < 1024; b++)
-        {
-            float3 hp, hn, alb;
-            if (!ClosestHitNA(o, dir, 0.0, hp, hn, alb))   // tmin=0.0 : G5 경로추적 거동 보존
-            {
-                acc += tp * SkyRadiance(dir) * PI;      // 미스: 하늘(π)
-                break;
-            }
-
-            float3 eD = DirectNEE(hp, hn);
-            acc += tp * (alb * eD);
-            tp = tp * alb;                              // throughput *= ρ
-
-            if (b + 1 >= _MaxBounces) break;
-
-            if (b + 1 >= _RRStartDepth)
-            {
-                float pSurv = clamp(max(tp.x, max(tp.y, tp.z)), 0.05, 1.0);
-                if (RngNext(s) > pSurv) break;
-                tp /= pSurv;
-            }
-
-            dir = CosineHemisphere(hn, s);
-            o = hp + hn * _RayBias;
-        }
-        sum += acc;
-    }
+        sum += TracePath(p, n, s);
     return sum / (float)_IndirectSamples;
 }
 
@@ -782,6 +790,61 @@ void CSRadiance(uint3 id : SV_DispatchThreadID)
     float3 indirect = EvalIndirect(p, n, s);
 
     _RadianceOut[i] = direct + indirect;
+}
+
+// ============================================================================
+// CSRadianceAccum — 이어 굽기(진행형·적응 샘플링, BurstIndirect.AccumJob 미러).
+//   스레드 j → 점 i = _Active[_Base + j]. 점별 상태(_AccState)·합(_AccSum)·경로 휘도 제곱합(_AccM2)을
+//   읽어 경로 _PassSamples 개를 더 누적하고 되쓴다(GPU 상주 — 패스마다 _Active 만 갱신).
+//   _AccumFirst ≠ 0(첫 패스): 직사광 _AccDirect[i] = DirectNEESampled(CSRadiance 와 같은 식) +
+//   상태 = RngInit(_Seeds[i]) · 합 0 에서 시작. 최종 조도 = direct + sum / count(호출측).
+// ============================================================================
+StructuredBuffer<int>      _Active;
+RWStructuredBuffer<uint>   _AccState;
+RWStructuredBuffer<float3> _AccSum;
+RWStructuredBuffer<float>  _AccM2;
+RWStructuredBuffer<float3> _AccDirect;
+int _PassSamples;
+int _AccumFirst;
+
+[numthreads(64, 1, 1)]
+void CSRadianceAccum(uint3 id : SV_DispatchThreadID)
+{
+    uint j = id.x + (uint)_Base;
+    if ((int)j >= _Count) return;
+    uint i = (uint)_Active[j];
+
+    float3 p = _Points[i];
+    float3 n = _Normals[i];
+
+    uint   s;
+    float3 sum;
+    float  m2;
+    if (_AccumFirst != 0)
+    {
+        _AccDirect[i] = DirectNEESampled(p, n, _Seeds[i]);
+        s = RngInit(_Seeds[i]);
+        sum = float3(0, 0, 0);
+        m2 = 0.0;
+    }
+    else
+    {
+        s = _AccState[i];
+        sum = _AccSum[i];
+        m2 = _AccM2[i];
+    }
+
+    [loop] for (int k = 0; k < _PassSamples; k++)
+    {
+        float3 acc = TracePath(p, n, s);
+        sum += acc;
+        float l = 0.2126 * acc.x + 0.7152 * acc.y + 0.0722 * acc.z;   // RadianceCore.Luminance
+        m2 += l * l;
+    }
+
+    _AccState[i] = s;
+    _AccSum[i] = sum;
+    _AccM2[i] = m2;
 }
 
 // ============================================================================

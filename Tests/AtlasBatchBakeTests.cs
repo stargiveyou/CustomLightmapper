@@ -114,7 +114,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             return sb.ToString();
         }
 
-        static MeshFilter Prim(GameObject root, PrimitiveType t, Vector3 pos, Vector3 scale)
+        internal static MeshFilter Prim(GameObject root, PrimitiveType t, Vector3 pos, Vector3 scale)
         {
             var go = GameObject.CreatePrimitive(t);
             go.hideFlags = HideFlags.HideAndDontSave;
@@ -146,7 +146,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         }
 
         // 성분별 정확 비교(Color == 는 근사)
-        static bool Same(Color[][] a, Color[][] b)
+        internal static bool Same(Color[][] a, Color[][] b)
         {
             if (a == null || b == null || a.Length != b.Length) return false;
             for (int p = 0; p < a.Length; p++)
@@ -161,10 +161,10 @@ namespace HuskyLibs.CustomLightmapper.Bake
             return true;
         }
 
-        static int Count(Color[][] a) { int n = 0; if (a != null) foreach (var p in a) n += p.Length; return n; }
+        internal static int Count(Color[][] a) { int n = 0; if (a != null) foreach (var p in a) n += p.Length; return n; }
 
         // 배경색이 아닌 텍셀 수(차트 + dilation) — 비교가 빈 아틀라스끼리가 아님을 확인
-        static int Lit(Color[][] a, AtlasApplyDebug baker)
+        internal static int Lit(Color[][] a, AtlasApplyDebug baker)
         {
             if (a == null) return 0;
             Color bg = baker.background.linear;

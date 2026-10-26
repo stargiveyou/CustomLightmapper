@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added — GPU 잔여: 적응 샘플링 · 진행형 누적 · GPU 후처리 (2026-10-26)
+- **적응 샘플링**: `AtlasApplyDebug.adaptiveSampling`(기본 off)·`samplesPerPass`(8)·`adaptiveMinSamples`(16)·`adaptiveThreshold`(0.03) — RadianceGI 간접광을 패스로 이어 누적하고, 텍셀별 표준오차 ≤ threshold × 휘도면 멈춤(`indirectSamples` = 상한). CPU/Burst/GPU 공통, 판정은 관리 코드라 배치·진행형과 무관하게 결정적.
+- **진행형 미리보기**: 우클릭 "Bake Progressive (Preview)" / "Cancel Progressive Bake", `progressivePreviewEveryPasses`, 공개 `BeginProgressive`/`ProgressiveStep`/`IsProgressiveRunning`. 저 spp 결과를 즉시 적용 → 패스마다 누적·재합성 → SSAA·저장. 최종 = 같은 설정의 `BakeAndApply`.
+- **이어 굽기 코어**: `RadianceCore.TracePath`/`AccumulateIndirect`/`Luminance`, `Rng.State`, `BurstIndirect.TracePath`/`AccumJob`/`Accumulate`, `PathTrace.compute` `TracePath`·`CSRadianceAccum`, `PathTraceShader.BindRadiance`. 엔진 `ProgressiveAccumulator` + `IPathAccumBackend`(`CpuPathAccum`·`BurstPathAccum`·`GpuPathAccum`).
+- **GPU 후처리**: `AtlasApplyDebug.gpuPostProcess`·`postShader` — 시임 스티칭(Tier1 웨이브 · Tier2 샘플→수집) + dilation 을 `LightmapPost.compute`(`LightmapPostGpu`, 계획 `LightmapPostPlan`)로. 실패 시 CPU 폴백.
+- 테스트 `ProgressiveAccumulatorTests`·`LightmapPostPlanTests`(헤드리스) · `ProgressiveBakeTests`(에디터) — RunAll 33종 + 메뉴 "Run Adaptive _ Progressive _ GPU Post Tests (G6-5 _ G6-6)".
+
+### Changed
+- `AtlasApplyDebug.BakeAndApply` 를 단계 메서드(`BeginRun`·`PrepareInstance`·`FlushBatch`·`FinishInstance`·`Compose`·`EndRun`)로 분해 — 연산 순서·결과 불변. 일괄 간접광 경로(CPU/Burst/HLSL)가 공유 `TracePath` 를 부르도록 정리(결과 불변).
+
 ### Added — GPU 추가 최적화 (2026-10-26)
 - **배치 베이크(G6-3b)**: `AtlasApplyDebug.bakeBatchLumels`(기본 1<<20) — 인스턴스들의 lumel 을 모아 1패스·SSAA 2패스를 한 번에(GPU 1 업로드·1 readback, Burst 1 잡). 0 = 인스턴스마다(구 거동). 결과는 배치와 무관하게 비트 동일. 에디터 진행 표시.
 - **분할 디스패치**: `AtlasApplyDebug.gpuDispatchChunk`(기본 65536) — `CSRadiance` 를 `_Base` 오프셋으로 나눠 연속 디스패치. 한 디스패치 4.19M 점 한도 해소, 긴 디스패치 TDR 위험 완화.

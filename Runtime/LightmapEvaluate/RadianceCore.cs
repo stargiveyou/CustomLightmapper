@@ -12,6 +12,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
         private uint _s;
         public Rng(uint seed) { _s = seed == 0 ? 1u : seed; }
 
+        /// <summary>현재 상태(항상 ≠ 0 — xorshift32 는 0 이 아닌 상태를 0 으로 보내지 않음) → <c>new Rng(State)</c> 로 정확히 이어 간다.</summary>
+        public uint State => _s;
+
         public float Next()
         {
             _s ^= _s << 13;
@@ -229,45 +232,72 @@ namespace HuskyLibs.CustomLightmapper.Bake
         {
             var rng = new Rng(seed);
             Vector3 sum = Vector3.zero;
-
-
             for (int i = 0; i < q.IndirectSamples; i++)
-            {
-                Vector3 acc = Vector3.zero;
-                Vector3 tp = Vector3.one;
-                Vector3 dir = CosineHemisphere(n, ref rng);
-                Vector3 o = p + n * q.RayBias;
-
-                for (int b = 0; ; b++)
-                {
-                    if (!scene.ClosestHit(o, dir, 0f, float.MaxValue, out Vector3 hp, out Vector3 hn, out Vector3 alb))
-                    {
-                        // 미스: 하늘. 반구 적분의 π는 여기에만 남는다.
-                        acc += Vector3.Scale(tp, sky.Radiance(dir)) * Mathf.PI;
-                        break;
-
-                    }
-                    // 바운스 표면의 직접 조도(태양)를 알베도로 반사 → tp·ρ·E_direct(q)
-                    Vector3 eD = EvaluateDirect(scene.Occluder, hp, hn, sun);
-                    acc += Vector3.Scale(tp, Vector3.Scale(alb, eD));
-
-                    tp = Vector3.Scale(tp, alb); // // throughput *= ρ
-
-                    if (b + 1 >= q.MaxBounces) break;
-
-                    if (b + 1 >= q.RRStartDepth)
-                    {
-                        float pSurv = Mathf.Clamp(Mathf.Max(tp.x, Mathf.Max(tp.y, tp.z)), 0.05f, 1f);
-                        if (rng.Next() > pSurv) break;
-                        tp /= pSurv; // 무편향 보정
-                    }
-
-                    dir = CosineHemisphere(hn, ref rng);
-                    o = hp + hn * q.RayBias;
-                }
-                sum += acc;
-            }
+                sum += TracePath(scene, p, n, sun, sky, q, ref rng);
             return sum / (float)q.IndirectSamples;
+        }
+
+        /// <summary>
+        /// 간접 경로 1개(코사인 샘플 → 바운스별 NEE → RR)의 기여 π·L. <see cref="EvaluateIndirect"/> 와
+        /// <see cref="AccumulateIndirect"/> 의 단일 진실원(BurstIndirect.TracePath · HLSL TracePath 미러).
+        /// </summary>
+        public static Vector3 TracePath(IRadianceScene scene, Vector3 p, Vector3 n, DirectionalLight sun, ISky sky, in BakeQualitySettings q, ref Rng rng)
+        {
+            Vector3 acc = Vector3.zero;
+            Vector3 tp = Vector3.one;
+            Vector3 dir = CosineHemisphere(n, ref rng);
+            Vector3 o = p + n * q.RayBias;
+
+            for (int b = 0; ; b++)
+            {
+                if (!scene.ClosestHit(o, dir, 0f, float.MaxValue, out Vector3 hp, out Vector3 hn, out Vector3 alb))
+                {
+                    // 미스: 하늘. 반구 적분의 π는 여기에만 남는다.
+                    acc += Vector3.Scale(tp, sky.Radiance(dir)) * Mathf.PI;
+                    break;
+                }
+                // 바운스 표면의 직접 조도(태양)를 알베도로 반사 → tp·ρ·E_direct(q)
+                Vector3 eD = EvaluateDirect(scene.Occluder, hp, hn, sun);
+                acc += Vector3.Scale(tp, Vector3.Scale(alb, eD));
+
+                tp = Vector3.Scale(tp, alb); // throughput *= ρ
+
+                if (b + 1 >= q.MaxBounces) break;
+
+                if (b + 1 >= q.RRStartDepth)
+                {
+                    float pSurv = Mathf.Clamp(Mathf.Max(tp.x, Mathf.Max(tp.y, tp.z)), 0.05f, 1f);
+                    if (rng.Next() > pSurv) break;
+                    tp /= pSurv; // 무편향 보정
+                }
+
+                dir = CosineHemisphere(hn, ref rng);
+                o = hp + hn * q.RayBias;
+            }
+            return acc;
+        }
+
+        /// <summary>Rec.709 휘도 — 적응 샘플링의 분산 척도(세 백엔드 같은 식·같은 연산 순서).</summary>
+        public static float Luminance(Vector3 c) => 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+
+        /// <summary>
+        /// 이어 굽기(진행형·적응 샘플링): RNG 상태 <paramref name="state"/> 에서 경로 <paramref name="samples"/> 개를 더 추적해
+        /// 합 <paramref name="sum"/> 과 경로별 휘도 제곱합 <paramref name="m2"/> 에 누적하고 상태를 갱신한다.
+        /// 시작 상태 = <c>new Rng(seed).State</c>, sum = 0 으로 여러 번 나눠 불러도 덧셈 순서가 같아
+        /// 누적 N 개 후 <c>sum / N</c> 은 <see cref="EvaluateIndirect"/>(같은 seed·N spp) 와 비트 동일.
+        /// </summary>
+        public static void AccumulateIndirect(IRadianceScene scene, Vector3 p, Vector3 n, DirectionalLight sun, ISky sky,
+                                              in BakeQualitySettings q, ref uint state, int samples, ref Vector3 sum, ref float m2)
+        {
+            var rng = new Rng(state);
+            for (int i = 0; i < samples; i++)
+            {
+                Vector3 acc = TracePath(scene, p, n, sun, sky, q, ref rng);
+                sum += acc;
+                float l = Luminance(acc);
+                m2 += l * l;
+            }
+            state = rng.State;
         }
 
 

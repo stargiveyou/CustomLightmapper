@@ -20,5 +20,29 @@ namespace HuskyLibs.CustomLightmapper.Bake
 #endif
             return cs;
         }
+
+        /// <summary>
+        /// 라이트맵 조도 커널(CSRadiance / CSRadianceAccum) 공통 바인딩: 씬 SRV·조명·α + 품질·태양·하늘 uniform.
+        /// uniform 규약은 BurstRadianceBaker 정합. 입출력 버퍼·_Count·_Base 는 호출측.
+        /// </summary>
+        public static void BindRadiance(ComputeShader cs, int kernel, GpuScene gpuScene, DirectionalLight sun, BurstSky sky, BakeQualitySettings q)
+        {
+            gpuScene.Bind(cs, kernel);          // 순회 SRV + _TlasCount
+            gpuScene.BindLighting(cs, kernel);  // _InstNormals, _MeshAlbedo
+            gpuScene.BindAlpha(cs, kernel);     // α: 알파 컷아웃(꺼진 씬은 _AlphaEnabled=0 → 무영향)
+            cs.SetInt("_IndirectSamples", q.IndirectSamples);
+            cs.SetInt("_MaxBounces", q.MaxBounces);
+            cs.SetInt("_RRStartDepth", q.RRStartDepth);
+            cs.SetFloat("_RayBias", q.RayBias);
+            cs.SetVector("_SunDir", sun.Direction);
+            cs.SetVector("_SunColor", sun.Color);
+            cs.SetFloat("_SunIntensity", sun.Intensity);
+            // 태양 원반 샘플링(1이면 셰이더가 기존 단발 경로를 탄다)
+            cs.SetInt("_DirectSamples", q.DirectSamples);
+            cs.SetFloat("_SunHalfAngle", sun.AngularDiameterDeg * 0.5f * Mathf.Deg2Rad);
+            cs.SetInt("_SkyType", sky.Type);
+            cs.SetVector("_SkyTop", sky.A);
+            cs.SetVector("_SkyBottom", sky.B);
+        }
     }
 }
