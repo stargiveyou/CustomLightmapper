@@ -10,11 +10,11 @@ namespace HuskyLibs.CustomLightmapper.Bake
     /// 선택한 씬 오브젝트들을 인스턴스로 모아 per-instance ST를 할당하고
     /// (1) InstanceLM 테이블 로그, (2) 페이지별 점유 미리보기 PNG를 만든다.
     /// 같은 메시를 여러 번 배치(=인스턴싱)해도 각자 월드 면적으로 영역이 정해진다.
-    /// Tools ▸ Custom Lightmapper ▸ A4 ▸ Allocate Selected (per-instance ST)
+    /// Husky ▸ Tool ▸ Custom Lightmapper ▸ Allocate Selected (per-instance ST)
     /// </summary>
     public static class LightmapAllocatorDebugTool
     {
-        [MenuItem("Husky/Tool/Custom Lightmapper//Allocate Selected (per-instance ST)")]
+        [MenuItem("Husky/Tool/Custom Lightmapper/Allocate Selected (per-instance ST)")]
         private static void AllocateSelected()
         {
             var gos = Selection.gameObjects;
