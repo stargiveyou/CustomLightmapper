@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Docs — 챕터별 테스트 · 실행 소스 사용 매뉴얼 (2026-10-27)
+- `Documentation~/06_Manual/챕터별_테스트_실행_매뉴얼.md`: 챕터(A1~A4 · C0 · C1 · C2 · 로컬 광원 · G0~G6 · Track A · 후처리 · α · SH · Track B)별 실행 컴포넌트·메뉴 사용 순서, 테스트 실행 메뉴·요구 조건(Compute/URP/렌더)·확인 내용, RunAll 38종 순서표, RunAll 밖 테스트, 문제 해결. README · 00_INDEX · 05 가이드에서 링크.
+
 ### Added — Track B 정적 입력 C0 합류 (2026-10-27)
 - `ProbeVolumeBaker.staticSource`(`Roots` 기본 / `Collected`) · `collectedStatics` · `SetCollected(MeshFilter[])` — 프로브 볼륨 정적 메시를 C0 씬 분류 결과(Receiver ∪ OccluderOnly)로 받는다. 텍스처 라이트맵의 targets ∪ occluders 와 같은 기준(LOD1+·Contribute GI 꺼짐·꺼진 렌더러·Read/Write 꺼짐 제외, `SceneCollectOverride` 반영).
 - Collected 는 템플릿 인스턴스와 겹치는 물체를 자동 제외(① 템플릿 `captureSource` 자손 ② 메시 + 월드 행렬 일치, Excluded 템플릿 포함) — 같은 나무가 템플릿·정적으로 두 번 들어가는 것을 막는다.

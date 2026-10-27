@@ -51,4 +51,5 @@ mkdir Samples~ && git mv Samples "Samples~/Demo"
   - 대상 지정 대신 인스펙터 우클릭 → **Collect Scene (C0)**: 활성 씬을 훑어 Static `Contribute GI` · LODGroup · `receiveGI` · Read/Write 기준으로 receiver(`targets`) / occluder-only(`occluders`) / 제외를 나누고 사유별 리포트를 로그로 남긴다. 자동 판정을 고정하려면 해당 오브젝트(또는 조상)에 `SceneCollectOverride`.
 - **인스턴싱 SH(프롭)**: `InstanceSceneBaker` — 템플릿 메시 + 인스턴스 행렬 → 2-프로브 SH → `InstancedSH_URP`.
 - **식생 프로브 볼륨(Track B)**: `ProbeVolumeBaker` — 볼륨 박스·간격 → SH9 프로브 격자(+ 유효성·정점 AO) → 인스턴스 대표점 샘플(`InstancedSH_URP`) 또는 픽셀 샘플(`InstancedVegetation_URP`).
-- 검증: `Samples/LightmapEvaluateDebugger` 우클릭 **Run All Tests**. 자세한 내용은 `Documentation~/` 참조.
+- 검증: `Samples/LightmapEvaluateDebugger` 우클릭 **Run All Tests**(38종).
+- **사용법·테스트 매뉴얼**: `Documentation~/06_Manual/챕터별_테스트_실행_매뉴얼.md` — 챕터(A1~A4 · C0 · C1 · C2 · 광원 · Burst · GPU · 텍스처 라이트맵 · 후처리 · α · SH · Track B)별 실행 소스와 테스트 실행법. 그 밖의 문서는 `Documentation~/` 참조.
