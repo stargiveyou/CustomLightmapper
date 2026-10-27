@@ -34,6 +34,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             cube.transform.SetParent(root.transform, false);
             var mf = cube.GetComponent<MeshFilter>();
             var baker = root.AddComponent<AtlasApplyDebug>();
+            baker.localLightSource = LocalLightSource.None;   // 열린 씬의 라이트와 무관하게(테스트 격리)
             var made = new List<Object>();   // 베이커가 만든 런타임 객체(아틀라스·머티리얼·uv2 메시)
 
             try

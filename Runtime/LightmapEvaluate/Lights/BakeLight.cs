@@ -229,6 +229,103 @@ namespace HuskyLibs.CustomLightmapper.Bake
             }
         }
 
+        /// <summary>면광원 i/N 번째 월드 점(N = 1 이면 중심).</summary>
+        public static Vector3 AreaPoint(in BakeLight L, int i, int n, float rot)
+        {
+            float x = 0f, y = 0f;
+            if (n > 1) AreaSample(L, i, n, rot, out x, out y);
+            return L.Position + L.Right * x + L.Up * y;
+        }
+
+        /// <summary>
+        /// SH 프로브 직접광 투영(L2) — SH 는 '입사 복사휘도'를 투영하고 평가 때 코사인 로브로 컨볼루션하므로(SH9 규약):
+        ///  · Point/Spot: 방향 l 의 델타 복사휘도, 세기 = 수직 조도 E⊥ = Color·I·감쇠 → c += E⊥·Y(ω_i)/N
+        ///    (반경 &gt; 0·샘플 &gt; 1 이면 원판 샘플 방향 ω_i, 가시 샘플만) → 평가 E(n) ≈ E⊥·max(0, n·l) = 텍스처 경로 조도(L2 대역 근사).
+        ///  · Rect/Disc: 방출 휘도 Color·I, 샘플 입체각 dΩ_i = (A/N)·cosθ_광원/max(d²,1e-4) → c += L·Y(ω_i)·dΩ_i.
+        ///    총 입체각(가시도 무관 기하 합) 상한 2π — 근거리 중심 근사가 발산하지 않게(텍스처 경로의 π·L 클램프에 대응).
+        ///  그림자 레이 원점 = p(프로브는 표면 위가 아님), 길이 = |q − p| − 1e-3. Direct 플래그 판정은 호출측.
+        /// </summary>
+        public static void ProjectSH<TQ>(ref SH9 sh, in BakeLight L, ref TQ q, Vector3 p, int samples, float rot)
+            where TQ : struct, IShadowQuery
+        {
+            if (L.Intensity <= 0f) return;
+            bool shadows = (L.Flags & BakeLight.FlagShadows) != 0;
+
+            if (L.Type <= (int)BakeLightType.Spot)
+            {
+                Vector3 toL = L.Position - p;
+                float d2 = Vector3.Dot(toL, toL);
+                if (d2 <= 1e-12f) return;
+                Vector3 l = toL / Mathf.Sqrt(d2);
+                float atten = Attenuation(L, d2, l);
+                if (atten <= 0f) return;
+                Vector3 e = L.Color * L.Intensity * atten;
+                int N = (samples > 1 && L.Radius > 0f) ? samples : 1;
+                Vector3 t = Vector3.zero, b = Vector3.zero;
+                if (N > 1) RadianceCore.SunBasis(l, out t, out b);
+                float w = 1f / N;
+                for (int i = 0; i < N; i++)
+                {
+                    Vector3 qp = L.Position;
+                    if (N > 1)
+                    {
+                        Disk(i, N, rot, out float x, out float y);
+                        qp = L.Position + t * (x * L.Radius) + b * (y * L.Radius);
+                    }
+                    Vector3 v = qp - p;
+                    float dq = v.magnitude;
+                    if (dq <= 1e-6f) continue;
+                    Vector3 dir = v / dq;
+                    if (!shadows || !q.Occluded(p, dir, dq - 1e-3f)) sh.Accumulate(dir, e, w);
+                }
+            }
+            else
+            {
+                if (Vector3.Dot(L.Direction, p - L.Position) <= 0f) return;   // 방출면 뒤
+                int N = Mathf.Max(1, samples);
+                bool rect = L.Type == (int)BakeLightType.Rect;
+                float area = rect ? L.Width * L.Height : Mathf.PI * L.Radius * L.Radius;
+                if (area <= 0f) return;
+
+                float gsum = 0f;   // 기하 입체각 합(가시도 무관) → 상한 스케일
+                for (int i = 0; i < N; i++)
+                {
+                    Vector3 w = AreaPoint(L, i, N, rot) - p;
+                    float d2 = Vector3.Dot(w, w);
+                    if (d2 <= 1e-12f) continue;
+                    float cosL = -Vector3.Dot(L.Direction, w / Mathf.Sqrt(d2));
+                    if (cosL > 0f) gsum += cosL / Mathf.Max(d2, 1e-4f);
+                }
+                float scale = area / N;
+                if (gsum * scale > 2f * Mathf.PI) scale = 2f * Mathf.PI / gsum;
+
+                Vector3 rad = L.Color * L.Intensity;
+                for (int i = 0; i < N; i++)
+                {
+                    Vector3 w = AreaPoint(L, i, N, rot) - p;
+                    float d2 = Vector3.Dot(w, w);
+                    if (d2 <= 1e-12f) continue;
+                    float dist = Mathf.Sqrt(d2);
+                    Vector3 dir = w / dist;
+                    float cosL = -Vector3.Dot(L.Direction, dir);
+                    if (cosL <= 0f) continue;
+                    if (shadows && q.Occluded(p, dir, dist - 1e-3f)) continue;
+                    sh.Accumulate(dir, rad, scale * (cosL / Mathf.Max(d2, 1e-4f)));
+                }
+            }
+        }
+
+        /// <summary>SH 직접광: Direct 플래그 광원만, 광원별 Samples, 위상 = SunConeRotation(프로브 인덱스 + 1). 광원 순서대로 더한다(HLSL CSSHDirect 와 같은 순서).</summary>
+        public static void AddDirectSH<TQ>(ref SH9 sh, BakeLight[] lights, ref TQ q, Vector3 p, uint probeIndex)
+            where TQ : struct, IShadowQuery
+        {
+            if (lights == null || lights.Length == 0) return;
+            float rot = RadianceCore.SunConeRotation(probeIndex + 1u);
+            for (int i = 0; i < lights.Length; i++)
+                if ((lights[i].Flags & BakeLight.FlagDirect) != 0)
+                    ProjectSH(ref sh, lights[i], ref q, p, lights[i].Samples, rot);
+        }
+
         /// <summary>1차 직사: Direct 플래그 광원만, 광원별 Samples, 위상 = SunConeRotation(seed). direct 에 광원 순서대로 더한다(HLSL 과 같은 순서).</summary>
         public static Vector3 AddPrimary<TQ>(Vector3 direct, BakeLight[] lights, ref TQ q, Vector3 p, Vector3 n, uint seed)
             where TQ : struct, IShadowQuery

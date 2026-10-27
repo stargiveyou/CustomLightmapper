@@ -165,6 +165,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 AtlasBatchBakeTests.Prim(root, PrimitiveType.Cylinder, new Vector3(-1.5f, 0.5f, -1.5f), new Vector3(0.8f, 0.5f, 0.8f)),
             };
             var baker = root.AddComponent<AtlasApplyDebug>();
+            baker.localLightSource = LocalLightSource.None;   // 열린 씬의 라이트와 무관하게(테스트 격리)
             var made = new List<Object>();
             try
             {

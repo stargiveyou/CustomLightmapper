@@ -3,6 +3,31 @@ using UnityEngine;
 
 namespace HuskyLibs.CustomLightmapper.Bake
 {
+    /// <summary>로컬 광원 출처 — Scene = 로드된 씬의 켜진 Point/Spot/Area/Disc 라이트, Listed = 지정 목록, None = 없음(태양 + 하늘만).</summary>
+    public enum LocalLightSource { None, Listed, Scene }
+
+    /// <summary>
+    /// 베이커 공용 로컬 광원 설정(ProbeVolumeBaker · InstanceSceneBaker — AtlasApplyDebug 는 같은 의미의 평탄 필드).
+    /// <see cref="Collect"/> 가 <see cref="BakeLightUtil"/> 로 변환·수집한다.
+    /// </summary>
+    [System.Serializable]
+    public class LocalLightSettings
+    {
+        [Tooltip("Scene = 로드된 씬의 켜진 Point/Spot/Area/Disc 라이트(Directional 제외 — 태양은 별도 설정), Listed = lights 배열만, None = 로컬 광원 없음(구 거동).")]
+        public LocalLightSource source = LocalLightSource.Scene;
+        [Tooltip("source = Listed 일 때 쓰는 라이트 목록.")]
+        public Light[] lights;
+        [Tooltip("켜면 Unity 라이트 Mode 를 따름: Baked = 직사+간접, Mixed = 간접만(직사는 실시간), Realtime = 제외. 끄면 전부 직사+간접.")]
+        public bool followBakeType = false;
+        [Tooltip("면광원(Rect/Disc) 샘플 수(직접광 투영의 그림자 레이 수).")]
+        [Min(1)] public int areaSamples = 16;
+        [Tooltip("그림자 반경(Baked Shadow Radius) 있는 Point/Spot 의 샘플 수.")]
+        [Min(1)] public int softSamples = 8;
+
+        public BakeLight[] Collect() => BakeLightUtil.Collect(source, lights,
+            new BakeLightUtil.Options { AreaSamples = Mathf.Max(1, areaSamples), SoftSamples = Mathf.Max(1, softSamples), FollowBakeType = followBakeType });
+    }
+
     /// <summary>
     /// Unity <see cref="Light"/> → <see cref="BakeLight"/> 변환 · 씬 수집.
     /// Directional 은 제외(태양은 베이커의 DirectionalLight 설정). 면광원 크기·그림자 반경·베이크 모드는 Unity 가
@@ -88,6 +113,17 @@ namespace HuskyLibs.CustomLightmapper.Bake
             var all = new List<Light>(Object.FindObjectsOfType<Light>());
             all.Sort((a, b) => a.GetInstanceID().CompareTo(b.GetInstanceID()));
             return Convert(all, opt);
+        }
+
+        /// <summary>출처별 수집(None = 빈 배열).</summary>
+        public static BakeLight[] Collect(LocalLightSource source, Light[] listed, Options opt)
+        {
+            switch (source)
+            {
+                case LocalLightSource.Listed: return Convert(listed, opt);
+                case LocalLightSource.Scene: return CollectScene(opt);
+                default: return System.Array.Empty<BakeLight>();
+            }
         }
 
         /// <summary>종류별 개수 요약(로그용): "P2 S1 R1 D0 · 간접만 1 · 그림자 없음 0".</summary>

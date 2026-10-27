@@ -29,6 +29,20 @@ namespace HuskyLibs.CustomLightmapper.Bake
             return direct;
         }
 
+        /// <summary>SH 직접광 투영(L2) — <see cref="LightSampling.AddDirectSH{TQ}"/> 와 같은 순서·같은 식(위상 = SunConeRotation(probeIndex + 1)).</summary>
+        public static void AddDirectSH(ref SH9 sh, in BurstScene s, Vector3 p, uint probeIndex)
+        {
+            if (s.lightCount <= 0) return;
+            var q = new BurstSceneQuery { Scene = s };
+            float rot = RadianceCore.SunConeRotation(probeIndex + 1u);
+            for (int i = 0; i < s.lightCount; i++)
+            {
+                BakeLight L = s.lights[i];
+                if ((L.Flags & BakeLight.FlagDirect) != 0)
+                    LightSampling.ProjectSH(ref sh, L, ref q, p, L.Samples, rot);
+            }
+        }
+
         public static Vector3 AddBounce(Vector3 eD, in BurstScene s, Vector3 hp, Vector3 hn)
         {
             if (s.lightCount <= 0) return eD;

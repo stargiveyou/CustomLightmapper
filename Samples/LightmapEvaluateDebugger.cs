@@ -82,6 +82,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
             sb.AppendLine(ProgressiveBakeTests.RunAll());         // G6-5/6 Burst/GPU 누적·실베이크 진행형 ≡ 일괄·GPU 후처리 ≈ CPU(URP·compute 필요)
             sb.AppendLine(BakeLightTests.RunAll());               // 로컬 광원 L1: Point/Spot/Rect/Disc 해석해·그림자·통합(null≡빈 배열, 누적 ≡ 일괄)(헤드리스)
             sb.AppendLine(LocalLightBakeTests.RunAll());          // 로컬 광원 L1: Unity Light 변환·Burst/GPU 미러·실베이크(None<Mixed<Baked)(URP·compute 필요)
+            sb.AppendLine(SHLightProjectionTests.RunAll());       // 로컬 광원 L2: SH 직접광 투영 ≡ 격자 적분·입체각 상한·규약 일치(헤드리스)
+            sb.AppendLine(SHLocalLightTests.RunAll());            // 로컬 광원 L2: SH Burst ≈ 레퍼런스·GPU(CSSHDirect) ≈ Burst·프로브/인스턴스 베이커(compute 필요)
             sb.AppendLine(AlphaCutoutTests.RunAll());             // α 알파 컷아웃 any-hit: RayTriUV≡RayTri, CPU 해석적, Burst≡CPU, OFF 회귀
             sb.AppendLine(AlphaGpuCompareTests.RunAll());         // α GPU 알파 any-hit ≡ Burst(CSDirect, 무작위 없음 → 정확 일치·compute 지원 필요)
             sb.AppendLine(AtlasHdrOutputTests.RunAll());          // step8 최종 인코딩 RGBAHalf: 숨김 큐브 실베이크 HDR/LDR 대조(URP 셰이더 필요)
@@ -137,7 +139,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
         public void RunGpuBatchTests() => Debug.Log(GpuBakeLimitsTests.RunAll() + "\n" + AtlasBatchBakeTests.RunAll(), this);
 
         [ContextMenu("Run Local Light Tests (Point _ Spot _ Area)")]
-        public void RunLocalLightTests() => Debug.Log(BakeLightTests.RunAll() + "\n" + LocalLightBakeTests.RunAll(), this);
+        public void RunLocalLightTests() => Debug.Log(BakeLightTests.RunAll() + "\n" + LocalLightBakeTests.RunAll() + "\n" +
+                                                      SHLightProjectionTests.RunAll() + "\n" + SHLocalLightTests.RunAll(), this);
 
         [ContextMenu("Run Adaptive _ Progressive _ GPU Post Tests (G6-5 _ G6-6)")]
         public void RunProgressiveTests() => Debug.Log(ProgressiveAccumulatorTests.RunAll() + "\n" + LightmapPostPlanTests.RunAll() + "\n" + ProgressiveBakeTests.RunAll(), this);

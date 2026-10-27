@@ -149,6 +149,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             var box = Track(made, InstanceSceneBakerTests.MakeBoxMesh());
             var card = Track(made, BuildMesh("Card", Patch(Vector3.zero, Vector3.right, Vector3.forward, 1f, 1f, 2)));
             var baker = go.AddComponent<ProbeVolumeBaker>();
+            baker.localLights.source = LocalLightSource.None;   // 열린 씬의 라이트와 무관하게(테스트 격리)
             baker.renderOnEnable = false;
             baker.volumeSize = new Vector3(6f, 4f, 6f);
             baker.probeSpacing = Vector3.one * 2f;

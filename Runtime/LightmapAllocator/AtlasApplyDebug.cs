@@ -18,7 +18,6 @@ namespace HuskyLibs.CustomLightmapper.Bake
     public class AtlasApplyDebug : MonoBehaviour
     {
         public enum BakeMode { PerInstanceColor, WorldNormal, Checker, Radiance, RadianceGI }
-        public enum LocalLightSource { None, Listed, Scene }
         public enum OccluderKind { BruteForce, BVH }
 
         /// <summary>SSAA(텍셀 내부 슈퍼샘플링) 범위. Off = 기존 경로와 비트 동일.</summary>
@@ -225,12 +224,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 SoftSamples = Mathf.Max(1, softLightSamples),
                 FollowBakeType = localLightsFollowBakeType,
             };
-            switch (localLightSource)
-            {
-                case LocalLightSource.Listed: return BakeLightUtil.Convert(localLights, opt);
-                case LocalLightSource.Scene: return BakeLightUtil.CollectScene(opt);
-                default: return System.Array.Empty<BakeLight>();
-            }
+            return BakeLightUtil.Collect(localLightSource, localLights, opt);
         }
 
         [ContextMenu("From DirectionalLight Component")]

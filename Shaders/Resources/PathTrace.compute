@@ -23,6 +23,8 @@
 //                = BurstSHBaker.SHJob 정합(SH-G). RNG 없음(고정 피보나치 _Dirs) → 결정적.
 //   CSSHBakeMulti : per-probe SH9 다바운스(경로추적) → _ShOut[i]
 //                = BurstSHBaker.SHPathJob 정합. 방향당 경로 1개, (프로브,방향) 해시 시드(_ShSeed 기반).
+//   CSSHDirect : L2 — Direct 플래그 로컬 광원의 프로브 직접광을 _ShOut[i] 에 더함(CSSHBake/Multi 뒤 디스패치)
+//                = LightSampling.AddDirectSH / BurstLights.AddDirectSH 정합. 별도 커널 = SH 커널의 레지스터 압박 불변.
 //
 // 시드 규약(G6-2): 호출측이 StructuredBuffer<uint> _Seeds 로 per-lumel 시드를 명시 공급.
 //   RngInit(_Seeds[i]) — Burst 의 seed=seed+li*const 와 1:1(디스패치 인덱스 기반 _BaseSeed 폐기).
@@ -45,6 +47,7 @@
 #pragma kernel CSRadianceAccum
 #pragma kernel CSSHBake
 #pragma kernel CSSHBakeMulti
+#pragma kernel CSSHDirect
 
 #define PI    3.14159265358979323846
 #define INF   3.402823466e38          // float.MaxValue (ClosestHit tmax 초기값)
@@ -1045,7 +1048,7 @@ float3 ShIncoming(float3 p, float3 d)
     float3 result = SkyRadiance(d);                         // 미스 기본값(하늘)
     if (ClosestHitNA(p, d, 1e-4, hp, hn, alb))
     {
-        float3 irr = DirectNEE(hp, hn) / PI + SkyRadiance(hn);   // ρ/π·(태양(그림자 포함) + π·하늘 앰비언트)
+        float3 irr = DirectAll(hp, hn, 0u, false) / PI + SkyRadiance(hn);   // ρ/π·(태양 + 로컬 광원(L2, 중심 1발) + π·하늘 앰비언트) — 광원 0개면 DirectNEE 와 같은 연산
         result = alb * irr;
     }
     return result;                                          // 단일 반환(fxc X4000 false-positive 회피)
@@ -1127,7 +1130,7 @@ float3 ShIncomingPath(float3 p, float3 d, inout uint s)
             break;
         }
 
-        acc += tp * (alb * DirectNEE(hp, hn));
+        acc += tp * (alb * DirectAll(hp, hn, 0u, false));   // 태양 + 로컬 광원(L2) — 광원 0개면 DirectNEE 와 같은 연산
         tp = tp * alb;                                  // throughput *= ρ
 
         if (b + 1 >= _MaxBounces) break;
@@ -1187,3 +1190,130 @@ void CSSHBakeMulti(uint3 id : SV_DispatchThreadID)
     sh.c4 = c4; sh.c5 = c5; sh.c6 = c6; sh.c7 = c7; sh.c8 = c8;
     _ShOut[i] = sh;
 }
+
+// ============================================================================
+// CSSHDirect — L2: 로컬 광원 직접광 SH 투영(LightSampling.ProjectSH / AddDirectSH 미러). 스레드 = 프로브.
+//   _ShOut[i] 를 읽어 Direct 플래그 광원을 광원 순서대로 더하고 되쓴다(CSSHBake/CSSHBakeMulti 다음에 디스패치).
+//   Point/Spot: c += E⊥·Y(ω)/N (E⊥ = color·I·감쇠, 반경이면 원판 샘플 방향) · Rect/Disc: c += L·Y(ω)·dΩ, dΩ = scale·cosθL/max(d²,1e-4),
+//   scale = A/N (기하 입체각 합 상한 2π). 위상 = SunConeRotation(i + 1). 그림자 레이 원점 = 프로브 점, 길이 |q − p| − 1e-3.
+//   그림자 레이 호출부 1곳(광원·샘플 중첩 루프).
+// ============================================================================
+void ShAddRadiance(inout GpuSH9 sh, float3 d, float3 L, float w)   // SH9.Accumulate 미러: c += L·y·w
+{
+    float y0, y1, y2, y3, y4, y5, y6, y7, y8;
+    ShBasis(d, y0, y1, y2, y3, y4, y5, y6, y7, y8);
+    sh.c0 += L * y0 * w;
+    sh.c1 += L * y1 * w;
+    sh.c2 += L * y2 * w;
+    sh.c3 += L * y3 * w;
+    sh.c4 += L * y4 * w;
+    sh.c5 += L * y5 * w;
+    sh.c6 += L * y6 * w;
+    sh.c7 += L * y7 * w;
+    sh.c8 += L * y8 * w;
+}
+
+float3 ShAreaPoint(GpuLight Lt, int i, int n, float rot)   // LightSampling.AreaPoint 미러(N = 1 이면 중심)
+{
+    float2 xy = (n > 1) ? LightAreaSample(Lt, i, n, rot) : float2(0, 0);
+    return Lt.position + Lt.right * xy.x + Lt.up * xy.y;
+}
+
+[numthreads(64, 1, 1)]
+void CSSHDirect(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if ((int)i >= _Count) return;
+
+    float3 p = _Points[i];
+    GpuSH9 sh = _ShOut[i];
+    float rot = SunConeRotation(i + 1u);
+
+    [loop] for (int li = 0; li < _LightCount; li++)
+    {
+        GpuLight Lt = _Lights[li];
+        if ((Lt.flags & 1) == 0 || Lt.intensity <= 0.0) continue;
+        bool shadows = (Lt.flags & 2) != 0;
+
+        int    kind = -1;                 // 1 point/spot · 2 면광원
+        int    N = 0;
+        float3 e = float3(0, 0, 0);       // point/spot: E⊥ · 면광원: 방출 휘도
+        float  w0 = 0.0;                  // point/spot: 1/N · 면광원: scale
+        float3 lt = float3(0, 0, 0), lb = float3(0, 0, 0);
+
+        if (Lt.type <= 1)
+        {
+            float3 toL = Lt.position - p;
+            float d2 = dot(toL, toL);
+            if (d2 > 1e-12)
+            {
+                float3 l = toL / sqrt(d2);
+                float atten = LightAtten(Lt, d2, l);
+                if (atten > 0.0)
+                {
+                    kind = 1;
+                    e = Lt.color * Lt.intensity * atten;
+                    N = (Lt.samples > 1 && Lt.radius > 0.0) ? Lt.samples : 1;
+                    if (N > 1) SunBasis(l, lt, lb);
+                    w0 = 1.0 / float(N);
+                }
+            }
+        }
+        else if (dot(Lt.direction, p - Lt.position) > 0.0)
+        {
+            N = max(1, Lt.samples);
+            float area = (Lt.type == 2) ? Lt.width * Lt.height : PI * Lt.radius * Lt.radius;
+            if (area > 0.0)
+            {
+                float gsum = 0.0;
+                [loop] for (int g = 0; g < N; g++)
+                {
+                    float3 wv = ShAreaPoint(Lt, g, N, rot) - p;
+                    float d2 = dot(wv, wv);
+                    if (d2 <= 1e-12) continue;
+                    float cosL = -dot(Lt.direction, wv / sqrt(d2));
+                    if (cosL > 0.0) gsum += cosL / max(d2, 1e-4);
+                }
+                float scale = area / float(N);
+                if (gsum * scale > 2.0 * PI) scale = 2.0 * PI / gsum;
+                kind = 2;
+                e = Lt.color * Lt.intensity;
+                w0 = scale;
+            }
+        }
+        if (kind < 0) continue;
+
+        [loop] for (int k = 0; k < N; k++)
+        {
+            float3 q = Lt.position;
+            float  w = 0.0;
+            if (kind == 1)
+            {
+                if (N > 1)
+                {
+                    float2 xy = LightDisk(k, N, rot);
+                    q = Lt.position + lt * (xy.x * Lt.radius) + lb * (xy.y * Lt.radius);
+                }
+                w = w0;
+            }
+            else
+            {
+                q = ShAreaPoint(Lt, k, N, rot);
+                float3 wv = q - p;
+                float d2 = dot(wv, wv);
+                if (d2 > 1e-12)
+                {
+                    float cosL = -dot(Lt.direction, wv / sqrt(d2));
+                    if (cosL > 0.0) w = w0 * (cosL / max(d2, 1e-4));
+                }
+            }
+            float3 v = q - p;
+            float dq = length(v);
+            if (dq <= 1e-6) w = 0.0;
+            float3 d = v / max(dq, 1e-6);
+            if (w > 0.0 && (!shadows || !TlasOccluded(p, d, dq - 1e-3))) ShAddRadiance(sh, d, e, w);
+        }
+    }
+    _ShOut[i] = sh;
+}
+

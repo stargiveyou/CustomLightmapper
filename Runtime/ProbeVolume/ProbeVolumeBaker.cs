@@ -99,6 +99,11 @@ namespace HuskyLibs.CustomLightmapper.Bake
         [Tooltip("하늘 아래쪽 복사휘도(Linear RGB).")]
         public Vector3 skyBottom = new Vector3(0.1f, 0.1f, 0.12f);
 
+        [Header("로컬 광원 (Point · Spot · Area — L2)")]
+        [Tooltip("프로브 SH 에 로컬 광원을 굽는다: 이웃 표면이 받은 빛(바운스) + Direct 플래그 광원이 프로브에 직접 주는 빛(셰이더는 태양만 실시간이라). " +
+                 "기본 Scene = 로드된 씬의 켜진 Point/Spot/Area 라이트. None = 구 거동(태양 + 하늘만).")]
+        public LocalLightSettings localLights = new LocalLightSettings();
+
         [Header("베이크")]
         public Backend backend = Backend.Burst;
         [Tooltip("1 = 1바운스+앰비언트 근사, ≥2 = 경로추적 다바운스. 둘 다 물리 규약(ρ/π·E).")]
@@ -236,7 +241,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
 #endif
             var a = volumeAsset;
             Debug.Log($"[ProbeVolumeBaker] 베이크 완료: {a.grid}, 무효 {a.invalidCount} → dilation {a.dilatedCount}, " +
-                      $"bounces={a.bounces}, dirs={a.dirCount}, backend={usedBackend}, alpha={(a.alphaCutout ? "ON" : "OFF")}\n  alpha: {a.alphaLog}", this);
+                      $"bounces={a.bounces}, dirs={a.dirCount}, backend={usedBackend}, lights={a.lightLog}, alpha={(a.alphaCutout ? "ON" : "OFF")}\n  alpha: {a.alphaLog}", this);
             if (renderOnEnable && isActiveAndEnabled) RebuildRender();
         }
 
@@ -255,7 +260,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
             var alpha = BuildAlphaData(meshes, tris, insts, instMats, out string alphaLog);
 
             using var bvh = new TwoLevelBVH(tris, insts, Allocator.TempJob, BVH.BuildQuality.SAH);
-            using var bScene = BurstScene.Create(bvh, albedo, alpha, Allocator.TempJob);   // α: SH(Burst·GPU)·유효성이 같은 씬 → 모두 잎 구멍 통과
+            var bakeLights = localLights != null ? localLights.Collect() : Array.Empty<BakeLight>();   // L2: 로컬 광원(바운스 + 직접광 투영)
+            using var bScene = BurstScene.Create(bvh, albedo, alpha, bakeLights, Allocator.TempJob);   // α: SH(Burst·GPU)·유효성이 같은 씬 → 모두 잎 구멍 통과
             var sunDL = SunLight();
             var sky = BurstSky.Gradient(skyTop, skyBottom);
             var q = new BakeQualitySettings { MaxBounces = bounces, RRStartDepth = 3, RayBias = 1e-4f };
@@ -317,6 +323,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             asset.dilatedCount = dilated;
             asset.alphaCutout = alpha.Enabled;
             asset.alphaLog = alphaLog ?? (alphaCutout ? "컷아웃 대상 머티리얼 없음" : "alphaCutout 꺼짐");
+            asset.lightLog = $"{BakeLightUtil.Summary(bakeLights)}({(localLights != null ? localLights.source : LocalLightSource.None)})";
             return asset;
         }
 

@@ -27,6 +27,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             try
             {
                 var baker = go.AddComponent<InstanceSceneBaker>();
+                baker.localLights.source = LocalLightSource.None;   // 열린 씬의 라이트와 무관하게(테스트 격리)
                 baker.renderOnEnable = false;
                 baker.dirCount = 128;
                 baker.anchorMode = AnchorMode.SurfaceNormalOffset;

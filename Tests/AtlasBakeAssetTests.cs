@@ -32,6 +32,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             var origMesh = mf.sharedMesh;
             var origMat = rnd.sharedMaterial;
             var baker = root.AddComponent<AtlasApplyDebug>();
+            baker.localLightSource = LocalLightSource.None;   // 열린 씬의 라이트와 무관하게(테스트 격리)
             var made = new List<Object>();
 
             try

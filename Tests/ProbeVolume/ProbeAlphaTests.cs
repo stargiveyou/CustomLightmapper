@@ -144,6 +144,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             try
             {
                 var baker = go.AddComponent<ProbeVolumeBaker>();
+                baker.localLights.source = LocalLightSource.None;   // 열린 씬의 라이트와 무관하게(테스트 격리)
                 baker.renderOnEnable = false;
                 go.transform.position = new Vector3(0f, 0.5f, 0f);
                 baker.volumeSize = new Vector3(2f, 0.6f, 2f);       // y 0.2..0.8 — 지면(0)과 캐노피(1, ×2 스케일) 사이

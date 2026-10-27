@@ -101,7 +101,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             finally { Object.DestroyImmediate(root); }
         }
 
-        static BakeLight[] SceneLights() => new[]
+        internal static BakeLight[] SceneLights() => new[]
         {
             BakeLight.Point(new Vector3(-1.5f, 2.5f, 0.5f), new Vector3(1f, 0.9f, 0.7f), 6f, range: 10f, radius: 0.3f, samples: 4),
             BakeLight.Spot(new Vector3(2f, 3f, -1f), new Vector3(-0.3f, -1f, 0.2f), Vector3.one, 10f, 12f, 70f, 35f),
@@ -237,9 +237,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 baker.maxBounces = 2;
                 baker.localLights = new[] { lamp };
 
-                baker.localLightSource = AtlasApplyDebug.LocalLightSource.None;
+                baker.localLightSource = LocalLightSource.None;
                 double eNone = MeanLum(Bake(baker, filters, made, out int n0));
-                baker.localLightSource = AtlasApplyDebug.LocalLightSource.Listed;
+                baker.localLightSource = LocalLightSource.Listed;
                 baker.localLightsFollowBakeType = true;
 #if UNITY_EDITOR
                 lamp.lightmapBakeType = LightmapBakeType.Mixed;

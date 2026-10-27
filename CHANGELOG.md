@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added — 로컬 광원 L2: SH·프로브 (2026-10-27)
+- `LightSampling.ProjectSH`/`AddDirectSH`(+ Burst `BurstLights.AddDirectSH`): Direct 플래그 로컬 광원이 프로브에 직접 주는 빛을 SH 에 투영(Point/Spot 델타 E⊥, 면광원 입체각 가중·2π 상한).
+- `BurstSHBaker` `SHJob`·`SHPathJob`: 히트점 NEE 에 로컬 광원 + 직접광 투영. GPU `ShIncoming`/`ShIncomingPath` → `DirectAll`, 신규 커널 `CSSHDirect`(`GpuSHBaker` 가 광원 있을 때 디스패치).
+- 공용 `LocalLightSource` enum · `LocalLightSettings` → `ProbeVolumeBaker.localLights`·`InstanceSceneBaker.localLights`(기본 Scene), `TemplateInstanceSource.ToBurstScene(alloc, lights)`, 에셋 `lightLog`.
+- 테스트 `SHLightProjectionTests`(헤드리스) · `SHLocalLightTests`(에디터) — RunAll 37종.
+
+### Changed
+- `AtlasApplyDebug.LocalLightSource` → 최상위 `LocalLightSource`(직렬화 값 불변). 프로브·인스턴스 SH 베이크가 씬의 로컬 라이트를 포함(구 거동 = `localLights.source = None`). 광원이 없으면 결과 비트 동일.
+- 기존 베이커 테스트 8종은 로컬 광원 `None` 으로 고정(열린 씬과 격리).
+
 ### Added — 로컬 광원 L1: Point · Spot · Area (2026-10-27)
 - `BakeLight`(POD 112B: Point/Spot/Rect/Disc · `FlagDirect`/`FlagShadows` · 광원별 `Samples`) + `LightSampling`(CPU·Burst 공용 제네릭 `Irradiance`, URP 감쇠·스포트 식, 면광원 결정적 저불일치 샘플링·π·L 클램프) + `BakeLightUtil`(Unity `Light` 변환·씬 수집).
 - 텍스처 라이트맵 1차 직사 + 바운스 NEE 에 로컬 광원: CPU `RadianceCore`(`EvaluateRadiance`/`EvaluateDirectPrimary`/`TracePath`/`AccumulateIndirect` 의 `lights` 인자), Burst `BurstScene.lights`(+`BurstLights`), GPU `GpuScene.Lights` + `PathTrace.compute` `DirectAll`(태양 포함 통합 루프).

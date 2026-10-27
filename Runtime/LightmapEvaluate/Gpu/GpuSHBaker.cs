@@ -11,6 +11,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
     /// 일치하므로 결과는 near-bit-identical(전이함수 없음).
     ///
     /// 결정적(RNG 없음). 시드/Valid 미사용 — 전 프로브 무조건 베이크.
+    /// L2(v15.18): GpuScene 에 로컬 광원이 있으면 히트점 NEE 에 포함(DirectAll) + CSSHDirect 로 직접광 투영(BurstLights.AddDirectSH 미러).
     /// 다바운스는 <see cref="BakeMultiBounce"/>(CSSHBakeMulti, Burst SHPathJob 미러).
     /// </summary>
     public static class GpuSHBaker
@@ -84,6 +85,18 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 }
 
                 cs.Dispatch(kernel, (n + 63) / 64, 1, 1);
+
+                // L2: 로컬 광원 직접광 투영(CSSHDirect — 같은 _ShOut 에 더함). 광원 0개면 생략(기존과 동일).
+                if (gpu.LightCount > 0 && cs.HasKernel("CSSHDirect"))
+                {
+                    int kd = cs.FindKernel("CSSHDirect");
+                    gpu.Bind(cs, kd);
+                    gpu.BindLighting(cs, kd);   // _Lights/_LightCount
+                    gpu.BindAlpha(cs, kd);
+                    cs.SetBuffer(kd, "_Points", ptsBuf);
+                    cs.SetBuffer(kd, "_ShOut", shBuf);
+                    cs.Dispatch(kd, (n + 63) / 64, 1, 1);
+                }
                 shBuf.GetData(result);
             }
             finally

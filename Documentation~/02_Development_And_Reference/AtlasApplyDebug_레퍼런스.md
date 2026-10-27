@@ -113,7 +113,7 @@ ResolveTargets()                    대상 MeshFilter 수집 (occluder 차집합
 ### Local Lights (v15.17 — Point · Spot · Area, Radiance·RadianceGI)
 | 필드 | 타입 | 기본값 | 설명 |
 |---|---|---|---|
-| `localLightSource` | `LocalLightSource` | `Scene` | Scene = 로드된 씬의 켜진 Point/Spot/Area/Disc 라이트 · Listed = `localLights` · None = 로컬 광원 없음(구 거동). Directional 은 항상 제외(태양은 `lightDirection`…) |
+| `localLightSource` | `LocalLightSource`(v15.18 최상위 enum) | `Scene` | Scene = 로드된 씬의 켜진 Point/Spot/Area/Disc 라이트 · Listed = `localLights` · None = 로컬 광원 없음(구 거동). Directional 은 항상 제외(태양은 `lightDirection`…) |
 | `localLights` | `Light[]` | — | Listed 일 때 목록 |
 | `localLightsFollowBakeType` | `bool` | `false` | Unity Mode 따름: Baked = 직사+간접, Mixed = 간접만, Realtime = 제외 |
 | `areaLightSamples` | `int` (≥1) | `16` | 면광원 1차 직사 샘플(그림자 레이) 수 |

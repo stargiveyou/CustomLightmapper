@@ -49,6 +49,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
         public bool alphaCutout;
         [Tooltip("B1-6: 알파 마스크 빌드 요약(컷아웃 머티리얼 수·마스크 크기·스킵 사유).")]
         public string alphaLog;
+        [Tooltip("L2: 베이크에 쓴 로컬 광원 요약(종류별 개수·간접만·그림자 없음·출처).")]
+        public string lightLog;
         [Tooltip("같은 계수의 EXR 사본(32-bit float). 레이아웃은 ExrLayout 참조.")]
         public Texture2D coefficientsExr;
 
