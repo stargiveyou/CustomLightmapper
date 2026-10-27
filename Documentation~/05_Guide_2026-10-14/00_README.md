@@ -1,5 +1,6 @@
 ---
 
+> 📝 2026-10-27: 현재 코드 기준 사용법·테스트 실행법은 `06_Manual/챕터별_테스트_실행_매뉴얼.md` (이 가이드보다 최신).
 > 📝 2026-10-26: UnityStudyProject 브랜치 병합으로 `AtlasApplyDebug` 가 `Runtime/` 으로 이동했고 `InstanceSceneBaker`·`ProbeVolumeBaker`(Track B)·결과 저장이 추가됐다. 이 가이드의 나머지 서술은 2026-10-14 기준 — 최신 구조는 `02_Development_And_Reference/커스텀_라이트매퍼_개발문서_v15.md`.
 title: "CustomLightmapper 가이드 (2026-10-14) — 색인"
 tags: [custom-lightmapper, guide, index]

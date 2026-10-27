@@ -6,6 +6,7 @@ tags: [custom-lightmapper, guide, usage]
 # CustomLightmapper — 툴 사용법
 
 > 기준일 2026-10-14 · 패키지 v0.14.0 · Unity 6000.0+ / URP
+> ⚠ 2026-10-27: 이후 추가된 기능(C0 · 로컬 광원 · 적응/진행형 · GPU 후처리 · SH/프로브 베이커 · RunAll 38종)은 `../06_Manual/챕터별_테스트_실행_매뉴얼.md` 가 기준이다.
 > 모든 메뉴·필드 이름은 현재 코드에서 그대로 옮겼다.
 
 ---
