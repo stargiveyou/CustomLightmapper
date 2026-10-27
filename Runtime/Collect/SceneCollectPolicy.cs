@@ -117,6 +117,19 @@ namespace HuskyLibs.CustomLightmapper.Bake
             return outp;
         }
 
+        /// <summary>
+        /// 베이크 씬 참여자 = Receiver ∪ OccluderOnly 의 Entries 인덱스, <b>Entries 순서</b>(두 목록을 이어 붙이지 않는다 — 결정 ②).
+        /// 프로브 볼륨처럼 '굽기/차폐만' 구분이 없는 소비자용(<c>ProbeVolumeBaker.SetCollected</c>) — 텍스처 경로의 targets ∪ occluders 와 같은 집합.
+        /// </summary>
+        public static int[] SceneMembers(SceneCollection col)
+        {
+            if (col == null) throw new ArgumentNullException(nameof(col));
+            var outp = new List<int>(col.ReceiverCount + col.OccluderCount);
+            for (int i = 0; i < col.Entries.Length; i++)
+                if (col.Entries[i].Class != CollectClass.Excluded) outp.Add(i);
+            return outp.ToArray();
+        }
+
         static CollectClass Excluded(CollectReason r, out CollectReason reason)
         {
             reason = r;

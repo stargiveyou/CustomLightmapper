@@ -11,7 +11,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
     /// 볼륨: 이 Transform 위치를 중심으로 하는 월드 축 정렬 박스(<see cref="volumeSize"/>) + 간격(<see cref="probeSpacing"/>)
     ///   → <see cref="ProbeGrid.FromBounds"/>.
     /// 씬 입력: ① 템플릿·인스턴스 행렬(<see cref="templates"/> — 인스펙터 / <see cref="SetInstances"/> / 자식 캡처, 식생·프롭)
-    ///   ② 정적 루트(<see cref="staticRoots"/> 하위 MeshFilter — 지형·건물, 메시별 dedupe·머티리얼 색 알베도).
+    ///   ② 정적 메시(지형·건물, 메시별 dedupe·머티리얼 색 알베도) — <see cref="staticSource"/>:
+    ///      Roots = <see cref="staticRoots"/> 하위 MeshFilter 전부(구 거동) / Collected = C0 씬 분류 결과(<see cref="collectedStatics"/> —
+    ///      텍스처 라이트맵의 targets ∪ occluders 와 같은 기준, 템플릿 인스턴스와 겹치는 물체는 자동 제외. 씬 입력 이원화 해소).
     ///   템플릿별 <see cref="OccluderMode"/>(결정 D5 1차: Opaque/Excluded) · twoSided(유효성에서 뒷면 판정 제외).
     /// 베이크: 격자 위치 → Burst/GPU SH 베이커(1바운스/다바운스, 신규 커널 없음) → 유효성(뒷면 비율) → dilation → <see cref="ProbeVolumeAsset"/>.
     /// 표시(결정 D2 1차): 템플릿 인스턴스의 상/하 대표점(<see cref="TemplateInstanceSource"/>.ComputeProbePoints 템플릿 단위 오버로드 — SH 트랙과 같은 규칙)
@@ -36,6 +38,13 @@ namespace HuskyLibs.CustomLightmapper.Bake
         {
             Opaque,     // 트레이스. alphaCutout 이면 컷아웃 머티리얼의 투명 텍셀은 통과(잎 카드 구멍), 아니면 통짜 불투명
             Excluded,   // 베이크 씬에서 제외(차폐·반사 없음). 표시·샘플은 그대로
+        }
+
+        /// <summary>정적 메시 입력 출처.</summary>
+        public enum StaticSource
+        {
+            Roots,      // staticRoots 하위 MeshFilter 전부(구 거동 — 비트 동일)
+            Collected,  // C0 씬 분류 결과(collectedStatics) — 우클릭 'Collect Scene (C0)'
         }
 
         /// <summary>표시 방식(결정 D2).</summary>
@@ -82,8 +91,14 @@ namespace HuskyLibs.CustomLightmapper.Bake
         public TemplateInput[] templates = new TemplateInput[0];
 
         [Header("씬 입력 — 정적 메시 (지형·건물)")]
-        [Tooltip("하위 MeshFilter 전부를 차폐·반사로 넣음(Read/Write 필요). 알베도는 머티리얼 _BaseColor/_Color.")]
+        [Tooltip("Roots = staticRoots 하위 MeshFilter 전부(구 거동). Collected = C0 씬 분류 결과(collectedStatics) — 텍스처 라이트맵과 같은 기준" +
+                 "(LOD1+ · Contribute GI 꺼짐 · 꺼진 렌더러 · Read/Write 꺼짐 등 제외, SceneCollectOverride 표식 반영). 우클릭 'Collect Scene (C0)'.")]
+        public StaticSource staticSource = StaticSource.Roots;
+        [Tooltip("staticSource = Roots: 하위 MeshFilter 전부를 차폐·반사로 넣음(Read/Write 필요). 알베도는 머티리얼 _BaseColor/_Color.")]
         public Transform[] staticRoots = new Transform[0];
+        [Tooltip("staticSource = Collected: C0 수집 결과(Receiver ∪ OccluderOnly, 씬 순회 순서). 우클릭 'Collect Scene (C0)' 가 채움 — 손으로 고쳐도 됨. " +
+                 "템플릿 인스턴스와 같은 물체(captureSource 하위 · 메시+행렬 일치)는 베이크 때 자동 제외(이중 계상 방지).")]
+        public MeshFilter[] collectedStatics = new MeshFilter[0];
         public Color staticDefaultAlbedo = new Color(0.5f, 0.5f, 0.5f, 1f);
         [Tooltip("정적 메시를 양면으로 취급(유효성 뒷면 판정 제외).")]
         public bool staticTwoSided;
@@ -209,6 +224,75 @@ namespace HuskyLibs.CustomLightmapper.Bake
             }
         }
 
+        /// <summary>
+        /// C0 씬 수집 결과 주입(Editor <c>SceneCollectMenu</c>) — <see cref="collectedStatics"/> 교체 + <see cref="staticSource"/> = Collected.
+        /// 프로브 볼륨엔 '굽기/차폐만' 구분이 없어 Receiver ∪ OccluderOnly 를 한 목록으로 받는다(<see cref="SceneCollectPolicy.SceneMembers"/>).
+        /// </summary>
+        public void SetCollected(MeshFilter[] statics)
+        {
+            collectedStatics = statics ?? Array.Empty<MeshFilter>();
+            staticSource = StaticSource.Collected;
+        }
+
+        /// <summary>마지막 <see cref="BuildSceneInput"/> 의 씬 구성 요약(에셋 sceneLog · 베이크 로그).</summary>
+        internal string LastSceneLog { get; private set; }
+
+        /// <summary>
+        /// 정적 메시 입력 목록(순서 = 베이크 인스턴스 순서). null·메시 없음·중복 MeshFilter 는 뺀다.
+        /// Collected 는 템플릿 인스턴스와 겹치는 물체도 뺀다(<paramref name="templateOverlap"/> = 그 수) — Roots 는 구 거동 그대로(0).
+        /// </summary>
+        internal List<MeshFilter> StaticFilters(out int templateOverlap)
+        {
+            templateOverlap = 0;
+            var list = new List<MeshFilter>();
+            var seen = new HashSet<MeshFilter>();
+            if (staticSource == StaticSource.Collected)
+            {
+                if (collectedStatics == null) return list;
+                TemplateOverlapKeys(out var captureRoots, out var instKeys);
+                foreach (var mf in collectedStatics)
+                {
+                    if (mf == null || mf.sharedMesh == null || !seen.Add(mf)) continue;
+                    if (IsTemplateOverlap(mf, captureRoots, instKeys)) { templateOverlap++; continue; }
+                    list.Add(mf);
+                }
+                return list;
+            }
+            if (staticRoots == null) return list;
+            foreach (var root in staticRoots)
+            {
+                if (root == null) continue;
+                foreach (var mf in root.GetComponentsInChildren<MeshFilter>())
+                    if (mf.sharedMesh != null && seen.Add(mf)) list.Add(mf);
+            }
+            return list;
+        }
+
+        // 템플릿 인스턴스와 같은 물체 판별 키: ① captureSource(자식 행렬을 캡처한 원본 오브젝트의 부모) ② (메시, 월드 행렬).
+        // Excluded 템플릿도 포함 — 베이크 씬에서 빼기로 한 식생이 정적 입력으로 되살아나지 않게.
+        void TemplateOverlapKeys(out HashSet<Transform> captureRoots, out HashSet<(Mesh, Matrix4x4)> instKeys)
+        {
+            captureRoots = new HashSet<Transform>();
+            instKeys = new HashSet<(Mesh, Matrix4x4)>();
+            if (templates == null) return;
+            foreach (var tp in templates)
+            {
+                if (tp == null) continue;
+                if (tp.captureSource != null) captureRoots.Add(tp.captureSource);
+                if (tp.mesh != null && tp.matrices != null)
+                    foreach (var m in tp.matrices) instKeys.Add((tp.mesh, m));
+            }
+        }
+
+        static bool IsTemplateOverlap(MeshFilter mf, HashSet<Transform> captureRoots, HashSet<(Mesh, Matrix4x4)> instKeys)
+        {
+            if (instKeys.Count > 0 && instKeys.Contains((mf.sharedMesh, mf.transform.localToWorldMatrix))) return true;
+            if (captureRoots.Count > 0)
+                for (var t = mf.transform.parent; t != null; t = t.parent)   // captureSource 의 자손(인스턴스 오브젝트와 그 하위)
+                    if (captureRoots.Contains(t)) return true;
+            return false;
+        }
+
         [ContextMenu("Capture Matrices From Sources")]
         public void CaptureMatricesFromSources()
         {
@@ -241,7 +325,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
 #endif
             var a = volumeAsset;
             Debug.Log($"[ProbeVolumeBaker] 베이크 완료: {a.grid}, 무효 {a.invalidCount} → dilation {a.dilatedCount}, " +
-                      $"bounces={a.bounces}, dirs={a.dirCount}, backend={usedBackend}, lights={a.lightLog}, alpha={(a.alphaCutout ? "ON" : "OFF")}\n  alpha: {a.alphaLog}", this);
+                      $"bounces={a.bounces}, dirs={a.dirCount}, backend={usedBackend}, lights={a.lightLog}, alpha={(a.alphaCutout ? "ON" : "OFF")}\n  scene: {a.sceneLog}\n  alpha: {a.alphaLog}", this);
             if (renderOnEnable && isActiveAndEnabled) RebuildRender();
         }
 
@@ -324,6 +408,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             asset.alphaCutout = alpha.Enabled;
             asset.alphaLog = alphaLog ?? (alphaCutout ? "컷아웃 대상 머티리얼 없음" : "alphaCutout 꺼짐");
             asset.lightLog = $"{BakeLightUtil.Summary(bakeLights)}({(localLights != null ? localLights.source : LocalLightSource.None)})";
+            asset.sceneLog = LastSceneLog;
             return asset;
         }
 
@@ -423,7 +508,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         }
 
         /// <summary>
-        /// 베이크 씬 입력: 템플릿(Opaque 만, 순서대로) → 정적 메시(유니크 메시별). 반환 배열은 메시(BLAS) 인덱스 순.
+        /// 베이크 씬 입력: 템플릿(Opaque 만, 순서대로) → 정적 메시(<see cref="StaticFilters"/> 순서, 유니크 메시별). 반환 배열은 메시(BLAS) 인덱스 순.
         /// 메시가 하나도 없으면 빈 씬(하늘만)으로 진행. Read/Write 꺼진 메시는 오류.
         /// </summary>
         internal bool BuildSceneInput(out Tri[][] tris, out Vector3[] albedo, out TwoLevelBVH.Instance[] insts, out bool[] countBackface)
@@ -465,34 +550,39 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 }
             }
 
-            if (staticRoots != null)
+            int templateMeshes = triList.Count, templateInsts = instList.Count;
+            var statics = StaticFilters(out int overlap);
+            int staticUsed = 0, notReadable = 0;
+            var meshToIdx = new Dictionary<Mesh, int>();
+            foreach (var mf in statics)
             {
-                var meshToIdx = new Dictionary<Mesh, int>();
-                var seen = new HashSet<MeshFilter>();
-                foreach (var root in staticRoots)
+                var mesh = mf.sharedMesh;
+                if (!mesh.isReadable)
                 {
-                    if (root == null) continue;
-                    foreach (var mf in root.GetComponentsInChildren<MeshFilter>())
-                    {
-                        var mesh = mf.sharedMesh;
-                        if (mesh == null || !seen.Add(mf)) continue;
-                        if (!mesh.isReadable)
-                        { Debug.LogWarning($"[ProbeVolumeBaker] 정적 메시 '{mesh.name}'({mf.name}) Read/Write 꺼짐 — 베이크 씬에서 제외.", this); continue; }
-                        var rnd = mf.GetComponent<MeshRenderer>();
-                        if (!meshToIdx.TryGetValue(mesh, out int mi))
-                        {
-                            mi = triList.Count;
-                            meshToIdx[mesh] = mi;
-                            triList.Add(TemplateInstanceSource.MeshToLocalTris(mesh));
-                            meshList.Add(mesh);
-                            albList.Add(ReadAlbedo(rnd, staticDefaultAlbedo));
-                            cbList.Add(!staticTwoSided);
-                        }
-                        instList.Add(new TwoLevelBVH.Instance { MeshIndex = mi, LocalToWorld = mf.transform.localToWorldMatrix });
-                        matList.Add(rnd != null ? rnd.sharedMaterials : null);   // 인스턴스별(같은 메시라도 머티리얼은 다를 수 있음)
-                    }
+                    notReadable++;
+                    Debug.LogWarning($"[ProbeVolumeBaker] 정적 메시 '{mesh.name}'({mf.name}) Read/Write 꺼짐 — 베이크 씬에서 제외.", this);
+                    continue;
                 }
+                var rnd = mf.GetComponent<MeshRenderer>();
+                if (!meshToIdx.TryGetValue(mesh, out int mi))
+                {
+                    mi = triList.Count;
+                    meshToIdx[mesh] = mi;
+                    triList.Add(TemplateInstanceSource.MeshToLocalTris(mesh));
+                    meshList.Add(mesh);
+                    albList.Add(ReadAlbedo(rnd, staticDefaultAlbedo));
+                    cbList.Add(!staticTwoSided);
+                }
+                instList.Add(new TwoLevelBVH.Instance { MeshIndex = mi, LocalToWorld = mf.transform.localToWorldMatrix });
+                matList.Add(rnd != null ? rnd.sharedMaterials : null);   // 인스턴스별(같은 메시라도 머티리얼은 다를 수 있음)
+                staticUsed++;
             }
+            if (staticSource == StaticSource.Collected && (collectedStatics == null || collectedStatics.Length == 0))
+                Debug.LogWarning("[ProbeVolumeBaker] staticSource = Collected 인데 collectedStatics 가 비어 있음 — 우클릭 'Collect Scene (C0)' 를 먼저(정적 메시 없이 진행).", this);
+            LastSceneLog = $"templates {templateMeshes}메시·{templateInsts}인스턴스 + static({staticSource}) {staticUsed}"
+                         + (overlap > 0 ? $" (템플릿 중복 −{overlap})" : "")
+                         + (notReadable > 0 ? $" (Read/Write 꺼짐 −{notReadable})" : "")
+                         + $" → BLAS {triList.Count} · 인스턴스 {instList.Count}";
 
             tris = triList.ToArray();
             albedo = albList.ToArray();

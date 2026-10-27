@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added — Track B 정적 입력 C0 합류 (2026-10-27)
+- `ProbeVolumeBaker.staticSource`(`Roots` 기본 / `Collected`) · `collectedStatics` · `SetCollected(MeshFilter[])` — 프로브 볼륨 정적 메시를 C0 씬 분류 결과(Receiver ∪ OccluderOnly)로 받는다. 텍스처 라이트맵의 targets ∪ occluders 와 같은 기준(LOD1+·Contribute GI 꺼짐·꺼진 렌더러·Read/Write 꺼짐 제외, `SceneCollectOverride` 반영).
+- Collected 는 템플릿 인스턴스와 겹치는 물체를 자동 제외(① 템플릿 `captureSource` 자손 ② 메시 + 월드 행렬 일치, Excluded 템플릿 포함) — 같은 나무가 템플릿·정적으로 두 번 들어가는 것을 막는다.
+- 에디터 우클릭 `CONTEXT/ProbeVolumeBaker/Collect Scene (C0)`·`… All Loaded Scenes (C0)`(옵션은 C0 메뉴 토글 공유, Undo 가능) · `SceneCollectPolicy.SceneMembers` · 에셋 `sceneLog`(Bake 로그 `scene:` 줄).
+- `BakeLightUtil.FindSceneLights()` — 씬 라이트 탐색 공용 경로(Unity 6.5 `FindObjectsByType`·`GetEntityId` 분기). `AtlasApplyDebug` "From DirectionalLight Component" 도 이 경로(Directional 이 여럿이면 객체 ID 순 첫 번째 — 결정적).
+- 테스트 `SceneCollectPolicyTests` T14(헤드리스) · `ProbeVolumeC0Tests`(에디터) — RunAll 38종.
+
+### Changed
+- 기본 `staticSource = Roots` 는 구 거동 그대로(비트 동일 — 테스트로 고정). Collected 를 고른 경우에만 결과가 달라질 수 있다.
+
 ### Added — 로컬 광원 L2: SH·프로브 (2026-10-27)
 - `LightSampling.ProjectSH`/`AddDirectSH`(+ Burst `BurstLights.AddDirectSH`): Direct 플래그 로컬 광원이 프로브에 직접 주는 빛을 SH 에 투영(Point/Spot 델타 E⊥, 면광원 입체각 가중·2π 상한).
 - `BurstSHBaker` `SHJob`·`SHPathJob`: 히트점 NEE 에 로컬 광원 + 직접광 투영. GPU `ShIncoming`/`ShIncomingPath` → `DirectAll`, 신규 커널 `CSSHDirect`(`GpuSHBaker` 가 광원 있을 때 디스패치).
