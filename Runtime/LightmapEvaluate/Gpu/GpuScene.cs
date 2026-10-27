@@ -103,6 +103,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
         public readonly ComputeBuffer InstNormals;   // 48B: instNormalMatrix 3행 (월드 노멀 변환)
         public readonly ComputeBuffer MeshAlbedo;    // 12B: 메시별 float3 알베도 (모드 A)
         public readonly int TlasCount;
+        // 로컬 광원(BakeLight, 112B — HLSL GpuLight). 광원 0개면 1원소 더미 + LightCount 0. BindLighting 이 _Lights/_LightCount 배선.
+        public readonly ComputeBuffer Lights;
+        public readonly int LightCount;
 
         // α(추가): 알파 컷아웃 any-hit. 순회/조명 버퍼와 별개 — BindAlpha 로만 배선한다.
         //   G4 순회 커널(BvhTraverse.compute)은 이 버퍼들을 선언하지 않으므로 기존 검증이 그대로 산다.
@@ -119,6 +122,19 @@ namespace HuskyLibs.CustomLightmapper.Bake
         public readonly ComputeBuffer AMaskST;
         public readonly int AlphaEnabled;            // 0/1 uniform
         public readonly int AMatSlotCount;
+
+        // G6-4: 순회 스택 요구량(GpuBakeLimits.StackUsage — HLSL 과 같은 push 순서의 전체 순회 최댓값). TLAS·BLAS 는 스택 배열이 따로.
+        public readonly int TlasDepth;               // 리프 최대 깊이(진단용), 빈 TLAS = -1
+        public readonly int MaxBlasDepth;            // 메시 전체 최댓값(빈 메시 무시)
+        public readonly int TlasStack;               // TLAS 순회 최대 스택 칸
+        public readonly int MaxBlasStack;            // BLAS 순회 최대 스택 칸(메시 전체)
+        /// <summary>GPU 순회에 필요한 스택 칸 수(TLAS·BLAS 중 큰 쪽).</summary>
+        public int RequiredStack => Mathf.Max(TlasStack, MaxBlasStack);
+        /// <summary>
+        /// GPU 순회 스택(<see cref="GpuBakeLimits.TraversalStack"/> = BVH_STACK 32)에 들어가는가. false 면 넘친 노드를 덮어써
+        /// 결과가 틀린다 → 호출측이 Burst(스택 64)로 폴백해야 한다. 실 씬은 보통 깊이 20 안팎(SAH·리프 다중 삼각형).
+        /// </summary>
+        public bool TraversalFits => RequiredStack <= GpuBakeLimits.TraversalStack;
 
         public GpuScene(in BurstScene s)
         {
@@ -188,6 +204,15 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 MeshAlbedo.SetData(arr);
             }
 
+            // 로컬 광원 — BurstScene.lights 를 그대로(구조체 = GPU stride). 광원 0개면 더미 1개.
+            {
+                LightCount = s.lights.IsCreated ? Mathf.Min(s.lightCount, s.lights.Length) : 0;
+                Lights = new ComputeBuffer(Mathf.Max(1, LightCount), BakeLight.Stride, ComputeBufferType.Structured);
+                var arr = new BakeLight[Mathf.Max(1, LightCount)];
+                for (int i = 0; i < LightCount; i++) arr[i] = s.lights[i];
+                Lights.SetData(arr);
+            }
+
             // α: 알파 컷아웃 데이터. 꺼진 씬은 BurstAlpha 가 이미 1원소 더미를 들고 있어 그대로 올린다.
             {
                 AlphaEnabled = s.alpha.enabled ? 1 : 0;
@@ -228,6 +253,29 @@ namespace HuskyLibs.CustomLightmapper.Bake
             BlasNodeCount  = MakeIntBuffer(s.blasNodeCount);
             BlasTriIdxStart = MakeIntBuffer(s.blasTriIdxStart);
             BlasTriStart   = MakeIntBuffer(s.blasTriStart);
+
+            // G6-4: 순회 스택 요구량 — 업로드와 같은 평탄 배열로 계산(자식 인덱스는 트리 시작 기준 로컬)
+            Measure(s.tlasNodes, 0, s.tlasNodes.IsCreated ? Mathf.Min(s.tlasCount, s.tlasNodes.Length) : 0, out TlasDepth, out TlasStack);   // 배열은 여유 용량 포함 — 실제 노드 수만
+            MaxBlasDepth = -1;
+            MaxBlasStack = 0;
+            if (s.blasNodeStart.IsCreated)
+                for (int m = 0; m < s.blasNodeStart.Length; m++)
+                {
+                    Measure(s.blasNodes, s.blasNodeStart[m], s.blasNodeCount[m], out int d, out int st);
+                    MaxBlasDepth = Mathf.Max(MaxBlasDepth, d);
+                    MaxBlasStack = Mathf.Max(MaxBlasStack, st);
+                }
+        }
+
+        static void Measure(Unity.Collections.NativeArray<BVH.Node> nodes, int start, int count, out int depth, out int stack)
+        {
+            depth = -1; stack = 0;
+            if (!nodes.IsCreated || count <= 0) return;
+            var lf = new int[count];
+            var ct = new int[count];
+            for (int i = 0; i < count; i++) { var nd = nodes[start + i]; lf[i] = nd.LeftFirst; ct[i] = nd.Count; }
+            depth = GpuBakeLimits.MaxLeafDepth(lf, ct, 0, count);
+            stack = GpuBakeLimits.StackUsage(lf, ct, 0, count);
         }
 
         static ComputeBuffer MakeNodeBuffer(Unity.Collections.NativeArray<BVH.Node> src)
@@ -285,6 +333,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
         {
             cs.SetBuffer(kernel, "_InstNormals", InstNormals);
             cs.SetBuffer(kernel, "_MeshAlbedo", MeshAlbedo);
+            cs.SetBuffer(kernel, "_Lights", Lights);        // 로컬 광원(조도 커널의 DirectAll) — 선언 안 한 커널엔 무해
+            cs.SetInt("_LightCount", LightCount);
         }
 
         /// <summary>α: 알파 컷아웃 SRV + uniform 배선. <see cref="Bind"/> 이후 호출.
@@ -320,6 +370,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             BlasTriStart?.Dispose();
             InstNormals?.Dispose();
             MeshAlbedo?.Dispose();
+            Lights?.Dispose();
             ATriUV?.Dispose();
             ATriSubmesh?.Dispose();
             AMeshHasCutout?.Dispose();

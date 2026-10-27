@@ -192,7 +192,9 @@ public static FlattenMethod Flatten(ref ChartMesh cm)
 }
 ```
 
-> ⚠ **LSCM / MVC는 스텁이다.**
+> ✅ **v15.14 에서 구현됨** — 아래는 2026-08-18 스냅샷 기록. 현재 동작: 개발문서 v15 §4(왜곡 기반 디스패치 · LSCM 2점 고정 + CG · MVC 원 경계 + 가상 부채꼴).
+>
+> ⚠ (당시) **LSCM / MVC는 스텁이다.**
 > [`LSCMSolver.cs:18`](../../Runtime/ChartFlatten/LSCMSolver.cs#L18) · [`MVCFallback.cs:18`](../../Runtime/ChartFlatten/MVCFallback.cs#L18)
 > 둘 다 `LogWarning("미구현 stub")` + no-op. 디스패처 배선만 완성돼 있고 솔버 본체는 없다.
 > **결과**: 곡면 차트는 평면투영 UV가 그대로 남아 foldover가 잔존할 수 있다.

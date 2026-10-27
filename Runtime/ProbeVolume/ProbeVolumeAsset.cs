@@ -11,6 +11,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
     ///   텍스처 t 의 텍셀 (i,j,k) = shPacked[idx·7 + t], B1-4 픽셀 샘플용) + EXR 사본(데이터 교환·검사용, 런타임 미사용).
     /// 폴백 SH(<see cref="fallbackSH"/>, 하늘만): 픽셀 셰이더(B1-4)가 볼륨 밖으로 페이드할 대상.
     /// 정점 AO(<see cref="vertexAO"/>, B1-5): 템플릿 메시별 AO 메시 사본(uv3 = 앞/뒷면 AO, 서브에셋) — 볼륨과 무관하지만 같은 베이크·파일로 관리.
+    /// 알파(B1-6): <see cref="alphaCutout"/> = 베이크 레이가 컷아웃 머티리얼 구멍을 통과했는지(기록용 — 런타임 무관).
     /// 인스턴스 배치는 저장하지 않는다 — 배치가 바뀌면 <see cref="Sample"/> 만 다시(재베이크 불필요, 결정 D2).
     /// 대량 프로브(수십만 × 7 float4)라 바이너리 직렬화.
     /// </summary>
@@ -44,6 +45,12 @@ namespace HuskyLibs.CustomLightmapper.Bake
         public float validityThreshold;
         public int invalidCount;
         public int dilatedCount;
+        [Tooltip("B1-6: 베이크 씬에 알파 컷아웃 any-hit 가 적용됐는지(컷아웃 머티리얼 ≥ 1). false 면 잎 카드도 통짜 불투명으로 트레이스됨.")]
+        public bool alphaCutout;
+        [Tooltip("B1-6: 알파 마스크 빌드 요약(컷아웃 머티리얼 수·마스크 크기·스킵 사유).")]
+        public string alphaLog;
+        [Tooltip("L2: 베이크에 쓴 로컬 광원 요약(종류별 개수·간접만·그림자 없음·출처).")]
+        public string lightLog;
         [Tooltip("같은 계수의 EXR 사본(32-bit float). 레이아웃은 ExrLayout 참조.")]
         public Texture2D coefficientsExr;
 
@@ -54,6 +61,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
             public Mesh source;
             public Mesh aoMesh;
             public bool twoSided;
+            [Tooltip("B1-6: AO 레이가 이 메시 컷아웃 서브메시의 구멍을 통과했는지.")]
+            public bool alphaCutout;
         }
 
         [Header("정점 AO (B1-5)")]

@@ -10,6 +10,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
     {
         public ChartMesh[] Charts;       // A2~A3 결과 (각 차트 UV 채워짐, 경계 루프 포함)
         public FlattenMethod[] Methods;  // A3 에서 차트별 실제 사용된 평탄화 방법
+        public FlattenStats[] Stats;     // A3 차트별 기록(단계별 L2 stretch·겹침·반복 수)
         public int ChartCount;
         public int FoldoverCharts;       // A3 후에도 남은 겹침(foldover) 차트 수 (정상=0)
     }
@@ -21,13 +22,15 @@ namespace HuskyLibs.CustomLightmapper.Bake
     ///   A1  he   = new WeldedHalfEdge(mesh)            // 용접 + 하프에지 위상 빌드
     ///   A2  seg  = ChartSegementer.GetResult(he, seg)  // 시임/차트 분할
     ///       chs  = ChartMeshBuilder.BuildAll(he, seg)  // 차트-로컬 메시 + 경계 루프 추출
-    ///   A3  mth  = ChartFlattener.FlattenAll(chs)      // Planar →(foldover) LSCM → MVC 디스패치
+    ///   A3  mth  = ChartFlattener.FlattenAll(chs, fs)  // Planar →(겹침·고왜곡) LSCM →(겹침) MVC 디스패치
     ///
     /// A4(밀도 정규화/Pack), A5(UV2 메시 Assemble)는 후속 모듈에서 ParamResult.Charts 를 받아 처리.
     /// </summary>
     public static class ParameterizationPipeline
     {
-        public static ParamResult Run(Mesh sourceMesh, SegmentationSettings seg)
+        public static ParamResult Run(Mesh sourceMesh, SegmentationSettings seg) => Run(sourceMesh, seg, FlattenSettings.Default);
+
+        public static ParamResult Run(Mesh sourceMesh, SegmentationSettings seg, in FlattenSettings flatten)
         {
             if (sourceMesh == null)
             {
@@ -43,8 +46,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 var s = ChartSegementer.GetResult(he, seg);
                 var charts = ChartMeshBuilder.BuildAll(he, s);
 
-                // A3) 차트별 평탄화 (Planar 우선, foldover 시 LSCM → 최후 MVC)
-                var methods = ChartFlattener.FlattenAll(charts);
+                // A3) 차트별 평탄화 (Planar 우선, 겹침·고왜곡이면 LSCM → 그래도 겹치면 MVC)
+                var methods = ChartFlattener.FlattenAll(charts, flatten, out var stats);
 
                 // 평탄화 후에도 남은 겹침 집계 (정상 파이프라인이면 0)
                 int foldovers = 0;
@@ -55,6 +58,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 {
                     Charts = charts,
                     Methods = methods,
+                    Stats = stats,
                     ChartCount = charts.Length,
                     FoldoverCharts = foldovers,
                 };

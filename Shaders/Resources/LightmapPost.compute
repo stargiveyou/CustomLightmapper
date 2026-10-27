@@ -1,0 +1,131 @@
+// ============================================================================
+// LightmapPost.compute — 라이트맵 후처리 GPU 판: 시임 스티칭(Tier1·Tier2) + dilation.
+//   계획(텍셀 목록·웨이브·CSR)은 CPU(LightmapPostPlan)가 만들고, 여기서는 값만 계산한다.
+//   ground truth(정확 미러 대상 — CPU 모델 LightmapPostPlan.Run* 이 원본과 비트 동일함을 테스트로 고정):
+//     Runtime/LightmapStitch/Lightmapseamstitch.cs        (Stitch / StitchEdges)
+//     Runtime/Diliation/LightmapPostProcessBurstJob.cs    (DiliateJob)
+//
+// 커널:
+//   CSStitchT1        : 웨이브 1회 = 그룹 [_WaveStart, +_WaveCount) — 그룹 합/개수 → 그룹 텍셀 전부(웨이브 안 텍셀 비공유)
+//   CSStitchT2Sample  : 샘플 j = (그룹, t) 의 valid 텍셀 평균 → _SampleAvg[j]
+//   CSStitchT2Gather  : 갱신 텍셀 k = 기여 샘플 평균의 합(샘플 순) / 개수 → _Px (Jacobi: Sample 디스패치 뒤)
+//   CSDilate          : 8-이웃 valid 평균 더블버퍼 1패스(_SrcPx/_SrcValid → _DstPx/_DstValid)
+//
+// 정밀도: 전 경로 fp32, 덧셈 순서 = CPU. 나눗셈은 GPU 정밀도(≤2.5 ULP)라 CPU 와 ULP 수준 차이만 가능.
+// 1D 커널은 _Base 분할 디스패치(GpuBakeLimits.Tiles), CSDilate 는 8×8 2D(해상도 4096 → 512 그룹/축).
+// ============================================================================
+
+#pragma kernel CSStitchT1
+#pragma kernel CSStitchT2Sample
+#pragma kernel CSStitchT2Gather
+#pragma kernel CSDilate
+
+int _Base;      // 1D 분할 디스패치 오프셋(호출측이 매번 설정·복원)
+int _Count;     // 1D 커널 항목 수
+
+// ---- 페이지 픽셀(T1/T2 제자리 갱신) ----
+RWStructuredBuffer<float4> _Px;
+
+// ---- Tier1 ----
+StructuredBuffer<int> _GroupStart;
+StructuredBuffer<int> _GroupCount;
+StructuredBuffer<int> _Texels;
+int _WaveStart;
+
+[numthreads(64, 1, 1)]
+void CSStitchT1(uint3 id : SV_DispatchThreadID)
+{
+    uint j = id.x + (uint)_Base;
+    if ((int)j >= _Count) return;
+    int g = _WaveStart + (int)j;
+    int s = _GroupStart[g];
+    int c = _GroupCount[g];
+
+    float4 sum = float4(0, 0, 0, 0);
+    [loop] for (int k = 0; k < c; k++) sum += _Px[_Texels[s + k]];
+    float4 avg = sum / (float)c;
+    [loop] for (int k2 = 0; k2 < c; k2++) _Px[_Texels[s + k2]] = avg;
+}
+
+// ---- Tier2 ----
+StructuredBuffer<int>      _SampleStart;
+StructuredBuffer<int>      _SampleCount;
+StructuredBuffer<int>      _SampleTexels;
+RWStructuredBuffer<float4> _SampleAvg;
+StructuredBuffer<int>      _TouchTexels;
+StructuredBuffer<int>      _ContribStart;
+StructuredBuffer<int>      _ContribCount;
+StructuredBuffer<int>      _ContribSamples;
+StructuredBuffer<float4>   _SampleAvgIn;   // Gather 단계 읽기 전용 바인딩(같은 버퍼)
+
+[numthreads(64, 1, 1)]
+void CSStitchT2Sample(uint3 id : SV_DispatchThreadID)
+{
+    uint j = id.x + (uint)_Base;
+    if ((int)j >= _Count) return;
+    int s = _SampleStart[j];
+    int c = _SampleCount[j];
+
+    float4 r = float4(0, 0, 0, 0);
+    [loop] for (int k = 0; k < c; k++) r += _Px[_SampleTexels[s + k]];
+    _SampleAvg[j] = r / (float)c;
+}
+
+[numthreads(64, 1, 1)]
+void CSStitchT2Gather(uint3 id : SV_DispatchThreadID)
+{
+    uint k = id.x + (uint)_Base;
+    if ((int)k >= _Count) return;
+    int s = _ContribStart[k];
+    int c = _ContribCount[k];
+
+    float4 sum = _SampleAvgIn[_ContribSamples[s]];          // 첫 기여 = 대입(CPU 와 같은 연산)
+    [loop] for (int q = 1; q < c; q++) sum = sum + _SampleAvgIn[_ContribSamples[s + q]];
+    _Px[_TouchTexels[k]] = sum / (float)c;
+}
+
+// ---- Dilation ----
+StructuredBuffer<float4>   _SrcPx;
+StructuredBuffer<uint>     _SrcValid;
+RWStructuredBuffer<float4> _DstPx;
+RWStructuredBuffer<uint>   _DstValid;
+int _W;
+int _H;
+
+[numthreads(8, 8, 1)]
+void CSDilate(uint3 id : SV_DispatchThreadID)
+{
+    int x = (int)id.x, y = (int)id.y;
+    if (x >= _W || y >= _H) return;
+    int index = y * _W + x;
+
+    float4 outPx = _SrcPx[index];
+    uint   outV  = 0u;
+    if (_SrcValid[index] != 0u)
+    {
+        outV = 1u;                                          // valid 텍셀은 그대로 전달
+    }
+    else
+    {
+        float4 sum = float4(0, 0, 0, 0);
+        int cnt = 0;
+        [loop] for (int dy = -1; dy <= 1; dy++)
+        {
+            int ny = y + dy;
+            if (ny < 0 || ny >= _H) continue;
+            [loop] for (int dx = -1; dx <= 1; dx++)
+            {
+                if (dx == 0 && dy == 0) continue;
+                int nx = x + dx;
+                if (nx < 0 || nx >= _W) continue;
+                int nidx = ny * _W + nx;
+                if (_SrcValid[nidx] == 0u) continue;
+                sum += _SrcPx[nidx];
+                cnt++;
+            }
+        }
+        if (cnt > 0) { outPx = sum / (float)cnt; outV = 1u; }   // 못 채우면 배경값·무효 유지
+    }
+    _DstPx[index] = outPx;
+    _DstValid[index] = outV;
+}

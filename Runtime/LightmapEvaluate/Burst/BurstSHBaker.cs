@@ -16,6 +16,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
     ///   (π·Sky(n) = 가림 없는 균일 하늘 아래의 간접 조도 근사 → 이웃 표면의 앰비언트.)
     ///   → RNG 없음(고정 피보나치 방향셋) → 재현·검증 용이. 다바운스는 <see cref="BakeMultiBounce"/>(SHPathJob).
     /// SH엔 간접+환경만 담김(직사광은 이웃 반사로 들어오되, 인스턴스 자신의 직사광은 셰이더 실시간 — SH-5).
+    /// L2(v15.18): 로컬 광원(BurstScene.lights)은 이웃 반사(히트점 NEE, 전 광원)에 더해, 셰이더가 실시간으로 그리지 않으므로
+    /// Direct 플래그 광원의 '프로브가 직접 보는 빛'도 SH 에 투영(<see cref="LightSampling.ProjectSH{TQ}"/>). 광원 0개면 기존과 비트 동일.
     ///
     /// 주의: 대표점이 솔리드 메시 내부(AABB 중심)면 자기차폐로 어두워짐 → 점 배치는 호출측 책임
     ///       (얇은 프롭은 근사 OK, 큰 메시는 텍스처 경로). 씬은 자기 포함 전체를 차폐로 트레이스.
@@ -45,6 +47,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
                     Vector3 d = Dirs[s];
                     sh.Accumulate(d, Incoming(p, d), Weight);
                 }
+                // L2: Direct 플래그 로컬 광원이 프로브에 직접 주는 빛(태양 직사는 셰이더 실시간이라 제외). 광원 0개면 그대로.
+                if (Scene.lightCount > 0) BurstLights.AddDirectSH(ref sh, Scene, p, (uint)index);
                 Out[index] = sh;
             }
 
@@ -56,7 +60,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
                     // 앰비언트가 없으면 그늘진 이웃 방향이 정확히 0(검정)이 되어 하부 반구가
                     // 색-or-검정 이진 패치워크로 무너지고, L2 재구성 링잉→단색(빨강) 아티팩트를 키운다.
                     // (v15.3 전엔 태양 항이 ρ·E 로 π배 컸음 — 텍스처 경로와 규약 통일.)
-                    Vector3 irr = DirectAt(hp, hn) / Mathf.PI + AmbientAt(hn);
+                    Vector3 eD = DirectAt(hp, hn);
+                    if (Scene.lightCount > 0) eD = BurstLights.AddBounce(eD, Scene, hp, hn);   // L2: 이웃 표면이 받은 로컬 광원(중심 1발)
+                    Vector3 irr = eD / Mathf.PI + AmbientAt(hn);
                     return new Vector3(albedo.x * irr.x, albedo.y * irr.y, albedo.z * irr.z);
                 }
                 return Sky.Radiance(d); // 미스 : 하늘
@@ -111,6 +117,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                     Vector3 d = Dirs[s];
                     sh.Accumulate(d, IncomingPath(p, d, ref rng), Weight);
                 }
+                if (Scene.lightCount > 0) BurstLights.AddDirectSH(ref sh, Scene, p, (uint)index);   // L2 직접광(SHJob 과 같은 규약)
                 Out[index] = sh;
             }
 
@@ -131,7 +138,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
                         break;
                     }
 
-                    acc += Vector3.Scale(tp, Vector3.Scale(alb, DirectAt(hp, hn)));
+                    Vector3 eD = DirectAt(hp, hn);
+                    if (Scene.lightCount > 0) eD = BurstLights.AddBounce(eD, Scene, hp, hn);   // L2: 바운스 표면의 로컬 광원
+                    acc += Vector3.Scale(tp, Vector3.Scale(alb, eD));
                     tp = Vector3.Scale(tp, alb);                              // throughput *= ρ
 
                     if (b + 1 >= Q.MaxBounces) break;

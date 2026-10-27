@@ -36,6 +36,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             try
             {
                 var baker = go.AddComponent<ProbeVolumeBaker>();
+                baker.localLights.source = LocalLightSource.None;   // 열린 씬의 라이트와 무관하게(테스트 격리)
                 baker.renderOnEnable = false;
                 baker.volumeSize = new Vector3(8f, 4f, 8f);
                 baker.probeSpacing = Vector3.one;
@@ -71,7 +72,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         }
 
         // 템플릿 0: 줄기 박스 3개(하나는 프로브 (0,0.1,0)·(0,1.1,0) 을 품음 → 무효) / 1: 지면 슬래브(윗면 y=0) / 2: 잎 카드(Excluded, 표시만)
-        static void SetupTemplates(ProbeVolumeBaker baker, Mesh box)
+        internal static void SetupTemplates(ProbeVolumeBaker baker, Mesh box)
         {
             var mats = new[]
             {
@@ -375,14 +376,14 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
         // ───────────────────────── 헬퍼 ─────────────────────────
 
-        static ProbeVolumeAsset Bake(ProbeVolumeBaker baker, List<ProbeVolumeAsset> made)
+        internal static ProbeVolumeAsset Bake(ProbeVolumeBaker baker, List<ProbeVolumeAsset> made)
         {
             var a = baker.BakeToAsset(out _);
             if (a != null) made.Add(a);
             return a;
         }
 
-        static void DestroyAsset(ProbeVolumeAsset a)
+        internal static void DestroyAsset(ProbeVolumeAsset a)
         {
             if (a == null) return;
             if (a.textures != null) foreach (var t in a.textures) if (t != null) Object.DestroyImmediate(t);
@@ -400,7 +401,11 @@ namespace HuskyLibs.CustomLightmapper.Bake
         static bool SamePacked(ProbeVolumeAsset x, ProbeVolumeAsset y)
         {
             if (x.shPacked.Length != y.shPacked.Length) return false;
-            for (int i = 0; i < x.shPacked.Length; i++) if (x.shPacked[i] != y.shPacked[i]) return false;
+            for (int i = 0; i < x.shPacked.Length; i++)   // 성분별 정확 비교(Vector4 != 는 ε 근사 — 비트 동일 판정에 못 씀)
+            {
+                Vector4 a = x.shPacked[i], b = y.shPacked[i];
+                if (a.x != b.x || a.y != b.y || a.z != b.z || a.w != b.w) return false;
+            }
             return true;
         }
 

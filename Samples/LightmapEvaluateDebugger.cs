@@ -59,6 +59,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         public void RunAllTests()
         {
             var sb = new System.Text.StringBuilder();
+            sb.AppendLine(ChartFlattenTests.RunAll());         // A3 차트 평탄화: 희소 솔버·Stretch·Planar 회귀·LSCM(평면/원통/구면)·겹침·MVC(구멍)·실패/퇴화(헤드리스)
             sb.AppendLine(LightmapEvaluateTests.RunAll());     // C2 토대(RayTri/BruteForce/AO/Direct)
             sb.AppendLine(BVHTests.RunAll());                   // C1 가속구조(BruteForce 정답 대조)
             sb.AppendLine(RadianceIndirectTests.RunAll());      // C2 Indirect(경로추적)
@@ -74,6 +75,15 @@ namespace HuskyLibs.CustomLightmapper.Bake
             sb.AppendLine(GpuBvhCompareTests.RunAll());          // G4 GPU 2단 BVH 순회 ≡ BurstTwoLevelBVH(실 ComputeBuffer 디스패치·compute 지원 필요)
             sb.AppendLine(GpuRadianceCompareTests.RunAll());     // G5 GPU 경로추적(AO/Direct/Indirect) ≡ Burst(실 ComputeBuffer 디스패치·compute 지원 필요)
             sb.AppendLine(GpuSHBakeCompareTests.RunAll());        // SH-G GPU CSSHBake per-probe SH9 ≡ BurstSHBaker(동일 방향셋·compute 지원 필요)
+            sb.AppendLine(GpuBakeLimitsTests.RunAll());           // G6-4 분할 디스패치 타일·순회 스택 요구량(헤드리스)
+            sb.AppendLine(AtlasBatchBakeTests.RunAll());          // G6-3b/G6-4 배치 베이크·분할 디스패치 ≡ 인스턴스별(비트 동일, URP·compute 필요)
+            sb.AppendLine(ProgressiveAccumulatorTests.RunAll());  // G6-5 적응·진행형 누적 엔진: 패스 일정·CPU 누적 ≡ 일괄(비트 동일)·적응 조기 종료·배치 무관(헤드리스)
+            sb.AppendLine(LightmapPostPlanTests.RunAll());        // G6-6 GPU 후처리 계획: Tier1 웨이브·Tier2 샘플/수집·dilation 모델 ≡ CPU 판(비트 동일, 헤드리스)
+            sb.AppendLine(ProgressiveBakeTests.RunAll());         // G6-5/6 Burst/GPU 누적·실베이크 진행형 ≡ 일괄·GPU 후처리 ≈ CPU(URP·compute 필요)
+            sb.AppendLine(BakeLightTests.RunAll());               // 로컬 광원 L1: Point/Spot/Rect/Disc 해석해·그림자·통합(null≡빈 배열, 누적 ≡ 일괄)(헤드리스)
+            sb.AppendLine(LocalLightBakeTests.RunAll());          // 로컬 광원 L1: Unity Light 변환·Burst/GPU 미러·실베이크(None<Mixed<Baked)(URP·compute 필요)
+            sb.AppendLine(SHLightProjectionTests.RunAll());       // 로컬 광원 L2: SH 직접광 투영 ≡ 격자 적분·입체각 상한·규약 일치(헤드리스)
+            sb.AppendLine(SHLocalLightTests.RunAll());            // 로컬 광원 L2: SH Burst ≈ 레퍼런스·GPU(CSSHDirect) ≈ Burst·프로브/인스턴스 베이커(compute 필요)
             sb.AppendLine(AlphaCutoutTests.RunAll());             // α 알파 컷아웃 any-hit: RayTriUV≡RayTri, CPU 해석적, Burst≡CPU, OFF 회귀
             sb.AppendLine(AlphaGpuCompareTests.RunAll());         // α GPU 알파 any-hit ≡ Burst(CSDirect, 무작위 없음 → 정확 일치·compute 지원 필요)
             sb.AppendLine(AtlasHdrOutputTests.RunAll());          // step8 최종 인코딩 RGBAHalf: 숨김 큐브 실베이크 HDR/LDR 대조(URP 셰이더 필요)
@@ -84,8 +94,13 @@ namespace HuskyLibs.CustomLightmapper.Bake
             sb.AppendLine(ProbeVolumeBakerTests.RunAll());        // Track B B1-3 볼륨 베이커: 에셋·직접 파이프라인 ≡·Excluded 토글·Texture3D·인스턴스 샘플·수렴·EXR·렌더러(+B1-4 폴백·픽셀 바인딩)
             sb.AppendLine(ProbeVolumeGpuSampleTests.RunAll());    // Track B B1-4 픽셀 볼륨 샘플 GPU ≡ CPU 미러(내부·텍셀 중심·클램프·페이드·normalBias·투과, 렌더 컨텍스트 필요)
             sb.AppendLine(VertexAOBakeTests.RunAll());            // Track B B1-5 템플릿 로컬 정점 AO: ≡ BurstAO 직접·고립 AO=1·천장 아래 AO≈0·양면·AO 메시·베이커 연동
+            sb.AppendLine(ProbeAlphaTests.RunAll());              // Track B B1-6 알파 잎 차폐: ᾱ=1 ≡ 알파 없음·ᾱ=0 ≡ 메시 제거(비트 동일)·체커 ≈0.5·정점 AO·베이커 머티리얼 경로·GPU
+            sb.AppendLine(SceneCollectPolicyTests.RunAll());      // C0 수집 정책(결정성·배타성·LOD·사유 우선순위·리포트 — 헤드리스)
             Debug.Log(sb.ToString(), this);
         }
+
+        [ContextMenu("Run Chart Flatten Tests (A3 LSCM_MVC)")]
+        public void RunChartFlattenTests() => Debug.Log(ChartFlattenTests.RunAll(), this);
 
         [ContextMenu("Run Self Tests")]
         public void RunSelfTests() => Debug.Log(LightmapEvaluateTests.RunAll(), this);
@@ -120,6 +135,16 @@ namespace HuskyLibs.CustomLightmapper.Bake
         [ContextMenu("Run GPU SH Bake Compare (SH-G)")]
         public void RunGpuSHBakeCompare() => Debug.Log(GpuSHBakeCompareTests.RunAll(), this);
 
+        [ContextMenu("Run GPU Batch Tests (G6-3b _ G6-4)")]
+        public void RunGpuBatchTests() => Debug.Log(GpuBakeLimitsTests.RunAll() + "\n" + AtlasBatchBakeTests.RunAll(), this);
+
+        [ContextMenu("Run Local Light Tests (Point _ Spot _ Area)")]
+        public void RunLocalLightTests() => Debug.Log(BakeLightTests.RunAll() + "\n" + LocalLightBakeTests.RunAll() + "\n" +
+                                                      SHLightProjectionTests.RunAll() + "\n" + SHLocalLightTests.RunAll(), this);
+
+        [ContextMenu("Run Adaptive _ Progressive _ GPU Post Tests (G6-5 _ G6-6)")]
+        public void RunProgressiveTests() => Debug.Log(ProgressiveAccumulatorTests.RunAll() + "\n" + LightmapPostPlanTests.RunAll() + "\n" + ProgressiveBakeTests.RunAll(), this);
+
         [ContextMenu("Run Alpha Cutout Tests (a)")]
         public void RunAlphaCutoutTests() => Debug.Log(AlphaCutoutTests.RunAll(), this);
 
@@ -135,10 +160,13 @@ namespace HuskyLibs.CustomLightmapper.Bake
         [ContextMenu("Run Atlas Bake Asset Test (step 9)")]
         public void RunAtlasBakeAssetTest() => Debug.Log(AtlasBakeAssetTests.RunAll(), this);
 
-        [ContextMenu("Run Probe Volume Tests (Track B B1-1 ~ B1-5)")]
+        [ContextMenu("Run Probe Volume Tests (Track B B1-1 ~ B1-6)")]
         public void RunProbeVolumeTests() =>
             Debug.Log(ProbeGridTests.RunAll() + "\n" + ProbeValidityTests.RunAll() + "\n" + ProbeVolumeBakerTests.RunAll()
-                      + "\n" + ProbeVolumeGpuSampleTests.RunAll() + "\n" + VertexAOBakeTests.RunAll(), this);
+                      + "\n" + ProbeVolumeGpuSampleTests.RunAll() + "\n" + VertexAOBakeTests.RunAll() + "\n" + ProbeAlphaTests.RunAll(), this);
+
+        [ContextMenu("Run Scene Collect Tests (C0)")]
+        public void RunSceneCollectTests() => Debug.Log(SceneCollectPolicyTests.RunAll(), this);
 
         [ContextMenu("Run BVH Mesh Test")]
         public void RunBVHMeshTest()

@@ -20,6 +20,8 @@
 
 ## 베이크 파이프라인 흐름 (`BakeAndApply`)
 
+v15.16 부터 본문은 단계 메서드로 나뉜다 — `BeginRun`(1·2·씬) → `PrepareInstance`(3 준비) → `FlushBatch` → `FinishInstance`(= `BlitInstance` + `RegisterInstance`) → `Compose`(3.3~4) → `EndRun`(기록·로그·정리·저장). 상태는 중첩 클래스 `BakeRun`. 진행형 미리보기는 같은 단계를 재사용한다(아래 '진행형').
+
 ```
 ResolveTargets()                    대상 MeshFilter 수집 (occluder 차집합 제외)
   │
@@ -28,14 +30,15 @@ ResolveTargets()                    대상 MeshFilter 수집 (occluder 차집합
   ├─ (mode별) 차폐 씬 구성:
   │      Radiance    → BuildWorldTris → BVH/BruteForce occluder + _sun
   │      RadianceGI  → BuildGiScene (InstancedRadianceScene + Burst/GPU 백엔드)
-  ├─ 3) 인스턴스 루프:
-  │      ParameterizationPipeline → DensityNormalizer → ShelfPacker
-  │      → UVAssembly.Assemble → TexelMapper.Map → BlitRegion(+디노이즈 가이드 수집)
-  │      → 시임 스티칭 입력 누적(Tier1 텍셀그룹 / Tier2 세그먼트)
-  │      → 렌더러에 uv2 메시 + ST(MaterialPropertyBlock) 적용
+  ├─ 3) 인스턴스 루프(준비): ParameterizationPipeline(seg, flatten) → DensityNormalizer → ShelfPacker
+  │      → UVAssembly.Assemble → TexelMapper.Map → PendingBake 대기열
+  │      └ 대기열 valid lumel ≥ bakeBatchLumels(0 = 매 인스턴스) 또는 끝 → Flush (v15.15 G6-3b):
+  │           BakeLumelsBatch(1패스, 배치 전체 BakePointsFull 1회 — 적응 샘플링이면 누적기, 아니면 BakePoints; GPU 는 gpuDispatchChunk 분할 디스패치·1 readback)
+  │           → ApplySsaaBatch(SSAA 2패스, 서브샘플 ≤4M 점씩)
+  │           → 인스턴스 순서대로 FinishInstance: BlitRegion(+디노이즈 가이드) · 시임 입력 누적 · uv2 메시 + ST(MPB) 적용
   ├─ 3.3) Denoise (À-trous joint bilateral, Burst/C#) — Radiance/RadianceGI 전용, Seam Stitch 이전
-  ├─ 3.4) Seam Stitch (Tier1 정점 / Tier2 모서리) — Dilation 이전
-  ├─ 3.5) Dilation (Burst/C#) — 거터/배경 텍셀 확장
+  ├─ 3.4) Seam Stitch (Tier1 정점 / Tier2 모서리) — Dilation 이전  ┐ gpuPostProcess 면 LightmapPostGpu 가
+  ├─ 3.5) Dilation (Burst/C#) — 거터/배경 텍셀 확장                 ┘ 페이지마다 한 번에(실패 시 CPU)
   ├─ 4) Texture2DArray 생성/갱신 + sharedMat 에 바인딩
   └─ 정리: occluder/GI 씬/GPU/Burst 리소스 Dispose
 ```
@@ -50,6 +53,7 @@ ResolveTargets()                    대상 MeshFilter 수집 (occluder 차집합
 | `targets` | `MeshFilter[]` | — | 비우면 자기 자신+자식의 MeshFilter 를 모두 수집 |
 | `occluders` | `MeshFilter[]` | — | 차폐 전용. 차폐 씬에만 참여, 베이크/스왑 대상 아님(지형·프롭·건물) |
 | `segmentation` | `SegmentationSettings` | `.Default` | 차트 분할 설정 |
+| `flatten` | `FlattenSettings` | `.Default` | 차트 평탄화 디스패치(v15.14): Planar → (겹침·L2 stretch > 1.005) LSCM → (겹침) MVC. `FoldoverOnly` = 겹칠 때만 LSCM |
 
 ### Allocation (LightmapAllocator)
 | 필드 | 타입 | 기본값 | 설명 |
@@ -106,6 +110,17 @@ ResolveTargets()                    대상 MeshFilter 수집 (occluder 차집합
 | `occluderKind` | `OccluderKind` | `BVH` | 차폐 백엔드. BVH=가속 / BruteForce=정답(느림, 교차검증) |
 | `bvhQuality` | `BVH.BuildQuality` | `Median` | BVH 분할 품질 |
 
+### Local Lights (v15.17 — Point · Spot · Area, Radiance·RadianceGI)
+| 필드 | 타입 | 기본값 | 설명 |
+|---|---|---|---|
+| `localLightSource` | `LocalLightSource`(v15.18 최상위 enum) | `Scene` | Scene = 로드된 씬의 켜진 Point/Spot/Area/Disc 라이트 · Listed = `localLights` · None = 로컬 광원 없음(구 거동). Directional 은 항상 제외(태양은 `lightDirection`…) |
+| `localLights` | `Light[]` | — | Listed 일 때 목록 |
+| `localLightsFollowBakeType` | `bool` | `false` | Unity Mode 따름: Baked = 직사+간접, Mixed = 간접만, Realtime = 제외 |
+| `areaLightSamples` | `int` (≥1) | `16` | 면광원 1차 직사 샘플(그림자 레이) 수 |
+| `softLightSamples` | `int` (≥1) | `8` | 그림자 반경(Baked Shadow Radius) 있는 Point/Spot 의 1차 직사 샘플 수 |
+
+수집 결과는 internal `LastBakeLights`, 완료 로그 `lights=P1 S0 R1 D0(Scene)`.
+
 ### Radiance GI (mode=RadianceGI — 경로추적 간접광)
 | 필드 | 타입 | 기본값 | 설명 |
 |---|---|---|---|
@@ -114,6 +129,29 @@ ResolveTargets()                    대상 MeshFilter 수집 (occluder 차집합
 | `skyColor` | `Color` | `(0.3,0.35,0.45)` | 하늘(미스 레이) 복사휘도, Linear RGB |
 | `defaultAlbedo` | `Color` | `(0.6,0.6,0.6)` | 머티리얼 색 못 읽을 때 per-mesh 기본 알베도(Linear) |
 | `radianceBackend` | `RadianceBackend` | `CPU` | GI 베이크 경로. Gpu=컴퓨트(대형 씬 최고속) / Burst=병렬 / CPU=기존 |
+
+### Bake 배치 · GPU 분할 (v15.15 — G6-3b · G6-4)
+| 필드 | 타입 | 기본값 | 설명 |
+|---|---|---|---|
+| `bakeBatchLumels` | `int` (≥0) | `1<<20` | valid lumel 이 이만큼 모이면 1패스·SSAA 를 한 번에 굽는다(GPU 1 업로드·1 readback, Burst 1 잡). 0 = 인스턴스마다(구 거동). 결과는 배치와 무관하게 비트 동일 |
+| `gpuDispatchChunk` | `int` (≥64) | `65536` | GPU 디스패치 1회당 점 수. 한 디스패치 한도(4.19M 점)·TDR 대비 분할. 결과는 분할과 무관하게 비트 동일 |
+
+GPU 백엔드는 `GpuScene.TraversalFits`(BVH 순회 스택 요구량 ≤ 32) 가 아니면 Burst 로 폴백(경고). 실제 사용 백엔드는 internal `LastBakeBackend`.
+
+### 적응 샘플링 · 진행형 (v15.16 — RadianceGI)
+| 필드 | 타입 | 기본값 | 설명 |
+|---|---|---|---|
+| `adaptiveSampling` | `bool` | `false` | 간접광을 패스로 누적하고 수렴한 텍셀(표준오차 ≤ threshold × 휘도)은 멈춤. `indirectSamples` = 상한. 끄면 구 거동(비트 동일) |
+| `samplesPerPass` | `int` (≥1) | `8` | 패스당 경로 수 — 적응 판정·진행형 미리보기 간격 |
+| `adaptiveMinSamples` | `int` (≥2) | `16` | 이 spp 전에는 판정하지 않음 |
+| `adaptiveThreshold` | `float` [0.001, 0.5] | `0.03` | 상대 표준오차 기준(직사+간접 휘도 대비) |
+| `progressivePreviewEveryPasses` | `int` (≥1) | `1` | 진행형 미리보기 재합성 간격(패스) |
+
+### GPU 후처리 (v15.16)
+| 필드 | 타입 | 기본값 | 설명 |
+|---|---|---|---|
+| `gpuPostProcess` | `bool` | `false` | 시임 스티칭(Tier1·Tier2) + dilation 을 `LightmapPost.compute` 로. 결과 = CPU 판(나눗셈 ULP 차이). 실패 시 CPU 폴백. denoise 는 CPU |
+| `postShader` | `ComputeShader` | null | 비우면 Resources("LightmapPost") → (에디터) 패키지 경로 |
 
 ### Result (read-only, `[SerializeField]`)
 | 필드 | 타입 | 설명 |
@@ -174,7 +212,10 @@ ResolveTargets()                    대상 MeshFilter 수집 (occluder 차집합
 | 메서드 | 설명 |
 |---|---|
 | `BakeAndApply()` | **메인 진입점.** 할당→베이크→적용 전체 파이프라인 실행 |
-| `RestoreOriginals()` | 적용된 메시/머티리얼/프로퍼티블록을 원본으로 복원 |
+| `RestoreOriginals()` | 적용된 메시/머티리얼/프로퍼티블록을 원본으로 복원(진행 중 진행형 세션은 먼저 정리) |
+| `BakeProgressive()` | (에디터, v15.16) **"Bake Progressive (Preview)"** — 패스 0 결과를 즉시 적용하고 `EditorApplication.update` 로 패스마다 누적·재합성, 끝나면 SSAA·최종 합성·저장 |
+| `CancelProgressiveBake()` | (에디터) **"Cancel Progressive Bake"** — 현재 spp 로 확정(SSAA·저장 생략) |
+| `BeginProgressive()` / `ProgressiveStep()` / `IsProgressiveRunning` | (public, v15.16) 진행형을 직접 구동(런타임·테스트). Begin = 준비 + 패스 0 + 미리보기, Step = 1패스(+주기적 재합성), 끝나면 false |
 | `GetDirectionLightFromLightComponent()` | 씬의 첫 Directional Light 에서 방향/색/강도를 필드로 복사 |
 | `RadianceDiffTest()` | **검증.** 같은 텍셀에서 BruteForce vs BVH radiance 픽셀 차이 측정(비트 일치 확인) |
 | `RadianceGiBackendDiffTest()` | **검증.** CPU vs Burst GI 베이크 텍셀 대조(백엔드 동등성) |
@@ -185,8 +226,12 @@ ResolveTargets()                    대상 MeshFilter 수집 (occluder 차집합
 | 메서드 | 반환 | 설명 |
 |---|---|---|
 | `BlitRegion(slice, valid, res, ox, oy, sidePx, lm, tint, giRadiance, guideNormal, guidePos)` | `void` | LumelMap 을 아틀라스 페이지의 (ox,oy) 영역에 blit. valid 텍셀만, 모드별 색 산출. guideNormal/guidePos 가 non-null 이면 디노이즈 가이드(월드 노멀·위치)도 동일 매핑으로 기록 |
-| `BakeGiLumelsBurst(lm)` | `Vector3[]` | valid lumel 을 NativeArray 로 모아 `BurstRadianceBaker.Bake` 병렬 처리 → li 인덱스 산란 |
-| `BakeGiLumelsGpu(lm)` | `Vector3[]` | Burst 미러. `DispatchRadianceGpu` 한 디스패치 + readback → li 인덱스 산란 |
+| `BakeLumelsBatch(batch)` | `Vector3[][]` | (v15.15) 배치 인스턴스들의 valid lumel 을 모아 `BakePoints` 1회 → 인스턴스별 li 인덱스 산란. 시드 `TexelSeed(seed, li)`(li = 인스턴스 안 인덱스) |
+| `BakePoints(pts, nrm, seeds, n)` | `Vector3[]` | 임의 점 → 조도. 백엔드 분기(GPU `DispatchRadianceGpu` → Burst `BurstRadianceBaker.Bake` → CPU) — 1패스·SSAA 공용 |
+| `BakePointsFull(pts, nrm, seeds, n)` | `Vector3[]` | (v15.16) 1패스·SSAA 공통 진입점: RadianceGI + `adaptiveSampling` 이면 `ProgressiveAccumulator`(백엔드 `CreateAccumBackend` — GPU 상주 `GpuPathAccum` → `BurstPathAccum` → `CpuPathAccum`), 아니면 `BakePoints` |
+| `CollectPoints` / `ScatterRadiance` | — | (v15.16) 배치 valid lumel 압축(원점 = 표면 + bias, 시드 TexelSeed) ↔ 인스턴스별 li 배열 산란 |
+| `Compose(run)` / `StitchAndDilateCpu` / `StitchAndDilateGpu` | — | (v15.16) 후처리 + 아틀라스 업로드. GPU 판은 전 페이지 복사본으로 돌려 하나라도 실패하면 원본 그대로 CPU 판 |
+| `ApplySsaaBatch(batch, rads, …)` / `BuildSsaaJob` / `ResolveSsaa` | — | (v15.15) 인스턴스별 엣지 마스크 → 서브샘플을 배치 목록에 이어 붙여(≤4M 점씩) `BakePoints` → 평균으로 덮어쓰기 |
 | `BuildGiScene(filters)` | `void` | 유니크 메시+알베도+인스턴스 → `InstancedRadianceScene` + (선택)Burst/GPU 백엔드 구성 |
 | `EnsureMaterial()` | `void` | `CustomLightmapper/LightmapDebug` 셰이더로 `sharedMat` 지연 생성 |
 
@@ -194,7 +239,7 @@ ResolveTargets()                    대상 MeshFilter 수집 (occluder 차집합
 
 | 메서드 | 반환 | 설명 |
 |---|---|---|
-| `DispatchRadianceGpu(gpuScene, cs, kernel, sun, sky, q, pts, nrm, seeds, n, io)` | `Vector3[]` | `CSRadiance` 디스패치 공통. grow-on-demand 버퍼(`io`), 앞 n개만 업로드/AsyncGPUReadback |
+| `DispatchRadianceGpu(gpuScene, cs, kernel, sun, sky, q, pts, nrm, seeds, n, io, chunk)` | `Vector3[]` | `CSRadiance` 디스패치 공통. grow-on-demand 버퍼(`io`), 앞 n개만 업로드 → `GpuBakeLimits.Tiles(n, chunk)` 분할 디스패치(`_Base` 오프셋, 끝나면 0 복원) → AsyncGPUReadback 1회 |
 | `LoadPathCompute()` | `ComputeShader` | `Resources.Load<ComputeShader>("PathTrace")` (Shaders/Resources 배치, 에디터·빌드 공통) |
 
 ### 지오메트리/유틸 정적 헬퍼

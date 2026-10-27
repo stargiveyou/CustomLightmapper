@@ -16,6 +16,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
         [SerializeField] Mesh targetMesh;
 
         public SegmentationSettings settings = SegmentationSettings.Default;
+        [Tooltip("A3 평탄화 디스패치 설정(Planar → LSCM → MVC).")]
+        public FlattenSettings flatten = FlattenSettings.Default;
 
         [Header("Debug View")]
         [Tooltip("선택 시 씬뷰에 차트별 경계 루프를 폴리라인으로 그린다.")]
@@ -38,6 +40,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         ChartMesh[] cachedCharts;
         bool[] cachedFoldover;            // 차트별 foldover 여부
         FlattenMethod[] cachedMethods;    // 차트별 사용된 평탄화 방법
+        FlattenStats[] cachedStats;       // 차트별 평탄화 기록(단계별 stretch·겹침·반복)
 
         Mesh ResolveMesh()
         {
@@ -62,7 +65,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             {
                 var seg = ChartSegementer.GetResult(he, settings);
                 cachedCharts = ChartMeshBuilder.BuildAll(he, seg);   // ChartMesh 가 데이터를 복사 보관
-                cachedMethods = ChartFlattener.FlattenAll(cachedCharts); // Planar→(foldover)LSCM→MVC 디스패치
+                cachedMethods = ChartFlattener.FlattenAll(cachedCharts, flatten, out cachedStats); // Planar→(겹침·고왜곡)LSCM→(겹침)MVC 디스패치
             }
             finally
             {
@@ -93,9 +96,13 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 int loopCnt = cm.Loops != null ? cm.Loops.Count : 0;
                 int outerVerts = (loopCnt > 0) ? cm.Loops[0].Length : 0;
                 string method = (cachedMethods != null && i < cachedMethods.Length) ? cachedMethods[i].ToString() : "?";
-                sb.AppendLine($"[{(report.HasFoldover ? "FOLD" : " OK ")}] chart {i}: via={method}, loops={loopCnt}, outerVerts={outerVerts}, {report}");
+                string st = (cachedStats != null && i < cachedStats.Length) ? $", {cachedStats[i]}" : "";
+                sb.AppendLine($"[{(report.HasFoldover ? "FOLD" : " OK ")}] chart {i}: via={method}, loops={loopCnt}, outerVerts={outerVerts}, {report}{st}");
             }
-            sb.AppendLine($"--- foldoverCharts={foldoverCharts}, degenerateTriangles={degenerateTriangles}");
+            int nP = 0, nL = 0, nM = 0;
+            if (cachedMethods != null)
+                foreach (var m in cachedMethods) { if (m == FlattenMethod.Planar) nP++; else if (m == FlattenMethod.LSCM) nL++; else nM++; }
+            sb.AppendLine($"--- foldoverCharts={foldoverCharts}, degenerateTriangles={degenerateTriangles}, methods Planar={nP} LSCM={nL} MVC={nM}");
 
             if (foldoverCharts > 0)
                 Debug.LogWarning(sb.ToString(), this);

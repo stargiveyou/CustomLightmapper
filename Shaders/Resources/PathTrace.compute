@@ -9,6 +9,7 @@
 //     Script/LightmapEvaluate/Burst/BurstIndirect.cs    (Indirect 경로추적 루프)
 //     Script/LightmapEvaluate/Burst/BurstSky.cs         (Sky)
 //     Script/LightmapEvaluate/Burst/Occluders/BurstTwoLevelBVH.cs (ClosestHit 위치/노멀/알베도)
+//     Runtime/LightmapEvaluate/Lights/BakeLight.cs        (LightSampling — 로컬 광원 Point/Spot/Rect/Disc, DirectAll)
 //
 // 커널:
 //   CSAO       : AO       → _AoOut[i]       (float)   가시성 평균
@@ -16,10 +17,14 @@
 //   CSIndirect : Indirect → _IndirectOut[i] (float3)  경로추적 + RR
 //   CSRadiance : Direct+Indirect → _RadianceOut[i] (float3)  라이트맵 조도(1회 readback)
 //                = BurstRadianceBaker.Bake(=Direct+Indirect) 정합. AtlasApplyDebug GPU 백엔드용.
+//   CSRadianceAccum : 이어 굽기(진행형·적응 샘플링) — 점별 RNG 상태·합·휘도 제곱합 in/out(GPU 상주),
+//                _Active 인덱스로 활성 점만. = BurstIndirect.AccumJob 정합(첫 패스는 직사광 + 상태 초기화).
 //   CSSHBake   : per-probe SH9 → _ShOut[i] (GpuSH9=9×float3)  구면 입사조도 SH9 프로젝션
 //                = BurstSHBaker.SHJob 정합(SH-G). RNG 없음(고정 피보나치 _Dirs) → 결정적.
 //   CSSHBakeMulti : per-probe SH9 다바운스(경로추적) → _ShOut[i]
 //                = BurstSHBaker.SHPathJob 정합. 방향당 경로 1개, (프로브,방향) 해시 시드(_ShSeed 기반).
+//   CSSHDirect : L2 — Direct 플래그 로컬 광원의 프로브 직접광을 _ShOut[i] 에 더함(CSSHBake/Multi 뒤 디스패치)
+//                = LightSampling.AddDirectSH / BurstLights.AddDirectSH 정합. 별도 커널 = SH 커널의 레지스터 압박 불변.
 //
 // 시드 규약(G6-2): 호출측이 StructuredBuffer<uint> _Seeds 로 per-lumel 시드를 명시 공급.
 //   RngInit(_Seeds[i]) — Burst 의 seed=seed+li*const 와 1:1(디스패치 인덱스 기반 _BaseSeed 폐기).
@@ -39,8 +44,10 @@
 #pragma kernel CSDirect
 #pragma kernel CSIndirect
 #pragma kernel CSRadiance
+#pragma kernel CSRadianceAccum
 #pragma kernel CSSHBake
 #pragma kernel CSSHBakeMulti
+#pragma kernel CSSHDirect
 
 #define PI    3.14159265358979323846
 #define INF   3.402823466e38          // float.MaxValue (ClosestHit tmax 초기값)
@@ -135,6 +142,7 @@ StructuredBuffer<float3> _Normals;
 StructuredBuffer<uint>   _Valid;                  // 1=유효, 0=스킵
 StructuredBuffer<uint>   _Seeds;                  // G6-2: per-lumel 명시 시드(호출측 공급) → RngInit(_Seeds[i])
 int  _Count;
+int  _Base;                                       // G6-4: CSRadiance 분할 디스패치 오프셋(스레드 i → 점 _Base+i). 호출측이 매번 설정·복원(기본 0)
 
 // ---- SH-G 베이크 입력 (CSSHBake 전용) ----
 // 피보나치 방향셋은 CPU(BurstSHBaker.FibonacchiSphere)에서 계산해 업로드 → Burst 와 동일 방향(sqrt/sin/cos 발산 제거).
@@ -161,6 +169,30 @@ float  _SunIntensity;
 //   1차 직사광(CSDirect/CSRadiance)에만 적용. 바운스 NEE(EvalIndirect)는 1발 유지.
 int   _DirectSamples;
 float _SunHalfAngle;                              // 각지름/2 (라디안)
+
+// ---- 로컬 광원(BakeLight 1:1, 112B — tight packing) ----
+//   GpuScene.BindLighting 이 _Lights(광원 0개면 더미 1개)·_LightCount 배선. DirectAll 만 참조(SH 커널은 태양 전용 DirectNEE 유지).
+struct GpuLight
+{
+    int    type;            // 0 Point · 1 Spot · 2 Rect · 3 Disc
+    float3 position;
+    float3 direction;       // Spot 축 · 면광원 방출 방향
+    float3 right;
+    float3 up;
+    float3 color;           // Linear(강도 제외)
+    float  intensity;
+    float  range;           // Point/Spot 범위 창(0 = 없음)
+    float  radius;          // Point/Spot 그림자 반경 · Disc 반지름
+    float  width;
+    float  height;
+    float  cosOuter;
+    float  cosInner;
+    int    samples;         // 1차 직사 샘플 수
+    int    flags;           // 1 = 1차 직사 포함 · 2 = 그림자
+    int    pad0, pad1, pad2;
+};
+StructuredBuffer<GpuLight> _Lights;
+int _LightCount;
 
 // ---- 하늘(BurstSky) ----
 int    _SkyType;                                  // 0=uniform, 1=gradient
@@ -625,84 +657,225 @@ float3 SunConeDirection(float3 L, float3 t, float3 b, float cosHalf, int i, int 
     return normalize(t * (sinT * cos(phi)) + b * (sinT * sin(phi)) + L * cosT);
 }
 
-// 1차 직사광 — 태양 원반을 _DirectSamples 발로 샘플링(가시도 0~1 연속).
-//
-// ⚠ 구조 주의(GPU 한정): 하드/소프트를 **하나의 루프**로 합쳤다. 분기마다 DirectNEE 를 따로
-//   호출하면 TlasOccluded 가 두 번 인라인되어 순회 스택이 2벌 더 live → **X4714 재발**한다
-//   (v14.5 에서 해소한 레지스터 압박). 또 이른 return 을 없애 fxc X4000 false-positive 도 피한다.
-//   CPU/Burst 는 인라인 압박이 없어 EvaluateDirect 로 위임하는 구조를 유지한다.
-//
-// soft=false 일 때 N=1·d=L(정규화 재적용 없음)·o=p+n*1e-3 → DirectNEE 와 **비트동일**.
-float3 DirectNEESampled(float3 p, float3 n, uint seed)
+// ── 로컬 광원 미러(LightSampling — BakeLight.cs) ──
+// LightSampling.Attenuation: 역제곱 × 범위 창 × 스포트 각(URP 식). l = 수신점 → 광원 단위 벡터.
+float LightAtten(GpuLight Lt, float d2, float3 l)
 {
-    float3 L = -normalize(_SunDir);
-    bool soft = (_DirectSamples > 1 && _SunHalfAngle > 0.0);
-    int  N    = soft ? _DirectSamples : 1;
-
-    float3 t = float3(0, 0, 0), b = float3(0, 0, 0);
-    float cosHalf = 1.0, rot = 0.0;
-    if (soft)
+    float atten = 1.0 / max(d2, 1e-4);
+    if (Lt.range > 0.0)
     {
-        SunBasis(L, t, b);
-        cosHalf = cos(_SunHalfAngle);
-        rot = SunConeRotation(seed);
+        float f = d2 / (Lt.range * Lt.range);
+        float s = saturate(1.0 - f * f);
+        atten *= s * s;
     }
-
-    float3 o = p + n * 1e-3;
-    float sum = 0.0;
-    [loop] for (int i = 0; i < N; i++)
+    if (Lt.type == 1)
     {
-        float3 d = soft ? SunConeDirection(L, t, b, cosHalf, i, N, rot) : L;
-        float ndl = dot(d, n);
-        if (ndl > 0.0 && !TlasOccluded(o, d, 1e30)) sum += ndl;
+        float sd = -dot(Lt.direction, l);
+        float s2 = saturate((sd - Lt.cosOuter) / max(Lt.cosInner - Lt.cosOuter, 1e-4));
+        atten *= s2 * s2;
     }
-    return _SunColor * _SunIntensity * (sum / float(N));
+    return atten;
+}
+
+// LightSampling.Disk: 단위 원판 i/N 번째 점(u1 층화 반지름 √u1 · 황금비 각 + 회전)
+float2 LightDisk(int i, int n, float rot)
+{
+    float u1 = (float(i) + 0.5) / float(n);
+    float u2 = float(i) * 0.6180339887498949 + rot;
+    u2 -= floor(u2);
+    float r = sqrt(u1);
+    float phi = 2.0 * PI * u2;
+    return float2(r * cos(phi), r * sin(phi));
+}
+
+// LightSampling.AreaSample: Rect = 층화 가로 × 황금비 세로, Disc = 원판 × 반지름
+float2 LightAreaSample(GpuLight Lt, int i, int n, float rot)
+{
+    if (Lt.type == 2)
+    {
+        float u1 = (float(i) + 0.5) / float(n);
+        float u2 = float(i) * 0.6180339887498949 + rot;
+        u2 -= floor(u2);
+        return float2((u1 - 0.5) * Lt.width, (u2 - 0.5) * Lt.height);
+    }
+    float2 xy = LightDisk(i, n, rot);
+    return float2(xy.x * Lt.radius, xy.y * Lt.radius);
 }
 
 // ============================================================================
-// EvalIndirect — BurstIndirect.IndirectJob 경로추적 루프 미러(π 상쇄·NEE·RR).
-//   CSIndirect / CSRadiance 공용(단일 진실원). RNG 상태 s 는 inout(호출측이 _Seeds[i] 로 초기화).
-//   결과는 IndirectSamples 로 평균한 간접 조도(점 알베도 미적용).
+// DirectAll — 직사광 통합(태양 + 로컬 광원). RadianceCore.EvaluateDirectPrimary(1차) · TracePath 바운스 NEE 미러.
+//   primary=true : 태양 원반(_DirectSamples·_SunHalfAngle) + Direct 플래그 광원(광원별 samples, 위상 = SunConeRotation(seed))
+//   primary=false: 태양 1발 + 전 광원 중심 1발(바운스 — 위상 0)
+//   ⚠ 구조 주의(GPU 한정): 그림자 레이 호출부(TlasOccluded)는 이 함수에 **단 1곳** — 광원(태양 = -1)·샘플을 하나의 중첩 루프로 돈다.
+//     광원/분기마다 TlasOccluded 를 따로 부르면 순회 스택이 여러 벌 인라인돼 X4714(레지스터 압박)가 재발한다(v14.5 해소분).
+//   광원 0개면: primary → 구 DirectNEESampled 와, primary=false → DirectNEE 와 같은 연산(E = 0 + 태양항).
+// ============================================================================
+float3 DirectAll(float3 p, float3 n, uint seed, bool primary)
+{
+    float3 o  = p + n * 1e-3;
+    float3 Ls = -normalize(_SunDir);
+    bool sunSoft = primary && (_DirectSamples > 1 && _SunHalfAngle > 0.0);
+    float3 st = float3(0, 0, 0), sb = float3(0, 0, 0);
+    float cosHalf = 1.0;
+    float rot = primary ? SunConeRotation(seed) : 0.0;
+    if (sunSoft)
+    {
+        SunBasis(Ls, st, sb);
+        cosHalf = cos(_SunHalfAngle);
+    }
+
+    float3 E = float3(0, 0, 0);
+    [loop] for (int li = -1; li < _LightCount; li++)
+    {
+        GpuLight Lt = (GpuLight)0;
+        int    kind = -1;          // -1 기여 없음 · 0 태양 · 1 point/spot · 2 면광원
+        int    N = 0;
+        bool   shadows = true;
+        float  coef = 0.0;         // point/spot: ndl × 감쇠
+        float  area = 0.0;
+        float3 lt = float3(0, 0, 0), lb = float3(0, 0, 0);
+
+        if (li < 0)
+        {
+            kind = 0;
+            N = sunSoft ? _DirectSamples : 1;
+        }
+        else
+        {
+            Lt = _Lights[li];
+            shadows = (Lt.flags & 2) != 0;
+            bool use = (Lt.intensity > 0.0) && (!primary || (Lt.flags & 1) != 0);
+            int ns = primary ? Lt.samples : 1;
+            if (use && Lt.type <= 1)
+            {
+                float3 toL = Lt.position - p;
+                float d2 = dot(toL, toL);
+                if (d2 > 1e-12)
+                {
+                    float3 l = toL / sqrt(d2);
+                    float ndl = dot(n, l);
+                    float atten = LightAtten(Lt, d2, l);
+                    if (ndl > 0.0 && atten > 0.0)
+                    {
+                        kind = 1;
+                        coef = ndl * atten;
+                        N = (ns > 1 && Lt.radius > 0.0) ? ns : 1;
+                        if (N > 1) SunBasis(l, lt, lb);
+                    }
+                }
+            }
+            else if (use && dot(Lt.direction, p - Lt.position) > 0.0)
+            {
+                area = (Lt.type == 2) ? Lt.width * Lt.height : PI * Lt.radius * Lt.radius;
+                if (area > 0.0) { kind = 2; N = max(1, ns); }
+            }
+        }
+
+        float acc = 0.0;
+        [loop] for (int i = 0; i < N; i++)
+        {
+            float3 d;
+            float tmax;
+            float w;
+            if (kind == 0)
+            {
+                d = sunSoft ? SunConeDirection(Ls, st, sb, cosHalf, i, N, rot) : Ls;
+                w = dot(d, n);
+                tmax = 1e30;
+            }
+            else
+            {
+                float3 q;
+                w = 1.0;
+                if (kind == 1)
+                {
+                    q = Lt.position;
+                    if (N > 1)
+                    {
+                        float2 xy = LightDisk(i, N, rot);
+                        q = Lt.position + lt * (xy.x * Lt.radius) + lb * (xy.y * Lt.radius);
+                    }
+                }
+                else
+                {
+                    float2 xy = (N > 1) ? LightAreaSample(Lt, i, N, rot) : float2(0, 0);
+                    q = Lt.position + Lt.right * xy.x + Lt.up * xy.y;
+                    float3 wv = q - p;
+                    float d2 = dot(wv, wv);
+                    w = 0.0;
+                    if (d2 > 1e-12)
+                    {
+                        float3 wn = wv / sqrt(d2);
+                        float cosP = dot(n, wn);
+                        float cosL = -dot(Lt.direction, wn);
+                        if (cosP > 0.0 && cosL > 0.0) w = cosP * cosL / max(d2, 1e-4);
+                    }
+                }
+                float3 v = q - o;
+                float dq = length(v);
+                if (dq <= 1e-6) w = 0.0;
+                d = v / max(dq, 1e-6);
+                tmax = dq - 1e-3;
+            }
+            if (w > 0.0 && (!shadows || !TlasOccluded(o, d, tmax))) acc += w;
+        }
+
+        if (kind == 0)      E += _SunColor * _SunIntensity * (acc / float(N));
+        else if (kind == 1) E += Lt.color * Lt.intensity * (coef * (acc / float(N)));
+        else if (kind == 2) E += Lt.color * Lt.intensity * min(area * (acc / float(N)), PI);
+    }
+    return E;
+}
+
+// ============================================================================
+// TracePath — 간접 경로 1개(BurstIndirect.TracePath / RadianceCore.TracePath 미러: π 상쇄·NEE·RR).
+//   EvalIndirect(CSIndirect/CSRadiance)와 CSRadianceAccum(이어 굽기)의 단일 진실원. RNG 상태 s 는 inout.
+// ============================================================================
+float3 TracePath(float3 p, float3 n, inout uint s)
+{
+    float3 acc = float3(0, 0, 0);
+    float3 tp  = float3(1, 1, 1);
+    float3 dir = CosineHemisphere(n, s);
+    float3 o   = p + n * _RayBias;
+
+    // 바운스 루프: b+1>=_MaxBounces 또는 미스 또는 RR 로 반드시 종료(캡은 안전장치).
+    [loop] for (int b = 0; b < 1024; b++)
+    {
+        float3 hp, hn, alb;
+        if (!ClosestHitNA(o, dir, 0.0, hp, hn, alb))   // tmin=0.0 : G5 경로추적 거동 보존
+        {
+            acc += tp * SkyRadiance(dir) * PI;      // 미스: 하늘(π)
+            break;
+        }
+
+        float3 eD = DirectAll(hp, hn, 0u, false);       // 태양 + 로컬 광원(중심 1발) — 광원 0개면 DirectNEE 와 같은 연산
+        acc += tp * (alb * eD);
+        tp = tp * alb;                              // throughput *= ρ
+
+        if (b + 1 >= _MaxBounces) break;
+
+        if (b + 1 >= _RRStartDepth)
+        {
+            float pSurv = clamp(max(tp.x, max(tp.y, tp.z)), 0.05, 1.0);
+            if (RngNext(s) > pSurv) break;
+            tp /= pSurv;
+        }
+
+        dir = CosineHemisphere(hn, s);
+        o = hp + hn * _RayBias;
+    }
+    return acc;
+}
+
+// ============================================================================
+// EvalIndirect — BurstIndirect.IndirectJob 미러. CSIndirect / CSRadiance 공용.
+//   RNG 상태 s 는 inout(호출측이 _Seeds[i] 로 초기화). 결과는 IndirectSamples 로 평균한 간접 조도(점 알베도 미적용).
 // ============================================================================
 float3 EvalIndirect(float3 p, float3 n, inout uint s)
 {
     float3 sum = float3(0, 0, 0);
-
     [loop] for (int sp = 0; sp < _IndirectSamples; sp++)
-    {
-        float3 acc = float3(0, 0, 0);
-        float3 tp  = float3(1, 1, 1);
-        float3 dir = CosineHemisphere(n, s);
-        float3 o   = p + n * _RayBias;
-
-        // 바운스 루프: b+1>=_MaxBounces 또는 미스 또는 RR 로 반드시 종료(캡은 안전장치).
-        [loop] for (int b = 0; b < 1024; b++)
-        {
-            float3 hp, hn, alb;
-            if (!ClosestHitNA(o, dir, 0.0, hp, hn, alb))   // tmin=0.0 : G5 경로추적 거동 보존
-            {
-                acc += tp * SkyRadiance(dir) * PI;      // 미스: 하늘(π)
-                break;
-            }
-
-            float3 eD = DirectNEE(hp, hn);
-            acc += tp * (alb * eD);
-            tp = tp * alb;                              // throughput *= ρ
-
-            if (b + 1 >= _MaxBounces) break;
-
-            if (b + 1 >= _RRStartDepth)
-            {
-                float pSurv = clamp(max(tp.x, max(tp.y, tp.z)), 0.05, 1.0);
-                if (RngNext(s) > pSurv) break;
-                tp /= pSurv;
-            }
-
-            dir = CosineHemisphere(hn, s);
-            o = hp + hn * _RayBias;
-        }
-        sum += acc;
-    }
+        sum += TracePath(p, n, s);
     return sum / (float)_IndirectSamples;
 }
 
@@ -740,8 +913,8 @@ void CSDirect(uint3 id : SV_DispatchThreadID)
     if ((int)i >= _Count) return;
     if (_Valid[i] == 0) { _DirectOut[i] = float3(0, 0, 0); return; }
 
-    // _DirectSamples≤1 || _SunHalfAngle≤0 이면 내부에서 단발 경로(= 기존 결과 비트동일).
-    _DirectOut[i] = DirectNEESampled(_Points[i], _Normals[i], _Seeds[i]);
+    // 태양(_DirectSamples≤1 || _SunHalfAngle≤0 이면 단발) + Direct 플래그 로컬 광원. 광원 0개면 기존 결과와 같은 연산.
+    _DirectOut[i] = DirectAll(_Points[i], _Normals[i], _Seeds[i], true);
 }
 
 // ============================================================================
@@ -768,19 +941,74 @@ void CSIndirect(uint3 id : SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void CSRadiance(uint3 id : SV_DispatchThreadID)
 {
-    uint i = id.x;
+    uint i = id.x + (uint)_Base;   // 분할 디스패치: 같은 버퍼·같은 점별 시드 → 분할 방식과 무관하게 비트 동일
     if ((int)i >= _Count) return;
     if (_Valid[i] == 0) { _RadianceOut[i] = float3(0, 0, 0); return; }
 
     float3 p = _Points[i];
     float3 n = _Normals[i];
 
-    // 1차 직사광만 원반 샘플링(_DirectSamples≤1 이면 DirectNEE 그대로 = 기존 비트동일).
-    float3 direct = DirectNEESampled(p, n, _Seeds[i]);
+    // 1차 직사광 = 태양(원반 샘플링) + Direct 플래그 로컬 광원(광원 0개면 구 DirectNEESampled 와 같은 연산).
+    float3 direct = DirectAll(p, n, _Seeds[i], true);
     uint s = RngInit(_Seeds[i]);
     float3 indirect = EvalIndirect(p, n, s);
 
     _RadianceOut[i] = direct + indirect;
+}
+
+// ============================================================================
+// CSRadianceAccum — 이어 굽기(진행형·적응 샘플링, BurstIndirect.AccumJob 미러).
+//   스레드 j → 점 i = _Active[_Base + j]. 점별 상태(_AccState)·합(_AccSum)·경로 휘도 제곱합(_AccM2)을
+//   읽어 경로 _PassSamples 개를 더 누적하고 되쓴다(GPU 상주 — 패스마다 _Active 만 갱신).
+//   _AccumFirst ≠ 0(첫 패스): 직사광 _AccDirect[i] = DirectAll(primary, CSRadiance 와 같은 식) +
+//   상태 = RngInit(_Seeds[i]) · 합 0 에서 시작. 최종 조도 = direct + sum / count(호출측).
+// ============================================================================
+StructuredBuffer<int>      _Active;
+RWStructuredBuffer<uint>   _AccState;
+RWStructuredBuffer<float3> _AccSum;
+RWStructuredBuffer<float>  _AccM2;
+RWStructuredBuffer<float3> _AccDirect;
+int _PassSamples;
+int _AccumFirst;
+
+[numthreads(64, 1, 1)]
+void CSRadianceAccum(uint3 id : SV_DispatchThreadID)
+{
+    uint j = id.x + (uint)_Base;
+    if ((int)j >= _Count) return;
+    uint i = (uint)_Active[j];
+
+    float3 p = _Points[i];
+    float3 n = _Normals[i];
+
+    uint   s;
+    float3 sum;
+    float  m2;
+    if (_AccumFirst != 0)
+    {
+        _AccDirect[i] = DirectAll(p, n, _Seeds[i], true);
+        s = RngInit(_Seeds[i]);
+        sum = float3(0, 0, 0);
+        m2 = 0.0;
+    }
+    else
+    {
+        s = _AccState[i];
+        sum = _AccSum[i];
+        m2 = _AccM2[i];
+    }
+
+    [loop] for (int k = 0; k < _PassSamples; k++)
+    {
+        float3 acc = TracePath(p, n, s);
+        sum += acc;
+        float l = 0.2126 * acc.x + 0.7152 * acc.y + 0.0722 * acc.z;   // RadianceCore.Luminance
+        m2 += l * l;
+    }
+
+    _AccState[i] = s;
+    _AccSum[i] = sum;
+    _AccM2[i] = m2;
 }
 
 // ============================================================================
@@ -820,7 +1048,7 @@ float3 ShIncoming(float3 p, float3 d)
     float3 result = SkyRadiance(d);                         // 미스 기본값(하늘)
     if (ClosestHitNA(p, d, 1e-4, hp, hn, alb))
     {
-        float3 irr = DirectNEE(hp, hn) / PI + SkyRadiance(hn);   // ρ/π·(태양(그림자 포함) + π·하늘 앰비언트)
+        float3 irr = DirectAll(hp, hn, 0u, false) / PI + SkyRadiance(hn);   // ρ/π·(태양 + 로컬 광원(L2, 중심 1발) + π·하늘 앰비언트) — 광원 0개면 DirectNEE 와 같은 연산
         result = alb * irr;
     }
     return result;                                          // 단일 반환(fxc X4000 false-positive 회피)
@@ -902,7 +1130,7 @@ float3 ShIncomingPath(float3 p, float3 d, inout uint s)
             break;
         }
 
-        acc += tp * (alb * DirectNEE(hp, hn));
+        acc += tp * (alb * DirectAll(hp, hn, 0u, false));   // 태양 + 로컬 광원(L2) — 광원 0개면 DirectNEE 와 같은 연산
         tp = tp * alb;                                  // throughput *= ρ
 
         if (b + 1 >= _MaxBounces) break;
@@ -962,3 +1190,130 @@ void CSSHBakeMulti(uint3 id : SV_DispatchThreadID)
     sh.c4 = c4; sh.c5 = c5; sh.c6 = c6; sh.c7 = c7; sh.c8 = c8;
     _ShOut[i] = sh;
 }
+
+// ============================================================================
+// CSSHDirect — L2: 로컬 광원 직접광 SH 투영(LightSampling.ProjectSH / AddDirectSH 미러). 스레드 = 프로브.
+//   _ShOut[i] 를 읽어 Direct 플래그 광원을 광원 순서대로 더하고 되쓴다(CSSHBake/CSSHBakeMulti 다음에 디스패치).
+//   Point/Spot: c += E⊥·Y(ω)/N (E⊥ = color·I·감쇠, 반경이면 원판 샘플 방향) · Rect/Disc: c += L·Y(ω)·dΩ, dΩ = scale·cosθL/max(d²,1e-4),
+//   scale = A/N (기하 입체각 합 상한 2π). 위상 = SunConeRotation(i + 1). 그림자 레이 원점 = 프로브 점, 길이 |q − p| − 1e-3.
+//   그림자 레이 호출부 1곳(광원·샘플 중첩 루프).
+// ============================================================================
+void ShAddRadiance(inout GpuSH9 sh, float3 d, float3 L, float w)   // SH9.Accumulate 미러: c += L·y·w
+{
+    float y0, y1, y2, y3, y4, y5, y6, y7, y8;
+    ShBasis(d, y0, y1, y2, y3, y4, y5, y6, y7, y8);
+    sh.c0 += L * y0 * w;
+    sh.c1 += L * y1 * w;
+    sh.c2 += L * y2 * w;
+    sh.c3 += L * y3 * w;
+    sh.c4 += L * y4 * w;
+    sh.c5 += L * y5 * w;
+    sh.c6 += L * y6 * w;
+    sh.c7 += L * y7 * w;
+    sh.c8 += L * y8 * w;
+}
+
+float3 ShAreaPoint(GpuLight Lt, int i, int n, float rot)   // LightSampling.AreaPoint 미러(N = 1 이면 중심)
+{
+    float2 xy = (n > 1) ? LightAreaSample(Lt, i, n, rot) : float2(0, 0);
+    return Lt.position + Lt.right * xy.x + Lt.up * xy.y;
+}
+
+[numthreads(64, 1, 1)]
+void CSSHDirect(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if ((int)i >= _Count) return;
+
+    float3 p = _Points[i];
+    GpuSH9 sh = _ShOut[i];
+    float rot = SunConeRotation(i + 1u);
+
+    [loop] for (int li = 0; li < _LightCount; li++)
+    {
+        GpuLight Lt = _Lights[li];
+        if ((Lt.flags & 1) == 0 || Lt.intensity <= 0.0) continue;
+        bool shadows = (Lt.flags & 2) != 0;
+
+        int    kind = -1;                 // 1 point/spot · 2 면광원
+        int    N = 0;
+        float3 e = float3(0, 0, 0);       // point/spot: E⊥ · 면광원: 방출 휘도
+        float  w0 = 0.0;                  // point/spot: 1/N · 면광원: scale
+        float3 lt = float3(0, 0, 0), lb = float3(0, 0, 0);
+
+        if (Lt.type <= 1)
+        {
+            float3 toL = Lt.position - p;
+            float d2 = dot(toL, toL);
+            if (d2 > 1e-12)
+            {
+                float3 l = toL / sqrt(d2);
+                float atten = LightAtten(Lt, d2, l);
+                if (atten > 0.0)
+                {
+                    kind = 1;
+                    e = Lt.color * Lt.intensity * atten;
+                    N = (Lt.samples > 1 && Lt.radius > 0.0) ? Lt.samples : 1;
+                    if (N > 1) SunBasis(l, lt, lb);
+                    w0 = 1.0 / float(N);
+                }
+            }
+        }
+        else if (dot(Lt.direction, p - Lt.position) > 0.0)
+        {
+            N = max(1, Lt.samples);
+            float area = (Lt.type == 2) ? Lt.width * Lt.height : PI * Lt.radius * Lt.radius;
+            if (area > 0.0)
+            {
+                float gsum = 0.0;
+                [loop] for (int g = 0; g < N; g++)
+                {
+                    float3 wv = ShAreaPoint(Lt, g, N, rot) - p;
+                    float d2 = dot(wv, wv);
+                    if (d2 <= 1e-12) continue;
+                    float cosL = -dot(Lt.direction, wv / sqrt(d2));
+                    if (cosL > 0.0) gsum += cosL / max(d2, 1e-4);
+                }
+                float scale = area / float(N);
+                if (gsum * scale > 2.0 * PI) scale = 2.0 * PI / gsum;
+                kind = 2;
+                e = Lt.color * Lt.intensity;
+                w0 = scale;
+            }
+        }
+        if (kind < 0) continue;
+
+        [loop] for (int k = 0; k < N; k++)
+        {
+            float3 q = Lt.position;
+            float  w = 0.0;
+            if (kind == 1)
+            {
+                if (N > 1)
+                {
+                    float2 xy = LightDisk(k, N, rot);
+                    q = Lt.position + lt * (xy.x * Lt.radius) + lb * (xy.y * Lt.radius);
+                }
+                w = w0;
+            }
+            else
+            {
+                q = ShAreaPoint(Lt, k, N, rot);
+                float3 wv = q - p;
+                float d2 = dot(wv, wv);
+                if (d2 > 1e-12)
+                {
+                    float cosL = -dot(Lt.direction, wv / sqrt(d2));
+                    if (cosL > 0.0) w = w0 * (cosL / max(d2, 1e-4));
+                }
+            }
+            float3 v = q - p;
+            float dq = length(v);
+            if (dq <= 1e-6) w = 0.0;
+            float3 d = v / max(dq, 1e-6);
+            if (w > 0.0 && (!shadows || !TlasOccluded(p, d, dq - 1e-3))) ShAddRadiance(sh, d, e, w);
+        }
+    }
+    _ShOut[i] = sh;
+}
+

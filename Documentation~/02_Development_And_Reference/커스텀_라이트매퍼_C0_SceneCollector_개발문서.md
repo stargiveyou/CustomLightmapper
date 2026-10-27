@@ -4,7 +4,8 @@
 > **"왜 그렇게 정했는가"는 설계 문서**: `01_Planning_And_Design/커스텀_라이트매퍼_C0_씬수집_설계.md`
 > (결정 ①~⑧ · 검증 게이트 C0-V1~V8). 두 문서는 짝이며, 결정 번호는 그대로 인용한다.
 >
-> 로드맵 위치: 개발문서 v14 §10.1. 파이프라인 단계 1.
+> 로드맵 위치: 개발문서 v14 §10.1(병합 후 v15 §10). 파이프라인 단계 1.
+> **구현 v1.1(2026-10-26)**: C0-0~C0-4 구현 — 문서 대비 차이는 **§11**, 미확정 항목 확정은 **§10**. 진행·게이트: `03_Progress_And_Validation/진행상황_C0-SceneCollector_2026-08-18.md`.
 
 ---
 
@@ -393,16 +394,30 @@ C0-3 이 끝나면 "실 씬을 한 번에 굽는다"가 성립한다. C0-4/5 는
 
 ---
 
-## 10. 구현 시 확인할 것 (미확정)
+## 10. 구현 시 확인할 것 — 확정 (2026-10-26)
 
-1. **`MeshRenderer.receiveGI` 의 런타임 접근성** — `UnityEngine.ReceiveGI` enum 은 있으나 이 프로퍼티가
-   런타임 빌드에서도 유효한지 확인한다. 불확실하면 **Editor 어댑터에서만 읽고** 정책에는 bool 로 넘긴다
-   (지금 설계가 이미 그렇게 돼 있어 어느 쪽이든 안전하다).
-2. **프리팹 스테이지** — 프리팹 편집 중 `GetActiveScene()` 은 프리팹 스테이지 씬을 준다.
-   의도치 않은 수집을 막으려면 `PrefabStageUtility.GetCurrentPrefabStage() != null` 일 때 경고 후 중단.
-3. **`Undo.RecordObject` 로 배열 필드 기록이 충분한지** — 배열 참조 교체라 `RecordObject` 로 잡히지만,
-   실제로 Ctrl+Z 가 복원하는지 손으로 확인한다.
-4. **멀티 씬 편집** — 여러 씬이 열려 있으면 `GetActiveScene()` 만으로는 부족하다.
-   `SceneManager.sceneCount` 루프로 확장할지 결정(기본은 활성 씬만, 옵션으로 전체).
-5. **`GetIndexCount` 의 토폴로지** — 메시가 `MeshTopology.Triangles` 가 아니면 `/3` 이 틀린다.
-   `mesh.GetTopology(s) != Triangles` 면 그 메시를 Excluded(NoTriangles)로 내리고 사유에 표기.
+1. **`MeshRenderer.receiveGI`** — **Editor 전용 프로퍼티**. 플레이어 빌드 참조 DLL(UnityEngine.Modules 2021.3)로 타입 검사하면
+   `receiveGI` 가 없다(같은 Editor 전용인 `scaleInLightmap`·`stitchLightmapSeams` 도 함께 빠짐). → 설계대로 Editor 어댑터만 읽고 정책엔 bool.
+2. **프리팹 스테이지** — 메뉴 전부 `PrefabStageUtility.GetCurrentPrefabStage() != null` 이면 경고 후 중단(`SceneCollectMenu.InPrefabStage`).
+3. **`Undo.RecordObject`** — 세터 호출 전에 기록 + 프리팹 인스턴스면 `PrefabUtility.RecordPrefabInstancePropertyModifications`. Ctrl+Z 복원은 에디터 확인 항목으로 남김.
+4. **멀티 씬** — 기본 활성 씬만. `Collect Scene - All Loaded Scenes (C0)` 는 로드된 씬을 `SceneManager.GetSceneAt` 순서로 이어 붙인다(`SceneCollector.SceneRoots(true)`).
+5. **토폴로지** — 서브메시 하나라도 `GetTopology(s) != Triangles` 면 Excluded. 사유는 NoTriangles 대신 별도 **`NonTriangleTopology`**(조치 문구가 달라서).
+
+## 11. 구현 반영 — 이 문서 대비 차이 (v1.1)
+
+| 항목 | 문서(v1) | 구현 | 이유 |
+|---|---|---|---|
+| `CollectReason` | 12종 | + `RendererDisabled` · `NonTriangleTopology` · `NoUv0` · `TooManySubMeshes` (뒤에 추가 — 기존 값 불변) | 꺼진 렌더러는 비활성 오브젝트와 같은 이유로 굽지도 차폐하지도 않는다 · 토폴로지(§10-5) · `WarnOnly=false` 의 제외 사유 |
+| 판정 순서(§4.3) | 1~12 | 5 뒤 `RendererDisabled`, 6 앞 `NonTriangleTopology`, 7 뒤 `NoUv0`/`TooManySubMeshes`(WarnOnly=false 만). 나머지 순서 동일. 7 은 `!(ext² > 1e-12)` — NaN 도 제외 | 지오메트리 사고는 플래그보다 먼저(§4.3 원칙 그대로) |
+| `CollectCandidate` | — | + `RendererDisabled`(기본 false = 켜짐) · `NonTriangleTopology` | POD 기본값이 안전한 쪽이 되도록 '꺼짐' 쪽을 필드로 |
+| 경고 | 리포트 문구만 | `[Flags] CollectWarning{NoUv0, TooManySubMeshes}` 를 `CollectEntry.Warnings` 에. **Excluded 엔 붙이지 않음**(베이크에 안 들어가므로) | 리포트·테스트가 같은 값을 본다 |
+| `SceneCollection` | Entries·인덱스·수 | + `RootCount` · `ElapsedMs`(수집기가 채움 — 리포트 머리줄) | §7 머리줄 `(roots N, 순회 M건, Xms)` |
+| `Report` | §7 | 집계 = 건수 내림차순(동률은 분류·사유 enum 순 — 결정적) · 상세 = **Excluded 사유 전부**(조치 문구: NotReadable · NonTriangleTopology · NotContributeGI · LodChild) | §7 은 NotReadable 상세만 예시 |
+| 병렬 목록 | `outFilters` 1:1 | + `SceneCollectPolicy.Pick(col, parallel, idx)` — 길이 불일치면 예외 | 메뉴가 receiver/occluder 배열을 뽑을 때 1:1 깨짐을 조용히 쓰지 않게 |
+| 사용자 오버라이드 | `userOccluders`/`userExcluded` 집합 | 집합 + **`SceneCollectOverride` 표식 컴포넌트**(Runtime, `Mode{OccluderOnly, Exclude}`, `includeChildren` — 가장 가까운 조상 표식) 합집합 | 결과 배열을 손으로 고쳐도 재수집이 덮어쓴다 → 재수집에도 남는 손 수정 지점(결정 ⑧) |
+| 중복 | — | roots 가 서로 조상/자손이면 같은 MeshFilter 는 첫 등장만 | 순서 결정성 유지 + receiver 중복 방지 |
+| LOD 매핑(§4.2) | LODGroup 별 add → remove | 전 LODGroup 의 LOD0 집합 / LOD1+ 집합을 모은 뒤 차집합 | 그룹 순서와 무관(같은 렌더러가 다른 그룹의 LOD0 이어도 LOD0 승) |
+| 배선(§6) | `Samples/AtlasApplyDebug` + Tools 메뉴 | `AtlasApplyDebug` 는 병합(v15.11)으로 **Runtime** — 메뉴는 그대로 Editor: `CONTEXT/AtlasApplyDebug/Collect Scene (C0)` · `… - All Loaded Scenes (C0)` + 상단 `HuskyLibs/CustomLightmapper/Scene Collect (C0)/`(선택 대상 수집 · Report Only · Verify Determinism (C0-V1) · Diagnose Selected Meshes · Options 토글 3종 — EditorPrefs) | 기존 Editor 메뉴(`AtlasApplyDiffTestsMenu`) 패턴 |
+| receiver 0 | — | 메뉴가 적용하지 않음(경고 + 리포트) | 빈 `targets` 는 `ResolveTargets` 자식 폴백으로 바뀌어 엉뚱한 집합을 굽는다 |
+| C0-4 | 접근자 공개 | + `WeldedHalfEdge.WeldEpsilon` 공개(값 무변경). 진단 `SceneCollector.DiagnoseCleanup(mesh, …)` — 용접으로 줄어드는 정점 수·퇴화 삼각형 수만 보고, 선택 오브젝트 메뉴에서만 | 결정 ⑥ — 결과를 차폐 씬에 넣지 않는다 |
+| 테스트(§8) | T1~T8 | T1~T8 + T9 판정 순서 전수(13규칙) · T10 확장 사유·`new SceneCollectOptions()` 함정 · T11 경고 부착 범위 · T12 Report · T13 Pick — 20 체크 | 헤드리스 — .NET 8 콘솔에서 실제 실행 20/20 PASS |

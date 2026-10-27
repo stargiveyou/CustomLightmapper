@@ -12,6 +12,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
         private uint _s;
         public Rng(uint seed) { _s = seed == 0 ? 1u : seed; }
 
+        /// <summary>현재 상태(항상 ≠ 0 — xorshift32 는 0 이 아닌 상태를 0 으로 보내지 않음) → <c>new Rng(State)</c> 로 정확히 이어 간다.</summary>
+        public uint State => _s;
+
         public float Next()
         {
             _s ^= _s << 13;
@@ -214,9 +217,15 @@ namespace HuskyLibs.CustomLightmapper.Bake
         }
 
         // -- 통합 진입점 : direct(그림자 포함) + ambient*AO -> Linear RGB --
-        public static Vector3 EvaluateRadiance(IOccluder occluder, Vector3 p, Vector3 n, DirectionalLight sun, Vector3 ambient, int aoSamples, uint seed)
+        public static Vector3 EvaluateRadiance(IOccluder occluder, Vector3 p, Vector3 n, DirectionalLight sun, Vector3 ambient, int aoSamples, uint seed,
+                                               BakeLight[] lights = null)
         {
             Vector3 direct = EvaluateDirect(occluder, p, n, sun);
+            if (lights != null && lights.Length > 0)
+            {
+                var sq = new OccluderQuery(occluder);
+                direct = LightSampling.AddPrimary(direct, lights, ref sq, p, n, seed);   // 로컬 광원 직사(AO 모드는 간접 없음)
+            }
             float ao = EvaluateAO(occluder, p, n, aoSamples, seed);
             return direct + ambient * ao;
         }
@@ -225,64 +234,110 @@ namespace HuskyLibs.CustomLightmapper.Bake
         /// 간접 조도(경로추적 + RR). 코사인 중요도 샘플이라 히트에서 π·(1/π) 상쇄 → 알베도만 누적,
         /// π는 하늘(미스) 항에만 남는다. 점 p의 알베도는 적용하지 않음(런타임 적용).
         /// </summary>
-        public static Vector3 EvaluateIndirect(IRadianceScene scene, Vector3 p, Vector3 n, DirectionalLight sun, ISky sky, in BakeQualitySettings q, uint seed)
+        public static Vector3 EvaluateIndirect(IRadianceScene scene, Vector3 p, Vector3 n, DirectionalLight sun, ISky sky, in BakeQualitySettings q, uint seed,
+                                               BakeLight[] lights = null)
         {
             var rng = new Rng(seed);
             Vector3 sum = Vector3.zero;
-
-
             for (int i = 0; i < q.IndirectSamples; i++)
-            {
-                Vector3 acc = Vector3.zero;
-                Vector3 tp = Vector3.one;
-                Vector3 dir = CosineHemisphere(n, ref rng);
-                Vector3 o = p + n * q.RayBias;
-
-                for (int b = 0; ; b++)
-                {
-                    if (!scene.ClosestHit(o, dir, 0f, float.MaxValue, out Vector3 hp, out Vector3 hn, out Vector3 alb))
-                    {
-                        // 미스: 하늘. 반구 적분의 π는 여기에만 남는다.
-                        acc += Vector3.Scale(tp, sky.Radiance(dir)) * Mathf.PI;
-                        break;
-
-                    }
-                    // 바운스 표면의 직접 조도(태양)를 알베도로 반사 → tp·ρ·E_direct(q)
-                    Vector3 eD = EvaluateDirect(scene.Occluder, hp, hn, sun);
-                    acc += Vector3.Scale(tp, Vector3.Scale(alb, eD));
-
-                    tp = Vector3.Scale(tp, alb); // // throughput *= ρ
-
-                    if (b + 1 >= q.MaxBounces) break;
-
-                    if (b + 1 >= q.RRStartDepth)
-                    {
-                        float pSurv = Mathf.Clamp(Mathf.Max(tp.x, Mathf.Max(tp.y, tp.z)), 0.05f, 1f);
-                        if (rng.Next() > pSurv) break;
-                        tp /= pSurv; // 무편향 보정
-                    }
-
-                    dir = CosineHemisphere(hn, ref rng);
-                    o = hp + hn * q.RayBias;
-                }
-                sum += acc;
-            }
+                sum += TracePath(scene, p, n, sun, sky, q, ref rng, lights);
             return sum / (float)q.IndirectSamples;
+        }
+
+        /// <summary>
+        /// 간접 경로 1개(코사인 샘플 → 바운스별 NEE → RR)의 기여 π·L. <see cref="EvaluateIndirect"/> 와
+        /// <see cref="AccumulateIndirect"/> 의 단일 진실원(BurstIndirect.TracePath · HLSL TracePath 미러).
+        /// 바운스 NEE = 태양 + 로컬 광원(<paramref name="lights"/>, 전 광원 중심 1발 — RNG 미소비).
+        /// </summary>
+        public static Vector3 TracePath(IRadianceScene scene, Vector3 p, Vector3 n, DirectionalLight sun, ISky sky, in BakeQualitySettings q, ref Rng rng,
+                                        BakeLight[] lights = null)
+        {
+            Vector3 acc = Vector3.zero;
+            Vector3 tp = Vector3.one;
+            Vector3 dir = CosineHemisphere(n, ref rng);
+            Vector3 o = p + n * q.RayBias;
+
+            for (int b = 0; ; b++)
+            {
+                if (!scene.ClosestHit(o, dir, 0f, float.MaxValue, out Vector3 hp, out Vector3 hn, out Vector3 alb))
+                {
+                    // 미스: 하늘. 반구 적분의 π는 여기에만 남는다.
+                    acc += Vector3.Scale(tp, sky.Radiance(dir)) * Mathf.PI;
+                    break;
+                }
+                // 바운스 표면의 직접 조도(태양)를 알베도로 반사 → tp·ρ·E_direct(q)
+                Vector3 eD = EvaluateDirect(scene.Occluder, hp, hn, sun);
+                if (lights != null && lights.Length > 0)
+                {
+                    var sq = new OccluderQuery(scene.Occluder);
+                    eD = LightSampling.AddBounce(eD, lights, ref sq, hp, hn);
+                }
+                acc += Vector3.Scale(tp, Vector3.Scale(alb, eD));
+
+                tp = Vector3.Scale(tp, alb); // throughput *= ρ
+
+                if (b + 1 >= q.MaxBounces) break;
+
+                if (b + 1 >= q.RRStartDepth)
+                {
+                    float pSurv = Mathf.Clamp(Mathf.Max(tp.x, Mathf.Max(tp.y, tp.z)), 0.05f, 1f);
+                    if (rng.Next() > pSurv) break;
+                    tp /= pSurv; // 무편향 보정
+                }
+
+                dir = CosineHemisphere(hn, ref rng);
+                o = hp + hn * q.RayBias;
+            }
+            return acc;
+        }
+
+        /// <summary>Rec.709 휘도 — 적응 샘플링의 분산 척도(세 백엔드 같은 식·같은 연산 순서).</summary>
+        public static float Luminance(Vector3 c) => 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+
+        /// <summary>
+        /// 이어 굽기(진행형·적응 샘플링): RNG 상태 <paramref name="state"/> 에서 경로 <paramref name="samples"/> 개를 더 추적해
+        /// 합 <paramref name="sum"/> 과 경로별 휘도 제곱합 <paramref name="m2"/> 에 누적하고 상태를 갱신한다.
+        /// 시작 상태 = <c>new Rng(seed).State</c>, sum = 0 으로 여러 번 나눠 불러도 덧셈 순서가 같아
+        /// 누적 N 개 후 <c>sum / N</c> 은 <see cref="EvaluateIndirect"/>(같은 seed·N spp) 와 비트 동일.
+        /// </summary>
+        public static void AccumulateIndirect(IRadianceScene scene, Vector3 p, Vector3 n, DirectionalLight sun, ISky sky,
+                                              in BakeQualitySettings q, ref uint state, int samples, ref Vector3 sum, ref float m2,
+                                              BakeLight[] lights = null)
+        {
+            var rng = new Rng(state);
+            for (int i = 0; i < samples; i++)
+            {
+                Vector3 acc = TracePath(scene, p, n, sun, sky, q, ref rng, lights);
+                sum += acc;
+                float l = Luminance(acc);
+                m2 += l * l;
+            }
+            state = rng.State;
         }
 
 
         ///<summary> 전체 경로 추적 라이트맵 값 (조도) 
         ///         Direct(sun) + InDirect(scene, key) </summary>
-        /// <summary>전체 경로추적 라이트맵 값(조도) = Direct(sun) + Indirect(scene, sky).</summary>
+        /// <summary>전체 경로추적 라이트맵 값(조도) = Direct(sun + 로컬 광원) + Indirect(scene, sky).</summary>
         public static Vector3 EvaluateRadiance(IRadianceScene scene, Vector3 p, Vector3 n,
                                                DirectionalLight sun, ISky sky,
-                                               in BakeQualitySettings q, uint seed)
+                                               in BakeQualitySettings q, uint seed, BakeLight[] lights = null)
         {
             // 1차 직사광만 태양 원반 샘플링. 바운스 NEE(EvaluateIndirect 내부)는 1발 유지 —
             // 간접광에 하드 그림자는 보이지 않고, G5 Indirect 검증 수치도 그대로 보존된다.
-            Vector3 direct = EvaluateDirectSampled(scene.Occluder, p, n, sun, q.DirectSamples, seed);
-            Vector3 indirect = EvaluateIndirect(scene, p, n, sun, sky, q, seed);
+            Vector3 direct = EvaluateDirectPrimary(scene.Occluder, p, n, sun, q.DirectSamples, seed, lights);
+            Vector3 indirect = EvaluateIndirect(scene, p, n, sun, sky, q, seed, lights);
             return direct + indirect;
+        }
+
+        /// <summary>1차 직사 = 태양(원반 샘플링) + 로컬 광원(Direct 플래그, 광원별 Samples, 위상 = 시드). 광원 없으면 EvaluateDirectSampled 그대로.</summary>
+        public static Vector3 EvaluateDirectPrimary(IOccluder occluder, Vector3 p, Vector3 n, DirectionalLight sun, int sunSamples, uint seed,
+                                                    BakeLight[] lights = null)
+        {
+            Vector3 direct = EvaluateDirectSampled(occluder, p, n, sun, sunSamples, seed);
+            if (lights == null || lights.Length == 0) return direct;
+            var sq = new OccluderQuery(occluder);
+            return LightSampling.AddPrimary(direct, lights, ref sq, p, n, seed);
         }
  
 

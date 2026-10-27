@@ -40,25 +40,24 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 if (!Valid[index]) { Radiance[index] = Vector3.zero; return; }
 
                 Vector3 n = Normals[index];
+                Vector3 E = SunDirect(index, n);
+                // 로컬 광원(1차 직사, Direct 플래그) — 광원 0개면 E 그대로(비트 동일). 위상 = SunConeRotation(시드).
+                if (scene.lightCount > 0) E = BurstLights.AddPrimary(E, scene, Points[index], n, Seeds[Seeds.Length > 1 ? index : 0]);
+                Radiance[index] = E;
+            }
+
+            // 태양 직사(기존 식 그대로 — 단발 또는 원반 샘플링)
+            readonly Vector3 SunDirect(int index, Vector3 n)
+            {
                 Vector3 L = -Sun.Direction.normalized; // 광원 향함
 
                 if (Samples > 1 && Sun.AngularDiameterDeg > 0f)
-                {
-                    Radiance[index] = SampledDirect(index, n, L);
-                    return;
-                }
+                    return SampledDirect(index, n, L);
 
                 float ndl = Vector3.Dot(L, n);
-
-                if (ndl <= 0f) { Radiance[index] = Vector3.zero; return; } // 백페이스
-
-                if (BurstTwoLevelBVH.Occluded(scene, Points[index] + n * 1e-3f, L, 1e30f))
-                {
-                    Radiance[index] = Vector3.zero;
-                    return;
-                }
-                Radiance[index] = Sun.Color * Sun.Intensity * ndl;
-
+                if (ndl <= 0f) return Vector3.zero; // 백페이스
+                if (BurstTwoLevelBVH.Occluded(scene, Points[index] + n * 1e-3f, L, 1e30f)) return Vector3.zero;
+                return Sun.Color * Sun.Intensity * ndl;
             }
 
             // RadianceCore.EvaluateDirectSampled 와 같은 식(같은 저불일치 수열·같은 기저).

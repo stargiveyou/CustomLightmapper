@@ -63,6 +63,9 @@ namespace HuskyLibs.CustomLightmapper
         //하류 Burst 경로용 BrustScene 구성(bvh + 메시 알베도). 반환 값은 홏루 측 Dispose
         public readonly BurstScene ToBurstScene(Allocator alloc)
         => BurstScene.Create(bvh, meshAlbedo, alloc);
+        /// <summary>로컬 광원 포함(L2 — SH 바운스 + 직접광 투영). 광원 null/빈 배열 = 위와 동일.</summary>
+        public readonly BurstScene ToBurstScene(Allocator alloc, BakeLight[] lights)
+        => BurstScene.Create(bvh, meshAlbedo, null, lights, alloc);
         public void ToBakeArrays(Allocator alloc,
                              out NativeArray<Vector3> points,
                              out NativeArray<Vector3> normals,

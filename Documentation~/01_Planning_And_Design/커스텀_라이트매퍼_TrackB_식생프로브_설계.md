@@ -2,8 +2,8 @@
 
 > 기준: 기획서 v15 §2 「Track B(식생): Light Probe/SH9(주) + 정점 베이크(보조), 텍스처 회피」 · §8 마일스톤 B1 · §9.1 결정 ②(프로브+정점) ⑥(적응형 프로브) · §11 다음 단계 5번.
 > 선행: 공유 코어(2단 BVH·경로추적, CPU/Burst/GPU) ✅ · SH 트랙(SH9·`BurstSHBaker`/`GpuSHBaker` 1/다바운스·`EvaluateSH9.hlsl`·`InstanceSceneBaker`/`InstanceSHBakeAsset`) ✅.
-> 원칙: **코어(BVH·순회·RadianceCore·SH 베이커) 무수정 재사용**, 신규는 별도 파일. 예외는 B1-6(알파 커버리지) 하나 — 3백엔드 동시 변경 + 비트 동일 회귀로 고정.
-> **진행(2026-10-26)**: D1~D6 권장안 확정 · B1-1 `ProbeGrid` · B1-2 `BurstProbeValidity`(v15.7) · B1-3 `ProbeVolumeAsset`·`ProbeVolumeBaker`·인스턴스 적용(v15.8) · B1-4 `HuskyProbeVolume.hlsl`·`InstancedVegetation_URP`(v15.9) · **B1-5 `VertexAOBake`(v15.10)** — 테스트 5종, 에디터 실행 대기 · 다음 B1-6(패키지 저장소 any-hit 와 정합 검토).
+> 원칙: **코어(BVH·순회·RadianceCore·SH 베이커) 무수정 재사용**, 신규는 별도 파일. (B1-6 은 원래 유일한 코어 변경 예정이었으나 D5 갱신으로 패키지 α any-hit 를 그대로 써서 코어 무수정.)
+> **진행(2026-10-26)**: D1~D6 권장안 확정 · B1-1 `ProbeGrid` · B1-2 `BurstProbeValidity`(v15.7) · B1-3 `ProbeVolumeAsset`·`ProbeVolumeBaker`·인스턴스 적용(v15.8) · B1-4 `HuskyProbeVolume.hlsl`·`InstancedVegetation_URP`(v15.9) · B1-5 `VertexAOBake`(v15.10) · **B1-6 알파 잎 차폐(v15.13 — 패키지 α any-hit 연결)** — 테스트 6종, 에디터 실행 대기 · B1 완료 → 다음 B2(적응형).
 
 ---
 
@@ -94,9 +94,10 @@
 - **(b) 히어로(비인스턴스) 정점 조도**(선택): `BurstRadianceBaker.Bake`(정점 위치·노멀 = 텍셀 배열과 동일 입력) → `MeshRenderer.additionalVertexStreams`. 인스턴스별 저장이라 대량에는 부적합.
 - 텍스처 회피 원칙(기획 §2) 유지 — 식생엔 uv2/아틀라스 없음.
 
-### 4.7 알파 커버리지 차폐 (B1-6, 코어 변경)
+### 4.7 알파 잎 차폐 (B1-6) — ✅ v15.13: 패키지 텍스처 any-hit 연결(아래 원안은 기록용)
+- **구현(D5 갱신)**: 머티리얼 알파 → `AlphaMaskBuilder`(사전 이진화 비트마스크) → `AlphaSceneData` → `BurstScene.Create(…, alpha, …)` → 같은 씬을 쓰는 프로브 SH(1·다바운스 Burst, GPU `CSSHBake`/`CSSHBakeMulti` — `GpuSHBaker` 가 `BindAlpha`) · 유효성(`IntersectInstanced`) · 정점 AO(`BurstAO` 의 `Occluded`)가 모두 투명 텍셀을 통과. 확률 통과가 아니라 **텍셀 단위 결정적 판정**이라 노이즈 없음.
 - 잎 카드를 불투명 삼각형으로 트레이스하면 수관 내부·나무 밑 프로브가 과도하게 어두움.
-- 방식: 삼각형별 평균 커버리지 ᾱ(알파 텍스처를 UV 삼각형 위에서 적분, 베이크 전 1회) → 순회 중 히트 시 결정적 난수 `hash(rayId, instId, triId) < ᾱ` 일 때만 히트(아니면 통과·계속 순회). 기대값으로 투과율 = 1-ᾱ.
+- (원안) 방식: 삼각형별 평균 커버리지 ᾱ(알파 텍스처를 UV 삼각형 위에서 적분, 베이크 전 1회) → 순회 중 히트 시 결정적 난수 `hash(rayId, instId, triId) < ᾱ` 일 때만 히트(아니면 통과·계속 순회). 기대값으로 투과율 = 1-ᾱ.
 - 변경 범위: `Tri`(또는 병렬 배열)에 ᾱ, `BurstScene`/`GpuScene` 평탄화, CPU `TwoLevelBVH`·Burst·`BvhTraverse/PathTrace.compute` 순회 3곳. ᾱ 미지정(=1) 경로는 **비트 동일**해야 함.
 - 1차 대체(B1-1~5 동안): 템플릿별 `occluderMode = Opaque | Excluded` 토글.
 
@@ -119,7 +120,7 @@
 | **D2** | 런타임 보간 단위 | (**인스턴스 대표점 먼저(B1-3) → 픽셀 Texture3D(B1-4)**) / 픽셀만 | B1-3 은 셰이더 무변경으로 엔드투엔드 확보, 풀·큰 나무는 B1-4 필요 |
 | **D3** | 런타임 저장 형식 | (**Texture3D×7 RGBAHalf**) / StructuredBuffer float4(수동 8탭) | HW trilinear·캐시 효율. SO 에는 패킹 원본도 보관 |
 | **D4** | 정점 베이크 내용 | (**템플릿 로컬 AO**) / AO + bent normal / 히어로 정점 조도까지 | 인스턴싱과 호환되는 유일한 정점 데이터. bent normal 은 효과 확인 후 |
-| **D5** | 알파 잎 차폐 | 1차 Opaque/Excluded 토글 → (**삼각형 평균 커버리지 확률 통과, B1-6**) / 텍스처 any-hit | 커버리지 방식은 순회에 float 1개·해시 1회 추가로 3백엔드 미러 용이. any-hit 는 UV·텍스처 샘플이 순회에 들어가 GPU 비용·구현량 큼 |
+| **D5** | 알파 잎 차폐 | 1차 Opaque/Excluded 토글 → ~~삼각형 평균 커버리지 확률 통과~~ / (**텍스처 any-hit — 2026-10-26 갱신, B1-6 ✅ v15.13**) | (원 근거) 커버리지 방식은 순회에 float 1개·해시 1회 추가로 3백엔드 미러 용이. → 패키지 병합으로 any-hit 가 이미 3백엔드 구현·검증돼 있어 구현량 이점이 사라짐 + 텍셀 단위 정확·노이즈 없음 |
 | **D6** | Unity LightProbes 연동 | (**자체 볼륨만, B3 는 보류**) / bakedProbes 내보내기 병행 | DrawMeshInstancedIndirect 는 Unity 프로브를 자동으로 못 받음 → 자체 볼륨이 본선 |
 
 고정(재확인만): SH9(L2) 계약 유지 · 직사광은 실시간(프로브엔 간접+환경) · 반사 규약 ρ/π·E · URP 우선.
@@ -135,7 +136,7 @@
 | **B1-3** ✅ | 저장 + 베이커 컴포넌트 + 인스턴스 적용(엔드투엔드) | `ProbeVolume/ProbeVolumeAsset.cs`, `ProbeVolume/ProbeVolumeBaker.cs` | 에셋 왕복(패킹·Texture3D 텍셀 ≡ SH) · EXR 매직 · 인스턴스 샘플 ≡ CPU `Sample` · **수렴: 간격 ½ 마다 '직접 베이크(SH 트랙) 대비 오차' 단조 감소** |
 | **B1-4** ✅ | 픽셀 샘플 셰이더 | `Shaders/HuskyProbeVolume.hlsl`, `Shaders/InstancedVegetation_URP.shader` | GPU 샘플 ≡ CPU `Sample`(렌더 컨텍스트, `SHEvalProbeGpuTests` 패턴 — 텍셀 중심 정렬·클램프 경계 포함) · glslang 컴파일 |
 | **B1-5** ✅ | 정점 AO(템플릿 로컬) [히어로 정점 조도는 미착수] | `ProbeVolume/VertexAOBake.cs` | 정점 AO ≡ `BurstAO.Compute` 직접 호출 · 고립 평면 AO=1 · 무한 천장 아래 AO≈0 · (히어로) 정점 조도 ≡ 같은 점·노멀 `BurstRadianceBaker` |
-| **B1-6** | 알파 커버리지 확률 통과(코어 3백엔드) | `Tri` 확장/병렬 배열, 순회 3곳 | ᾱ=1 ≡ 현행 **비트 동일**(전 회귀 18종 통과) · ᾱ=0 ≡ 메시 제거 · ᾱ=0.5 그림자 투과 ≈ 0.5(±3σ) · CPU≡Burst≡GPU |
+| **B1-6** ✅ | 알파 잎 차폐 — 패키지 α any-hit 연결(코어 무수정) | `ProbeVolumeBaker`(알파 설정·`BuildAlphaData`)·`VertexAOBake`(alpha 인자) 수정 + `Tests/ProbeVolume/ProbeAlphaTests.cs` | `ProbeAlphaTests`: ᾱ=1(전부 불투명 마스크) ≡ 알파 없음 **비트 동일**(SH 1·다바운스·뒷면 비율) · ᾱ=0 ≡ 메시 제거(비트 동일) · 체커 ᾱ≈0.5 → E(up) 비율 ∈ [0.3,0.7] · 정점 AO 동일 3종 · 베이커 머티리얼 경로 · GPU ≡ Burst |
 | **B2** | 적응형(D1 선택안) | `ProbeVolume/…` | 세분 영역 샘플 ≡ 같은 해상도 균일 격자 · 프로브 수·메모리 절감률 리포트 |
 | B3 | (선택) Unity LightProbes 내보내기 | — | `SphericalHarmonicsL2` 변환 왕복 ≡ |
 
@@ -188,17 +189,32 @@
 4. 양면 잎 카드(twoSided) 뒷면에서 AO 가 따로 적용되는지.
 5. 정점 수 많은 메시의 베이크 시간(정점 × samples 레이) — 필요 시 samples·maxDistanceRelative 조정.
 
-다음: **B1-6** 알파 잎 차폐 — 패키지 저장소의 텍스처 any-hit 구현과 방식 정합 먼저.
+**B1-6 완료(v15.13)** — 알파 잎 차폐(패키지 α any-hit). 구현 메모:
+- 베이커 `alphaCutout`(기본 on) + `alphaMaskResolution`·`alphaTransparentPolicy`·`alphaForceCutout`·`alphaForceCutoutNames`·`alphaDefaultCutoff`(= `AtlasApplyDebug` 알파 설정과 같은 의미).
+- 알파 머티리얼: 템플릿 `alphaMaterials`(서브메시별, 베이크 전용) → 없으면 **표시 머티리얼**(`material`, 없으면 모드별 공용 `vegetationMaterial`/`material` — 지정된 것만)을 전 서브메시에 → 정적 루트는 렌더러 `sharedMaterials`(인스턴스별). 머티리얼이 하나도 없거나 컷아웃이 없으면 Disabled → 기존과 비트 동일.
+- 주의(거동 변화): 알파 블렌딩(Transparent) 머티리얼은 `alphaTransparentPolicy = Ignore`(기본, `AtlasApplyDebug` 와 동일)면 베이크 레이가 통과 — 정적 루트의 유리·물이 더는 차폐하지 않음. 이전 거동이 필요하면 `Opaque` 정책.
+- 정점 AO: 메시 단독 씬에도 같은 규칙으로 알파(`VertexAOBake.BuildAlpha` → `Compute(…, alpha)`) — 잎 카드끼리의 자기차폐가 구멍을 통과. 같은 메시를 쓰는 템플릿은 처음 템플릿의 머티리얼.
+- 기록: `ProbeVolumeAsset.alphaCutout`·`alphaLog`, `VertexAOEntry.alphaCutout`. Bake 로그에 alpha ON/OFF + 마스크 요약.
+- `OccluderMode` 는 그대로(Opaque / Excluded) — Opaque 가 이제 '컷아웃 구멍은 통과'. Excluded 는 여전히 베이크 씬에서 제외.
+
+**B1-6 에디터 확인 체크리스트**
+1. "Run Probe Volume Tests (Track B B1-1 ~ B1-6)" 전부 PASS — 특히 `ProbeAlphaTests` A·B(비트 동일)·C/D 비율·E(그래픽 디바이스 필요)·F(compute 필요).
+2. 실 나무 템플릿(잎 = 컷아웃 머티리얼, `material` 또는 `alphaMaterials`) → Bake → 콘솔 `alpha=ON` + `cutout mats=N`. 0 이면 `alphaForceCutout`/`alphaForceCutoutNames`(SpeedTree 는 셰이더 이름으로 자동).
+3. 수관 아래 프로브(기즈모 색)가 `alphaCutout` off(통짜) 대비 밝아지고, Excluded(완전 통과)보다는 어두운지.
+4. 정점 AO 메시: 잎 안쪽 AO 가 off 대비 덜 어두운지(`vertexAOStrength` 1).
+5. GPU 백엔드로 같은 결과(평균 오차 작음)인지.
+
+다음: **B2** 적응형 프로브(D1 — 지형 추종 2.5D) · `ProbeVolumeBaker` 입력을 C0 분류 결과로 합류(§7 씬 입력 이원화).
 
 ---
 
 ## 7. 리스크
 
 - **누수(leak)**: trilinear 는 벽을 넘어 보간 → 얇은 벽·지면 경계 번짐. B1-2(유효성)·B1-4(normalBias)로 완화, 근본 해결(가시성 가중 — DDGI 식 깊이 모멘트)은 범위 밖.
-- **알파 잎 과차폐**: B1-6 전까진 Opaque/Excluded 근사 — 수관 아래가 과하게 어둡거나(Opaque) 밝음(Excluded).
+- ~~**알파 잎 과차폐**~~: B1-6(v15.13)으로 해소 — 컷아웃 머티리얼이 지정된 경우. 머티리얼이 없거나 판별 실패하면 여전히 통짜(로그 `alpha=OFF` 로 확인).
 - **볼륨 해상도 vs 메모리**: 균일 격자는 빈 공간 낭비 → B2 필요. 간격이 크면 풀 접지부 음영 손실(정점 AO 가 일부 보완).
 - **씬 입력 이원화**: 텍스처 경로(`AtlasApplyDebug.BuildGiScene`)와 볼륨(`TemplateInstanceSource`)이 씬을 따로 구성 → 같은 씬을 다르게 볼 위험. C0(수집·분류) 착수 시 공용 씬 빌더로 합류.
-- **B1-6 코어 변경**: 3백엔드 순회 동시 수정 — ᾱ=1 비트 동일 회귀를 게이트로.
+- ~~**B1-6 코어 변경**~~: D5 갱신으로 코어 무수정(패키지 any-hit 재사용). ᾱ=1 비트 동일 게이트는 `ProbeAlphaTests` A 로 유지.
 - **SH 링잉**: 고대비(하늘↔지면) 볼륨에서 L2 링잉 — 기존 디링잉(W2=0.5) 공유, 필요 시 볼륨 전용 윈도우.
 - 공통: 에디터 미검증 상태로 쌓이는 변경 → 기획서 §11-1 에디터 게이트를 B1-3 전에 한 번 통과 권장.
 
@@ -210,4 +226,5 @@
 3. ✅ **B1-3**: `ProbeVolumeAsset` · `ProbeVolumeBaker` · 인스턴스 적용 + `ProbeVolumeBakerTests` + 문서 v15.8 (에디터 확인 — §6 체크리스트).
 4. ✅ **B1-4**: `HuskyProbeVolume.hlsl` + `InstancedVegetation_URP.shader` + `ProbeVolumeShaderBinding` + `ProbeVolumeGpuSampleTests` + 문서 v15.9 (에디터 확인 — §6 체크리스트).
 5. ✅ **B1-5**: `VertexAOBake` + 에셋·베이커 연동 + 셰이더 `_HUSKY_VERTEX_AO` + `VertexAOBakeTests` + 문서 v15.10 (에디터 확인 — §6 체크리스트).
+7. ✅ **B1-6 구현(v15.13)**: 베이커·정점 AO 알파 연결 + `ProbeAlphaTests` + 문서 (에디터 확인 — §6 체크리스트).
 6. ✅ **B1-6 방식 결정(2026-10-26)**: 패키지 병합(v15.11)을 기준으로 함 → D5 를 '삼각형 평균 커버리지' 대신 **패키지 텍스처 any-hit**(CPU/Burst/GPU + `AlphaCutoutTests`·`AlphaGpuCompareTests`)으로 변경. B1-6 = 템플릿 머티리얼 → `AlphaSceneData`(`AlphaMaskBuilder`) → 볼륨 베이크·유효성·정점 AO 씬에 `SetAlpha`/`BurstScene.Create(…, alpha, …)`/`GpuScene.BindAlpha`. 코어 순회 변경 불필요(이미 3백엔드 구현·검증).

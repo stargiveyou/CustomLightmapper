@@ -57,6 +57,11 @@ namespace HuskyLibs.CustomLightmapper.Bake
         [Tooltip("하늘 아래쪽 복사휘도(Linear RGB).")]
         public Vector3 skyBottom = new Vector3(0.1f, 0.1f, 0.12f);
 
+        [Header("로컬 광원 (Point · Spot · Area — L2)")]
+        [Tooltip("프로브 SH 에 로컬 광원을 굽는다: 이웃 표면이 받은 빛(바운스) + Direct 플래그 광원이 프로브에 직접 주는 빛(셰이더는 태양만 실시간이라). " +
+                 "기본 Scene = 로드된 씬의 켜진 Point/Spot/Area 라이트. None = 구 거동(태양 + 하늘만).")]
+        public LocalLightSettings localLights = new LocalLightSettings();
+
         [Header("베이크")]
         public Backend backend = Backend.Burst;
         [Tooltip("1 = 1바운스+앰비언트 근사, ≥2 = 경로추적 다바운스. 둘 다 물리 규약(ρ/π·E).")]
@@ -136,7 +141,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
 #endif
             bakeAsset = asset;
             Debug.Log($"[InstanceSceneBaker] 베이크 완료: 템플릿 {asset.templates.Length}, 인스턴스 {asset.InstanceCount}, " +
-                      $"bounces={asset.bounces}, dirs={asset.dirCount}, backend={usedBackend}", this);
+                      $"bounces={asset.bounces}, dirs={asset.dirCount}, backend={usedBackend}, lights={asset.lightLog}", this);
             if (renderOnEnable && isActiveAndEnabled) RebuildRender();
         }
 
@@ -148,7 +153,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
             var input = new MatrixInstanceInput { templates = meshes, templateAlbedo = albedoLin, instanceMatrices = mats };
             using var s = TemplateInstanceSource.BuildScene(input, Allocator.TempJob, BVH.BuildQuality.SAH, surfaceLift, anchorMode);
-            using var bScene = s.ToBurstScene(Allocator.TempJob);
+            var bakeLights = localLights != null ? localLights.Collect() : Array.Empty<BakeLight>();   // L2: 로컬 광원(바운스 + 직접광 투영)
+            using var bScene = s.ToBurstScene(Allocator.TempJob, bakeLights);
             TemplateInstanceSource.ComputeProbePoints(s, meshes, anchorMode, surfaceLift, liftRelativeToBounds, out var top, out var bot);
 
             var sunDL = SunLight();
@@ -164,6 +170,12 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 if (cs != null && cs.HasKernel(kName)) kernel = cs.FindKernel(kName);
                 if (kernel >= 0) gpu = new GpuScene(bScene);
                 else Debug.LogWarning("[InstanceSceneBaker] GPU 사용 불가(compute 미지원/PathTrace 로드/커널 미발견) → Burst 폴백.", this);
+                if (gpu != null && !gpu.TraversalFits)
+                {
+                    Debug.LogWarning($"[InstanceSceneBaker] BVH 깊이(스택 {gpu.RequiredStack}칸 필요) > GPU 순회 스택 {GpuBakeLimits.TraversalStack} → Burst 폴백.", this);
+                    gpu.Dispose();
+                    gpu = null;
+                }
             }
             usedBackend = gpu != null ? "Gpu" : "Burst";
 
@@ -201,6 +213,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             asset.seed = seed;
             asset.backend = usedBackend;
             asset.bakedAtUtc = DateTime.UtcNow.ToString("o");
+            asset.lightLog = $"{BakeLightUtil.Summary(bakeLights)}({(localLights != null ? localLights.source : LocalLightSource.None)})";
             return asset;
         }
 

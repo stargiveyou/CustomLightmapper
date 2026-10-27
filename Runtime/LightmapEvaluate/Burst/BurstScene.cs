@@ -43,8 +43,27 @@ namespace HuskyLibs.CustomLightmapper.Bake
         //    alpha.enabled=false 면 BurstTwoLevelBVH 가 기존 early-exit 순회를 그대로 탄다.
         public BurstAlpha alpha;
 
+        // 로컬 광원(Point/Spot/Rect/Disc — BakeLight). 항상 할당(광원 0개면 1원소 더미 + lightCount 0) — 잡 안전 시스템 요구.
+        //   lightCount = 0 이면 BurstDirect·BurstIndirect 가 광원 루프를 돌지 않아 기존 결과와 비트 동일.
+        [ReadOnly] public NativeArray<BakeLight> lights;
+        public int lightCount;
+
         public static BurstScene Create(TwoLevelBVH bvh, Vector3[] albedo, Allocator allocator)
             => Create(bvh, albedo, null, allocator);
+
+        /// <summary>알베도 · α · 로컬 광원까지 한 번에(광원 null/빈 배열 = 광원 없음).</summary>
+        public static BurstScene Create(TwoLevelBVH bvh, Vector3[] albedo, AlphaSceneData alphaData, BakeLight[] bakeLights, Allocator allocator)
+        {
+            var s = Create(bvh, albedo, alphaData, allocator);
+            int n = bakeLights != null ? bakeLights.Length : 0;
+            if (n > 0)
+            {
+                s.lights.Dispose();                             // Create(bvh,...) 가 만든 더미 해제
+                s.lights = new NativeArray<BakeLight>(bakeLights, allocator);
+                s.lightCount = n;
+            }
+            return s;
+        }
 
         public static BurstScene Create(TwoLevelBVH bvh, Vector3[] albedo, AlphaSceneData alphaData, Allocator allocator)
         {
@@ -122,6 +141,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
             for (int i = 0; i < s.meshAlbedo.Length; i++) s.meshAlbedo[i] = new Vector3(0.5f, 0.5f, 0.5f);
 
             s.alpha = BurstAlpha.CreateDisabled(allocator);     // 알파 미사용 기본값(잡 스케줄용 더미)
+            s.lights = new NativeArray<BakeLight>(1, allocator); // 광원 없음(잡 스케줄용 더미)
+            s.lightCount = 0;
             return s;
         }
 
@@ -142,6 +163,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             if (blasTriIdxStart.IsCreated) blasTriIdxStart.Dispose();
             if (blasTriStart.IsCreated) blasTriStart.Dispose();
             if (meshAlbedo.IsCreated) meshAlbedo.Dispose();
+            if (lights.IsCreated) lights.Dispose();
             alpha.Dispose();
         }
     }

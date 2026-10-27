@@ -45,7 +45,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 Mesh uv2mesh; LumelMap lumel;
                 try
                 {
-                    var pr = ParameterizationPipeline.Run(srcMesh, t.segmentation);
+                    var pr = ParameterizationPipeline.Run(srcMesh, t.segmentation, t.flatten);
                     if (pr.Charts == null || pr.Charts.Length == 0) continue;
                     DensityNormalizer.Normalize(pr.Charts);
                     ShelfPacker.Pack(pr.Charts, t.chartGutter);
@@ -136,7 +136,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 Mesh uv2mesh; LumelMap lumel;
                 try
                 {
-                    var pr = ParameterizationPipeline.Run(srcMesh, t.segmentation);
+                    var pr = ParameterizationPipeline.Run(srcMesh, t.segmentation, t.flatten);
                     if (pr.Charts == null || pr.Charts.Length == 0) continue;
                     DensityNormalizer.Normalize(pr.Charts);
                     ShelfPacker.Pack(pr.Charts, t.chartGutter);
@@ -254,7 +254,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 Mesh uv2mesh; LumelMap lumel;
                 try
                 {
-                    var pr = ParameterizationPipeline.Run(srcMesh, t.segmentation);
+                    var pr = ParameterizationPipeline.Run(srcMesh, t.segmentation, t.flatten);
                     if (pr.Charts == null || pr.Charts.Length == 0) continue;
                     DensityNormalizer.Normalize(pr.Charts);
                     ShelfPacker.Pack(pr.Charts, t.chartGutter);

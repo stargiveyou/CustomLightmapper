@@ -35,6 +35,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
         public uint seed;
         public string backend;
         public string bakedAtUtc;
+        [Tooltip("L2: 베이크에 쓴 로컬 광원 요약(종류별 개수·간접만·그림자 없음·출처).")]
+        public string lightLog;
         [Tooltip("같은 계수의 EXR 사본. 레이아웃은 InstanceSceneBaker.ExrInstancesPerRow 참조.")]
         public Texture2D coefficientsExr;
 
