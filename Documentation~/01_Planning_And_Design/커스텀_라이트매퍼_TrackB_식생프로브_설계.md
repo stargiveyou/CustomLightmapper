@@ -204,7 +204,20 @@
 4. 정점 AO 메시: 잎 안쪽 AO 가 off 대비 덜 어두운지(`vertexAOStrength` 1).
 5. GPU 백엔드로 같은 결과(평균 오차 작음)인지.
 
-다음: **B2** 적응형 프로브(D1 — 지형 추종 2.5D) · `ProbeVolumeBaker` 입력을 C0 분류 결과로 합류(§7 씬 입력 이원화).
+**정적 입력 C0 합류 완료(v15.19)** — §7 씬 입력 이원화 해소(정적 메시). 구현 메모:
+- `staticSource`: `Roots`(기본 — `staticRoots` 하위 전부, 구 거동 비트 동일) / `Collected`(`collectedStatics` — C0 의 Receiver ∪ OccluderOnly, Entries 순서 = 텍스처 경로 targets ∪ occluders 와 같은 집합). 프로브엔 굽기/차폐만 구분이 없어 한 목록.
+- 채우기: `ProbeVolumeBaker` 우클릭 'Collect Scene (C0)' / '… All Loaded Scenes (C0)'(옵션 = 상단 C0 메뉴 토글 공유, Undo) 또는 코드 `SetCollected(MeshFilter[])`.
+- 템플릿 중복 제외(Collected 만): 템플릿 `captureSource` 자손 · (메시, 월드 행렬) 일치 — Excluded 템플릿 포함. 로그·에셋 `sceneLog` 에 제외 수.
+- 템플릿(식생) 입력은 그대로(행렬 캡처/코드). 같은 메시 MeshFilter 묶음을 템플릿으로 만드는 자동화는 범위 밖.
+
+**정적 입력 C0 에디터 확인 체크리스트**
+1. "Run Probe Volume Tests (Track B B1-1 ~ B1-6 + C0)" 전부 PASS — 특히 `ProbeVolumeC0Tests` A(Roots 비트 동일)·B(템플릿 중복).
+2. 실씬: `ProbeVolumeBaker` 우클릭 'Collect Scene (C0)' → 콘솔 리포트 + `정적 입력 N (receiver + occluder)` · 인스펙터 `staticSource = Collected`.
+3. 같은 씬에서 `AtlasApplyDebug` 'Collect Scene (C0)' 의 targets + occluders 수 = 볼륨 정적 입력 수(같은 옵션일 때).
+4. 나무 템플릿을 captureSource 로 캡처한 씬 → Bake 로그 `scene:` 줄에 '템플릿 중복 −N'(나무 MeshFilter 수만큼) · Roots 로 굽던 결과와 차이가 나면 `scene:` 줄의 static 수 차이(LOD1+·Contribute GI 꺼짐 등 C0 제외분)로 설명되는지.
+5. Undo 로 `collectedStatics`·`staticSource` 복원.
+
+다음: **B2** 적응형 프로브(D1 — 지형 추종 2.5D).
 
 ---
 
@@ -213,7 +226,7 @@
 - **누수(leak)**: trilinear 는 벽을 넘어 보간 → 얇은 벽·지면 경계 번짐. B1-2(유효성)·B1-4(normalBias)로 완화, 근본 해결(가시성 가중 — DDGI 식 깊이 모멘트)은 범위 밖.
 - ~~**알파 잎 과차폐**~~: B1-6(v15.13)으로 해소 — 컷아웃 머티리얼이 지정된 경우. 머티리얼이 없거나 판별 실패하면 여전히 통짜(로그 `alpha=OFF` 로 확인).
 - **볼륨 해상도 vs 메모리**: 균일 격자는 빈 공간 낭비 → B2 필요. 간격이 크면 풀 접지부 음영 손실(정점 AO 가 일부 보완).
-- **씬 입력 이원화**: 텍스처 경로(`AtlasApplyDebug.BuildGiScene`)와 볼륨(`TemplateInstanceSource`)이 씬을 따로 구성 → 같은 씬을 다르게 볼 위험. C0(수집·분류) 착수 시 공용 씬 빌더로 합류.
+- ~~**씬 입력 이원화**~~: v15.19 로 정적 메시는 해소 — `staticSource = Collected` 면 볼륨이 텍스처 경로와 같은 C0 분류를 쓴다(기본 Roots 는 구 거동이라 사용자가 고를 것). 메시→BLAS 변환 코드는 아직 두 벌(`AtlasApplyDebug.BuildGiScene` 은 적용된 uv2 메시의 원본 추적 때문에 별도) — 같은 식(로컬 Tri · `_BaseColor`/`_Color` Linear 알베도)이라 결과는 같다.
 - ~~**B1-6 코어 변경**~~: D5 갱신으로 코어 무수정(패키지 any-hit 재사용). ᾱ=1 비트 동일 게이트는 `ProbeAlphaTests` A 로 유지.
 - **SH 링잉**: 고대비(하늘↔지면) 볼륨에서 L2 링잉 — 기존 디링잉(W2=0.5) 공유, 필요 시 볼륨 전용 윈도우.
 - 공통: 에디터 미검증 상태로 쌓이는 변경 → 기획서 §11-1 에디터 게이트를 B1-3 전에 한 번 통과 권장.

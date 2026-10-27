@@ -230,9 +230,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
         [ContextMenu("From DirectionalLight Component")]
         public void GetDirectionLightFromLightComponent()
         {
-            // FindObjectsOfType: 2021.3~Unity6 공통 동작(U6 에선 deprecated 경고만). FindObjectsByType 는 2022.2+ 전용.
-            var lights = GameObject.FindObjectsOfType<Light>();
-            foreach (var light in lights)
+            // 씬 라이트 탐색 공용 경로(Unity 6.5 API 분기 포함). 순서 = 객체 ID 오름차순 → Directional 이 여럿이면 결정적으로 첫 번째.
+            foreach (var light in BakeLightUtil.FindSceneLights())
             {
                 if (light.type == LightType.Directional)
                 {

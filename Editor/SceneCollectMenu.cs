@@ -8,6 +8,7 @@ namespace HuskyLibs.CustomLightmapper.Bake.EditorTools
 {
     /// <summary>
     /// C0-3 배선 — 씬 수집 → <see cref="AtlasApplyDebug.SetCollected"/>(targets/occluders 교체) + 리포트 로그.
+    /// Track B: 같은 분류를 <see cref="ProbeVolumeBaker.SetCollected"/>(정적 입력 = receiver ∪ occluder)에도 — 텍스처·볼륨이 같은 씬을 본다.
     /// AtlasApplyDebug 에는 세터 하나만 있고 수집·판정은 여기와 <see cref="SceneCollector"/> 에 둔다(C0 결정 ①).
     /// 손 수정: 결과 배열을 인스펙터에서 고치거나, 재수집에도 남기려면 <see cref="SceneCollectOverride"/> 표식(결정 ⑧).
     /// 옵션(<see cref="SceneCollectOptions"/>)은 메뉴 토글(EditorPrefs)로 고른다.
@@ -26,6 +27,14 @@ namespace HuskyLibs.CustomLightmapper.Bake.EditorTools
 
         [MenuItem("CONTEXT/AtlasApplyDebug/Collect Scene - All Loaded Scenes (C0)")]
         static void CollectAll(MenuCommand c) => CollectInto((AtlasApplyDebug)c.context, true);
+
+        // ── ProbeVolumeBaker 인스펙터 우클릭(정적 입력 = 텍스처 경로와 같은 분류) ──
+
+        [MenuItem("CONTEXT/ProbeVolumeBaker/Collect Scene (C0)")]
+        static void CollectProbeActive(MenuCommand c) => CollectIntoProbe((ProbeVolumeBaker)c.context, false);
+
+        [MenuItem("CONTEXT/ProbeVolumeBaker/Collect Scene - All Loaded Scenes (C0)")]
+        static void CollectProbeAll(MenuCommand c) => CollectIntoProbe((ProbeVolumeBaker)c.context, true);
 
         // ── 상단 메뉴 ──
 
@@ -146,6 +155,38 @@ namespace HuskyLibs.CustomLightmapper.Bake.EditorTools
             foreach (var mf in occluders) if (mf.gameObject.scene != dbg.gameObject.scene) crossScene++;
             if (crossScene > 0)
                 Debug.LogWarning($"[C0] {crossScene}건이 {dbg.name} 와 다른 씬 — 교차 씬 참조는 저장되지 않으므로 씬을 다시 열면 비어 있다. 베이크는 지금 세션에서 하거나 씬별로 수집할 것.", dbg);
+        }
+
+        /// <summary>
+        /// 프로브 볼륨 정적 입력 = receiver ∪ occluder(Entries 순서) → <see cref="ProbeVolumeBaker.SetCollected"/>(staticSource = Collected).
+        /// 프로브는 '굽기/차폐만' 구분이 없다 — 둘 다 차폐·반사로 들어간다. 템플릿과 겹치는 물체는 베이크 때 빠진다(로그에 수).
+        /// </summary>
+        static void CollectIntoProbe(ProbeVolumeBaker baker, bool allLoadedScenes)
+        {
+            if (baker == null || InPrefabStage()) return;
+
+            var filters = new List<MeshFilter>();
+            var col = SceneCollector.Collect(SceneCollector.SceneRoots(allLoadedScenes), Options(), outFilters: filters);
+            string report = col.Report();
+            var members = SceneCollectPolicy.Pick(col, filters, SceneCollectPolicy.SceneMembers(col));
+            if (members.Length == 0)
+            {
+                Debug.LogWarning("[C0] 베이크 참여(receiver ∪ occluder) 0건 — 적용하지 않음. 리포트:\n" + report, baker);
+                return;
+            }
+
+            Undo.RecordObject(baker, "Collect Scene (C0) → ProbeVolumeBaker");
+            baker.SetCollected(members);
+            PrefabUtility.RecordPrefabInstancePropertyModifications(baker);
+            EditorUtility.SetDirty(baker);
+            baker.StaticFilters(out int overlap);
+            Debug.Log(report + $"  → {baker.name}: 정적 입력 {members.Length} (receiver {col.ReceiverCount} + occluder {col.OccluderCount}) · staticSource = Collected 적용(Undo 가능)"
+                      + (overlap > 0 ? $"\n  템플릿 인스턴스와 겹치는 {overlap}건은 베이크 때 제외(이중 계상 방지)" : ""), baker);
+
+            int crossScene = 0;
+            foreach (var mf in members) if (mf.gameObject.scene != baker.gameObject.scene) crossScene++;
+            if (crossScene > 0)
+                Debug.LogWarning($"[C0] {crossScene}건이 {baker.name} 와 다른 씬 — 교차 씬 참조는 저장되지 않으므로 씬을 다시 열면 비어 있다. 베이크는 지금 세션에서 하거나 씬별로 수집할 것.", baker);
         }
 
         // 프리팹 편집 중엔 수집 대상(메인 씬 vs 편집 중 프리팹)이 모호하다 → 경고 후 중단(개발문서 §10-2)

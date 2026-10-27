@@ -95,7 +95,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
             sb.AppendLine(ProbeVolumeGpuSampleTests.RunAll());    // Track B B1-4 픽셀 볼륨 샘플 GPU ≡ CPU 미러(내부·텍셀 중심·클램프·페이드·normalBias·투과, 렌더 컨텍스트 필요)
             sb.AppendLine(VertexAOBakeTests.RunAll());            // Track B B1-5 템플릿 로컬 정점 AO: ≡ BurstAO 직접·고립 AO=1·천장 아래 AO≈0·양면·AO 메시·베이커 연동
             sb.AppendLine(ProbeAlphaTests.RunAll());              // Track B B1-6 알파 잎 차폐: ᾱ=1 ≡ 알파 없음·ᾱ=0 ≡ 메시 제거(비트 동일)·체커 ≈0.5·정점 AO·베이커 머티리얼 경로·GPU
-            sb.AppendLine(SceneCollectPolicyTests.RunAll());      // C0 수집 정책(결정성·배타성·LOD·사유 우선순위·리포트 — 헤드리스)
+            sb.AppendLine(SceneCollectPolicyTests.RunAll());      // C0 수집 정책(결정성·배타성·LOD·사유 우선순위·리포트·SceneMembers — 헤드리스)
+            sb.AppendLine(ProbeVolumeC0Tests.RunAll());           // Track B 정적 입력 C0 합류: Roots 구 거동·Collected ≡ Roots·템플릿 중복 제외(비트 동일)·빈 입력
             Debug.Log(sb.ToString(), this);
         }
 
@@ -160,13 +161,14 @@ namespace HuskyLibs.CustomLightmapper.Bake
         [ContextMenu("Run Atlas Bake Asset Test (step 9)")]
         public void RunAtlasBakeAssetTest() => Debug.Log(AtlasBakeAssetTests.RunAll(), this);
 
-        [ContextMenu("Run Probe Volume Tests (Track B B1-1 ~ B1-6)")]
+        [ContextMenu("Run Probe Volume Tests (Track B B1-1 ~ B1-6 + C0)")]
         public void RunProbeVolumeTests() =>
             Debug.Log(ProbeGridTests.RunAll() + "\n" + ProbeValidityTests.RunAll() + "\n" + ProbeVolumeBakerTests.RunAll()
-                      + "\n" + ProbeVolumeGpuSampleTests.RunAll() + "\n" + VertexAOBakeTests.RunAll() + "\n" + ProbeAlphaTests.RunAll(), this);
+                      + "\n" + ProbeVolumeGpuSampleTests.RunAll() + "\n" + VertexAOBakeTests.RunAll() + "\n" + ProbeAlphaTests.RunAll()
+                      + "\n" + ProbeVolumeC0Tests.RunAll(), this);
 
         [ContextMenu("Run Scene Collect Tests (C0)")]
-        public void RunSceneCollectTests() => Debug.Log(SceneCollectPolicyTests.RunAll(), this);
+        public void RunSceneCollectTests() => Debug.Log(SceneCollectPolicyTests.RunAll() + "\n" + ProbeVolumeC0Tests.RunAll(), this);
 
         [ContextMenu("Run BVH Mesh Test")]
         public void RunBVHMeshTest()

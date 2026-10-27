@@ -106,8 +106,11 @@ namespace HuskyLibs.CustomLightmapper.Bake
             return list.ToArray();
         }
 
-        /// <summary>로드된 씬의 켜진 로컬 광원 전부(활성 오브젝트만). 순서 = Unity 객체 ID 오름차순(결정적).</summary>
-        public static BakeLight[] CollectScene(Options opt)
+        /// <summary>
+        /// 로드된 씬의 활성 Light 전부(종류 무관). 순서 = Unity 객체 ID 오름차순(결정적).
+        /// 씬 라이트 탐색은 전부 여기로 — Unity 6.5 의 FindObjectsOfType·GetInstanceID 폐지 대응을 한 곳에서.
+        /// </summary>
+        public static List<Light> FindSceneLights()
         {
 #if UNITY_6000_5_OR_NEWER
             var all = new List<Light>(Object.FindObjectsByType<Light>());
@@ -116,8 +119,11 @@ namespace HuskyLibs.CustomLightmapper.Bake
             var all = new List<Light>(Object.FindObjectsOfType<Light>());
             all.Sort((a, b) => a.GetInstanceID().CompareTo(b.GetInstanceID()));
 #endif
-            return Convert(all, opt);
+            return all;
         }
+
+        /// <summary>로드된 씬의 켜진 로컬 광원 전부(활성 오브젝트만). 순서 = <see cref="FindSceneLights"/>.</summary>
+        public static BakeLight[] CollectScene(Options opt) => Convert(FindSceneLights(), opt);
 
         /// <summary>출처별 수집(None = 빈 배열).</summary>
         public static BakeLight[] Collect(LocalLightSource source, Light[] listed, Options opt)

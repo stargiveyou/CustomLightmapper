@@ -9,7 +9,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
     ///  T6 LOD(C0-V5) · T7 NonGiAsOccluder · T8 경고 무제외(WarnOnly).
     ///  T9 판정 순서 전수(§4.3 — 각 규칙이 뒤 규칙 조건을 모두 가진 후보에서 이긴다) ·
     ///  T10 확장 사유(RendererDisabled·NonTriangleTopology·WarnOnly=false) · T11 경고 부착 범위 ·
-    ///  T12 Report(§7 형식·조치 문구·상세 절단·결정성) · T13 Pick(병렬 목록 대응·길이 불일치 예외).
+    ///  T12 Report(§7 형식·조치 문구·상세 절단·결정성) · T13 Pick(병렬 목록 대응·길이 불일치 예외) ·
+    ///  T14 SceneMembers(프로브 볼륨 정적 입력 = Receiver ∪ OccluderOnly, Entries 순서 — v15.19).
     /// 순수 함수라 씬·에디터·GPU 불필요(헤드리스). 호출: Debug.Log(SceneCollectPolicyTests.RunAll());
     /// </summary>
     public static class SceneCollectPolicyTests
@@ -32,6 +33,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             TestWarningScope(sb, ref pass, ref total);
             TestReport(sb, ref pass, ref total);
             TestPick(sb, ref pass, ref total);
+            TestSceneMembers(sb, ref pass, ref total);
             sb.AppendLine($"--- {pass}/{total} PASS ---");
             return sb.ToString();
         }
@@ -316,6 +318,34 @@ namespace HuskyLibs.CustomLightmapper.Bake
             try { SceneCollectPolicy.Pick(col, new string[cands.Length - 1], col.ReceiverIdx); }
             catch (ArgumentException) { threw = true; }
             Check(sb, ref pass, ref total, "T13: Pick = 병렬 목록에서 인덱스 순서대로 · 길이 불일치 → ArgumentException", ok && threw);
+        }
+
+        // ── T14 SceneMembers ──
+        static void TestSceneMembers(StringBuilder sb, ref int pass, ref int total)
+        {
+            var col = SceneCollectPolicy.Run(Mixed(200, 9), SceneCollectOptions.Default);
+            var m = SceneCollectPolicy.SceneMembers(col);
+
+            // 집합 = Receiver ∪ OccluderOnly(서로소) · 순서 = Entries 오름차순(두 목록을 이어 붙인 것이 아님)
+            bool count = m.Length == col.ReceiverCount + col.OccluderCount && col.ReceiverCount > 0 && col.OccluderCount > 0;
+            bool asc = StrictlyAscending(m);
+            bool member = true;
+            foreach (int i in m) member &= col.Entries[i].Class != CollectClass.Excluded;
+            var merged = new int[col.ReceiverIdx.Length + col.OccluderIdx.Length];
+            col.ReceiverIdx.CopyTo(merged, 0);
+            col.OccluderIdx.CopyTo(merged, col.ReceiverIdx.Length);
+            Array.Sort(merged);
+            bool same = SameInts(m, merged);
+            // 섞여 있어야 '이어 붙이기'와 구별된다 — occluder 가 receiver 보다 앞선 곳이 1개 이상
+            bool interleaved = col.OccluderIdx.Length > 0 && col.ReceiverIdx.Length > 0 && col.OccluderIdx[0] < col.ReceiverIdx[col.ReceiverIdx.Length - 1];
+
+            var empty = SceneCollectPolicy.SceneMembers(SceneCollectPolicy.Run(null, SceneCollectOptions.Default));
+            bool threw = false;
+            try { SceneCollectPolicy.SceneMembers(null); }
+            catch (ArgumentNullException) { threw = true; }
+            Check(sb, ref pass, ref total,
+                  $"T14: SceneMembers = Receiver {col.ReceiverCount} ∪ Occluder {col.OccluderCount} = {m.Length} · Entries 오름차순(섞인 순서 유지) · Excluded 없음 · 빈 입력 0 · null → 예외",
+                  count && asc && member && same && interleaved && empty.Length == 0 && threw);
         }
 
         // ── 유틸 ──
