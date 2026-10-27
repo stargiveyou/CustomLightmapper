@@ -165,11 +165,12 @@ namespace HuskyLibs.CustomLightmapper.Bake
         readonly DirectionalLight _sun;
         readonly ISky _sky;
         readonly BakeQualitySettings _q;
+        readonly BakeLight[] _lights;
         Vector3[] _p, _nrm;
         uint[] _seed, _state;
 
-        public CpuPathAccum(IRadianceScene scene, DirectionalLight sun, ISky sky, BakeQualitySettings q)
-        { _scene = scene; _sun = sun; _sky = sky; _q = q; }
+        public CpuPathAccum(IRadianceScene scene, DirectionalLight sun, ISky sky, BakeQualitySettings q, BakeLight[] lights = null)
+        { _scene = scene; _sun = sun; _sky = sky; _q = q; _lights = lights; }
 
         public void Bind(Vector3[] points, Vector3[] normals, uint[] seeds, int n)
         {
@@ -182,10 +183,10 @@ namespace HuskyLibs.CustomLightmapper.Bake
             for (int i = 0; i < _state.Length; i++)
             {
                 // EvaluateRadiance 와 같은 순서: 직사(원반 샘플링 위상 = 시드) → 간접(RNG = 시드)
-                direct[i] = RadianceCore.EvaluateDirectSampled(_scene.Occluder, _p[i], _nrm[i], _sun, _q.DirectSamples, _seed[i]);
+                direct[i] = RadianceCore.EvaluateDirectPrimary(_scene.Occluder, _p[i], _nrm[i], _sun, _q.DirectSamples, _seed[i], _lights);
                 _state[i] = new Rng(_seed[i]).State;
                 Vector3 s = Vector3.zero; float q2 = 0f;
-                RadianceCore.AccumulateIndirect(_scene, _p[i], _nrm[i], _sun, _sky, _q, ref _state[i], samples, ref s, ref q2);
+                RadianceCore.AccumulateIndirect(_scene, _p[i], _nrm[i], _sun, _sky, _q, ref _state[i], samples, ref s, ref q2, _lights);
                 sum[i] = s; m2[i] = q2;
             }
         }
@@ -195,7 +196,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             for (int j = 0; j < count; j++)
             {
                 int i = active[j];
-                RadianceCore.AccumulateIndirect(_scene, _p[i], _nrm[i], _sun, _sky, _q, ref _state[i], samples, ref sum[i], ref m2[i]);
+                RadianceCore.AccumulateIndirect(_scene, _p[i], _nrm[i], _sun, _sky, _q, ref _state[i], samples, ref sum[i], ref m2[i], _lights);
             }
         }
 

@@ -18,6 +18,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
     public class AtlasApplyDebug : MonoBehaviour
     {
         public enum BakeMode { PerInstanceColor, WorldNormal, Checker, Radiance, RadianceGI }
+        public enum LocalLightSource { None, Listed, Scene }
         public enum OccluderKind { BruteForce, BVH }
 
         /// <summary>SSAA(텍셀 내부 슈퍼샘플링) 범위. Off = 기존 경로와 비트 동일.</summary>
@@ -121,6 +122,19 @@ namespace HuskyLibs.CustomLightmapper.Bake
         [Tooltip("태양 각지름(도). 0=하드 그림자. 실제 태양 0.53°, 부드럽게 하려면 1~3°.")]
         [Range(0f, 10f)] public float sunAngularDiameterDeg = 0f;
 
+        [Header("Local Lights — Point · Spot · Area(Rect/Disc)")]
+        [Tooltip("로컬 광원 출처. Scene = 로드된 씬의 켜진 Point/Spot/Area/Disc 라이트 전부(Directional 제외 — 태양은 위 Radiance 설정), " +
+                 "Listed = localLights 배열만, None = 로컬 광원 없음(태양 + 하늘만, 구 거동). Radiance·RadianceGI 모드에서 1차 직사 + 바운스(GI) 에 들어간다.")]
+        public LocalLightSource localLightSource = LocalLightSource.Scene;
+        [Tooltip("localLightSource = Listed 일 때 쓰는 라이트 목록.")]
+        public Light[] localLights;
+        [Tooltip("켜면 Unity 라이트 Mode 를 따름: Baked = 직사+간접, Mixed = 간접만(직사는 실시간 라이트가 그림), Realtime = 제외. 끄면 전부 직사+간접.")]
+        public bool localLightsFollowBakeType = false;
+        [Tooltip("면광원(Rect/Disc) 1차 직사 샘플 수. 면 위 저불일치 점마다 그림자 레이 1발 — 반그림자·근거리 정확도. 8~32 권장.")]
+        [Min(1)] public int areaLightSamples = 16;
+        [Tooltip("그림자 반경(Unity Light 'Baked Shadow Radius')이 있는 Point/Spot 의 1차 직사 샘플 수(반경 0 이면 1발 — 하드 그림자).")]
+        [Min(1)] public int softLightSamples = 8;
+
         [Header("SSAA — 텍셀 내부 슈퍼샘플링(그림자 경계 계단 제거)")]
         [Tooltip("Off=텍셀당 1샘플(기존, 비트 동일) / Adaptive=라이팅 급변 텍셀만 S×S 재샘플(권장) / Full=전 텍셀 S×S(S²배 비용, 레퍼런스). " +
                  "Radiance·RadianceGI 모드에서만 동작한다.")]
@@ -197,6 +211,28 @@ namespace HuskyLibs.CustomLightmapper.Bake
         // 라이팅 베이크 상태(BlitRegion에서 사용)
 
         DirectionalLight _sun;
+        BakeLight[] _bakeLights = System.Array.Empty<BakeLight>();   // 이번 베이크의 로컬 광원(BeginRun 에서 수집 — CPU/Burst/GPU 공유)
+
+        /// <summary>마지막 베이크에 쓴 로컬 광원(검증용).</summary>
+        internal BakeLight[] LastBakeLights => _bakeLights;
+
+        /// <summary>localLightSource 에 따라 로컬 광원을 BakeLight 로 변환(Directional·꺼진 라이트·강도 0 제외).</summary>
+        internal BakeLight[] CollectBakeLights()
+        {
+            var opt = new BakeLightUtil.Options
+            {
+                AreaSamples = Mathf.Max(1, areaLightSamples),
+                SoftSamples = Mathf.Max(1, softLightSamples),
+                FollowBakeType = localLightsFollowBakeType,
+            };
+            switch (localLightSource)
+            {
+                case LocalLightSource.Listed: return BakeLightUtil.Convert(localLights, opt);
+                case LocalLightSource.Scene: return BakeLightUtil.CollectScene(opt);
+                default: return System.Array.Empty<BakeLight>();
+            }
+        }
+
         [ContextMenu("From DirectionalLight Component")]
         public void GetDirectionLightFromLightComponent()
         {
@@ -437,6 +473,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
             // Radiance 모드: 씬 전체(모든 인스턴스) 차폐자 + 광원 1회 구성 → 인스턴스 간 그림자 반영.
             // 메시 스왑 전에 원본 sharedMesh 로 빌드(지오메트리는 uv2 메시와 동일 좌표).
             r.swScene.Start();
+            // 로컬 광원(Point/Spot/Area) — 라이팅 모드만. 씬 구성(Burst/GPU 업로드) 전에 확정.
+            _bakeLights = (mode == BakeMode.Radiance || mode == BakeMode.RadianceGI) ? CollectBakeLights() : System.Array.Empty<BakeLight>();
             if (mode == BakeMode.Radiance)
             {
                 var occTris = BuildWorldTris(ResolveOccluderUnion(filters));
@@ -800,6 +838,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 ? $", denoise={denoiseIterations}×({(denoiseBurst ? "Burst" : "C#")})"
                 : ", denoise=off";
             string occInfo = (occluders != null && occluders.Length > 0) ? $", occluders={occluders.Length}" : "";
+            string lightInfo = (mode == BakeMode.Radiance || mode == BakeMode.RadianceGI)
+                ? $", lights={BakeLightUtil.Summary(_bakeLights)}({localLightSource})" : "";
             // α 상태를 완료 로그에 붙인다 — 알파가 실제로 켜졌는지 한 줄로 확인 가능해야 한다.
             string alphaInfo = !alphaCutoutShadows ? ", alpha=OFF(토글)"
                              : (_alphaData == null || !_alphaData.Enabled) ? ", alpha=DISABLED(컷아웃 머티리얼 0)"
@@ -843,7 +883,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 $" | bake(레이트레이싱)={r.swBake.Elapsed.TotalSeconds:F2}s" +
                 $" | post(denoise+stitch+dilate)={r.swPost.Elapsed.TotalSeconds:F2}s";
 
-            Debug.Log($"[AtlasApply] {filters.Length} insts → atlas {res}×{res}×{pages} {atlasFormat}, util={alloc.Utilization:P1}, mode={mode}{occInfo}{alphaInfo}{directInfo}{ssaaInfo}{batchInfo}{accumInfo}{denoiseInfo}{stitchInfo}{dilateInfo}" +
+            Debug.Log($"[AtlasApply] {filters.Length} insts → atlas {res}×{res}×{pages} {atlasFormat}, util={alloc.Utilization:P1}, mode={mode}{occInfo}{lightInfo}{alphaInfo}{directInfo}{ssaaInfo}{batchInfo}{accumInfo}{denoiseInfo}{stitchInfo}{dilateInfo}" +
                       (alloc.Overflow ? "  ⚠ overflow(클램프됨)" : "") + timeInfo, this);
 
             DisposeBakeScene();
@@ -1081,7 +1121,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                                     Vector3 wn = lm.WorldNormal[li];
                                     // 텍셀별 결정적 시드 → 노이즈 재현 가능. 평가 원점은 표면에서 bias 만큼 띄움.
                                     uint s = LightmapSSAA.TexelSeed(seed, li);
-                                    lin = RadianceCore.EvaluateRadiance(_occluder, wp + wn * surfaceBias, wn, _sun, _ambientLin, aoSamples, s);
+                                    lin = RadianceCore.EvaluateRadiance(_occluder, wp + wn * surfaceBias, wn, _sun, _ambientLin, aoSamples, s, _bakeLights);
                                 }
                                 c = _hdrAtlas ? ToHdrColor(lin) : ToColor(lin);
                                 break;
@@ -1100,7 +1140,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                                     Vector3 wn = lm.WorldNormal[li];
                                     uint s = LightmapSSAA.TexelSeed(seed, li);
                                     // Direct + 경로추적 Indirect (2단 인스턴싱 씬, 하늘=sky). 알베도는 런타임 적용이라 여기선 조도.
-                                    lin = RadianceCore.EvaluateRadiance(_giScene, wp + wn * surfaceBias, wn, _sun, _sky, _giQ, s);
+                                    lin = RadianceCore.EvaluateRadiance(_giScene, wp + wn * surfaceBias, wn, _sun, _sky, _giQ, s, _bakeLights);
                                 }
                                 c = _hdrAtlas ? ToHdrColor(lin) : ToColor(lin);
                                 break;
@@ -1234,7 +1274,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             }
             owned = true;
             if (_burstReady) return new BurstPathAccum(_burstScene, _burstSky, _sun, _giQ);
-            return new CpuPathAccum(_giScene, _sun, _sky, _giQ);
+            return new CpuPathAccum(_giScene, _sun, _sky, _giQ, _bakeLights);
         }
 
         // 임의 점 리스트 → 조도. 1패스(텍셀 중앙)와 SSAA 2패스(서브샘플)가 같은 진입점을 쓴다 —
@@ -1249,7 +1289,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             if (mode == BakeMode.Radiance)
             {
                 for (int k = 0; k < n; k++)
-                    result[k] = RadianceCore.EvaluateRadiance(_occluder, pts[k], nrm[k], _sun, _ambientLin, aoSamples, seeds[k]);
+                    result[k] = RadianceCore.EvaluateRadiance(_occluder, pts[k], nrm[k], _sun, _ambientLin, aoSamples, seeds[k], _bakeLights);
                 return result;
             }
 
@@ -1273,7 +1313,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             }
 
             for (int k = 0; k < n; k++)
-                result[k] = RadianceCore.EvaluateRadiance(_giScene, pts[k], nrm[k], _sun, _sky, _giQ, seeds[k]);
+                result[k] = RadianceCore.EvaluateRadiance(_giScene, pts[k], nrm[k], _sun, _sky, _giQ, seeds[k], _bakeLights);
             return result;
         }
 
@@ -1796,7 +1836,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             //   Gpu 도 BurstScene 이 필요(GpuScene 이 생성자에서 이 SoA 를 ComputeBuffer 로 업로드). _burstSky 는 uniform 값 공급.
             if (radianceBackend == RadianceBackend.Burst || radianceBackend == RadianceBackend.Gpu)
             {
-                _burstScene = BurstScene.Create(_giBvh, _giMeshAlbedo, _alphaData, Allocator.Persistent);
+                _burstScene = BurstScene.Create(_giBvh, _giMeshAlbedo, _alphaData, _bakeLights, Allocator.Persistent);   // 로컬 광원 포함(GpuScene 도 여기서 업로드)
                 _burstSky = BurstSky.FromSky(_sky);
                 _burstReady = true;
             }

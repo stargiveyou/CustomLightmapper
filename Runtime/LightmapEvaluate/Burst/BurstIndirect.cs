@@ -101,6 +101,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 }
 
                 Vector3 eD = DirectAt(scene, sun, hp, hn);               // 바운스 표면 직접 조도
+                if (scene.lightCount > 0) eD = BurstLights.AddBounce(eD, scene, hp, hn);   // + 로컬 광원(중심 1발, 전 광원)
                 acc += Vector3.Scale(tp, Vector3.Scale(alb, eD));
                 tp = Vector3.Scale(tp, alb);                              // throughput *= ρ
 

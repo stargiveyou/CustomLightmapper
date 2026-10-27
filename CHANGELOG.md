@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added — 로컬 광원 L1: Point · Spot · Area (2026-10-27)
+- `BakeLight`(POD 112B: Point/Spot/Rect/Disc · `FlagDirect`/`FlagShadows` · 광원별 `Samples`) + `LightSampling`(CPU·Burst 공용 제네릭 `Irradiance`, URP 감쇠·스포트 식, 면광원 결정적 저불일치 샘플링·π·L 클램프) + `BakeLightUtil`(Unity `Light` 변환·씬 수집).
+- 텍스처 라이트맵 1차 직사 + 바운스 NEE 에 로컬 광원: CPU `RadianceCore`(`EvaluateRadiance`/`EvaluateDirectPrimary`/`TracePath`/`AccumulateIndirect` 의 `lights` 인자), Burst `BurstScene.lights`(+`BurstLights`), GPU `GpuScene.Lights` + `PathTrace.compute` `DirectAll`(태양 포함 통합 루프).
+- `AtlasApplyDebug`: `localLightSource`(기본 Scene)·`localLights`·`localLightsFollowBakeType`·`areaLightSamples`·`softLightSamples`, 로그 `lights=…`.
+- 테스트 `BakeLightTests`(헤드리스) · `LocalLightBakeTests`(에디터) — RunAll 35종 + 메뉴 "Run Local Light Tests (Point _ Spot _ Area)".
+
+### Changed
+- 씬에 Point/Spot/Area 라이트가 있으면 `AtlasApplyDebug` 재베이크 결과가 바뀜(기본 `localLightSource = Scene`). 구 거동은 `None`. 광원이 없으면 결과 비트 동일.
+- GPU 직사 함수 `DirectNEESampled` → `DirectAll`(태양 + 로컬 광원, 그림자 레이 호출부 1곳). 광원 0개면 같은 연산.
+
 ### Added — GPU 잔여: 적응 샘플링 · 진행형 누적 · GPU 후처리 (2026-10-26)
 - **적응 샘플링**: `AtlasApplyDebug.adaptiveSampling`(기본 off)·`samplesPerPass`(8)·`adaptiveMinSamples`(16)·`adaptiveThreshold`(0.03) — RadianceGI 간접광을 패스로 이어 누적하고, 텍셀별 표준오차 ≤ threshold × 휘도면 멈춤(`indirectSamples` = 상한). CPU/Burst/GPU 공통, 판정은 관리 코드라 배치·진행형과 무관하게 결정적.
 - **진행형 미리보기**: 우클릭 "Bake Progressive (Preview)" / "Cancel Progressive Bake", `progressivePreviewEveryPasses`, 공개 `BeginProgressive`/`ProgressiveStep`/`IsProgressiveRunning`. 저 spp 결과를 즉시 적용 → 패스마다 누적·재합성 → SSAA·저장. 최종 = 같은 설정의 `BakeAndApply`.

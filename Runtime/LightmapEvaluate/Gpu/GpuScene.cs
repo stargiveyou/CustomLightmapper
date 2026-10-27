@@ -103,6 +103,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
         public readonly ComputeBuffer InstNormals;   // 48B: instNormalMatrix 3행 (월드 노멀 변환)
         public readonly ComputeBuffer MeshAlbedo;    // 12B: 메시별 float3 알베도 (모드 A)
         public readonly int TlasCount;
+        // 로컬 광원(BakeLight, 112B — HLSL GpuLight). 광원 0개면 1원소 더미 + LightCount 0. BindLighting 이 _Lights/_LightCount 배선.
+        public readonly ComputeBuffer Lights;
+        public readonly int LightCount;
 
         // α(추가): 알파 컷아웃 any-hit. 순회/조명 버퍼와 별개 — BindAlpha 로만 배선한다.
         //   G4 순회 커널(BvhTraverse.compute)은 이 버퍼들을 선언하지 않으므로 기존 검증이 그대로 산다.
@@ -199,6 +202,15 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 if (n == 0) arr[0] = new Vector3(0.5f, 0.5f, 0.5f);
                 MeshAlbedo = new ComputeBuffer(Mathf.Max(1, n), 12, ComputeBufferType.Structured);
                 MeshAlbedo.SetData(arr);
+            }
+
+            // 로컬 광원 — BurstScene.lights 를 그대로(구조체 = GPU stride). 광원 0개면 더미 1개.
+            {
+                LightCount = s.lights.IsCreated ? Mathf.Min(s.lightCount, s.lights.Length) : 0;
+                Lights = new ComputeBuffer(Mathf.Max(1, LightCount), BakeLight.Stride, ComputeBufferType.Structured);
+                var arr = new BakeLight[Mathf.Max(1, LightCount)];
+                for (int i = 0; i < LightCount; i++) arr[i] = s.lights[i];
+                Lights.SetData(arr);
             }
 
             // α: 알파 컷아웃 데이터. 꺼진 씬은 BurstAlpha 가 이미 1원소 더미를 들고 있어 그대로 올린다.
@@ -321,6 +333,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
         {
             cs.SetBuffer(kernel, "_InstNormals", InstNormals);
             cs.SetBuffer(kernel, "_MeshAlbedo", MeshAlbedo);
+            cs.SetBuffer(kernel, "_Lights", Lights);        // 로컬 광원(조도 커널의 DirectAll) — 선언 안 한 커널엔 무해
+            cs.SetInt("_LightCount", LightCount);
         }
 
         /// <summary>α: 알파 컷아웃 SRV + uniform 배선. <see cref="Bind"/> 이후 호출.
@@ -356,6 +370,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             BlasTriStart?.Dispose();
             InstNormals?.Dispose();
             MeshAlbedo?.Dispose();
+            Lights?.Dispose();
             ATriUV?.Dispose();
             ATriSubmesh?.Dispose();
             AMeshHasCutout?.Dispose();

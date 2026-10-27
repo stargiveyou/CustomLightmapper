@@ -9,7 +9,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
     /// </summary>
     public static class BurstRadianceBaker
     {
-        /// <summary>Burst 경로. seeds 는 per-texel(베이크 시드 규약과 동일하게 채워 넘김). 결과는 호출측 Dispose.</summary>
+        /// <summary>Burst 경로. seeds 는 per-texel(베이크 시드 규약과 동일하게 채워 넘김). 로컬 광원은 scene.lights(BurstScene.Create 광원 오버로드). 결과는 호출측 Dispose.</summary>
         //Direct(G2) + Indirect(G3) = 라이트맵 조도.
         public static NativeArray<Vector3> Bake(in BurstScene scene, BurstSky sky, DirectionalLight sun, BakeQualitySettings q,
         NativeArray<Vector3> points, NativeArray<Vector3> normals, NativeArray<bool> valid,
@@ -28,12 +28,13 @@ namespace HuskyLibs.CustomLightmapper.Bake
             return rad;
         }
 
-        public static Vector3[] BakeCPU(IRadianceScene scene, DirectionalLight sun, ISky sky, BakeQualitySettings q, Vector3[] points, Vector3[] normals, bool[] valid, uint[] seeds)
+        public static Vector3[] BakeCPU(IRadianceScene scene, DirectionalLight sun, ISky sky, BakeQualitySettings q, Vector3[] points, Vector3[] normals, bool[] valid, uint[] seeds,
+                                        BakeLight[] lights = null)
         {
             int n = points.Length;
             var r = new Vector3[n];
             for (int i = 0; i < n; i++)
-                r[i] = valid[i] ? RadianceCore.EvaluateRadiance(scene, points[i], normals[i], sun, sky, q, seeds[i]) : Vector3.zero;
+                r[i] = valid[i] ? RadianceCore.EvaluateRadiance(scene, points[i], normals[i], sun, sky, q, seeds[i], lights) : Vector3.zero;
             return r;
         }
 

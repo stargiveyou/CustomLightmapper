@@ -110,6 +110,17 @@ ResolveTargets()                    대상 MeshFilter 수집 (occluder 차집합
 | `occluderKind` | `OccluderKind` | `BVH` | 차폐 백엔드. BVH=가속 / BruteForce=정답(느림, 교차검증) |
 | `bvhQuality` | `BVH.BuildQuality` | `Median` | BVH 분할 품질 |
 
+### Local Lights (v15.17 — Point · Spot · Area, Radiance·RadianceGI)
+| 필드 | 타입 | 기본값 | 설명 |
+|---|---|---|---|
+| `localLightSource` | `LocalLightSource` | `Scene` | Scene = 로드된 씬의 켜진 Point/Spot/Area/Disc 라이트 · Listed = `localLights` · None = 로컬 광원 없음(구 거동). Directional 은 항상 제외(태양은 `lightDirection`…) |
+| `localLights` | `Light[]` | — | Listed 일 때 목록 |
+| `localLightsFollowBakeType` | `bool` | `false` | Unity Mode 따름: Baked = 직사+간접, Mixed = 간접만, Realtime = 제외 |
+| `areaLightSamples` | `int` (≥1) | `16` | 면광원 1차 직사 샘플(그림자 레이) 수 |
+| `softLightSamples` | `int` (≥1) | `8` | 그림자 반경(Baked Shadow Radius) 있는 Point/Spot 의 1차 직사 샘플 수 |
+
+수집 결과는 internal `LastBakeLights`, 완료 로그 `lights=P1 S0 R1 D0(Scene)`.
+
 ### Radiance GI (mode=RadianceGI — 경로추적 간접광)
 | 필드 | 타입 | 기본값 | 설명 |
 |---|---|---|---|
