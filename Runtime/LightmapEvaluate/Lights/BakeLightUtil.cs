@@ -106,12 +106,16 @@ namespace HuskyLibs.CustomLightmapper.Bake
             return list.ToArray();
         }
 
-        /// <summary>로드된 씬의 켜진 로컬 광원 전부(활성 오브젝트만). 순서 = 인스턴스 ID 오름차순(결정적).</summary>
+        /// <summary>로드된 씬의 켜진 로컬 광원 전부(활성 오브젝트만). 순서 = Unity 객체 ID 오름차순(결정적).</summary>
         public static BakeLight[] CollectScene(Options opt)
         {
-            // FindObjectsOfType: 2021.3~Unity6 공통(U6 에선 deprecated 경고만) — AtlasApplyDebug 의 기존 사용과 같은 규약
+#if UNITY_6000_5_OR_NEWER
+            var all = new List<Light>(Object.FindObjectsByType<Light>());
+            all.Sort((a, b) => a.GetEntityId().CompareTo(b.GetEntityId()));
+#else
             var all = new List<Light>(Object.FindObjectsOfType<Light>());
             all.Sort((a, b) => a.GetInstanceID().CompareTo(b.GetInstanceID()));
+#endif
             return Convert(all, opt);
         }
 
