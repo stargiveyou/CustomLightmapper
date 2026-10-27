@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed (2026-10-27)
+- `SH9BakeTextureTest` "Bake SH & Write Texture": PNG 저장 경로가 구 저장소 경로 `Assets/Study/CustomLightmapper/Script/SH/` 로 고정돼 폴더가 없으면 쓰기가 실패하던 문제 → 새 필드 `outputFolder`(기본 `Assets/CustomLightmapper/BakeOutput`, 없으면 생성).
+- 에디터 메뉴 `Husky/Tool/Custom Lightmapper//Allocate Selected (per-instance ST)` 경로의 `//` 제거 → `Husky/Tool/Custom Lightmapper/Allocate Selected (per-instance ST)`.
+
 ### Docs — 챕터별 테스트 · 실행 소스 사용 매뉴얼 (2026-10-27)
 - `Documentation~/06_Manual/챕터별_테스트_실행_매뉴얼.md`: 챕터(A1~A4 · C0 · C1 · C2 · 로컬 광원 · G0~G6 · Track A · 후처리 · α · SH · Track B)별 실행 컴포넌트·메뉴 사용 순서, 테스트 실행 메뉴·요구 조건(Compute/URP/렌더)·확인 내용, RunAll 38종 순서표, RunAll 밖 테스트, 문제 해결. README · 00_INDEX · 05 가이드에서 링크.
 

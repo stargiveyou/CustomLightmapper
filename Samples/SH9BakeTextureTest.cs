@@ -40,7 +40,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
         [Header("Texture Output")]
         [Min(8)] public int panelWidth = 256;
         [Min(4)] public int panelHeight = 128;
-        [Tooltip("SH 폴더에 저장할 PNG 파일명(확장자 제외).")]
+        [Tooltip("PNG 저장 폴더(프로젝트 기준, 예: Assets/…). 없으면 만든다 — 기본값은 베이커 결과와 같은 폴더.")]
+        public string outputFolder = "Assets/CustomLightmapper/BakeOutput";
+        [Tooltip("outputFolder 에 저장할 PNG 파일명(확장자 제외).")]
         public string fileName = "SH9_BakeTest";
         [Tooltip("표시용 감마(1/2.2) 인코딩. 끄면 선형 클램프.")]
         public bool gammaEncode = true;
@@ -99,7 +101,10 @@ namespace HuskyLibs.CustomLightmapper.Bake
             }
             tex.Apply();
 
-            string dir = Path.Combine(Application.dataPath, "Study/CustomLightmapper/Script/SH");
+            // 프로젝트 기준 폴더 → 절대 경로, 없으면 생성(구 고정 경로 Assets/Study/… 는 패키지 이전 후 없어 쓰기가 실패했다)
+            string folder = string.IsNullOrEmpty(outputFolder) ? "Assets" : outputFolder.Replace('\\', '/').TrimEnd('/');
+            string dir = Path.Combine(Path.GetDirectoryName(Application.dataPath), folder);
+            Directory.CreateDirectory(dir);
             string path = Path.Combine(dir, fileName + ".png");
             File.WriteAllBytes(path, tex.EncodeToPNG());
             _lastPath = path;
