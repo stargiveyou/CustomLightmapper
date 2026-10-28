@@ -12,6 +12,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
     /// 폴백 SH(<see cref="fallbackSH"/>, 하늘만): 픽셀 셰이더(B1-4)가 볼륨 밖으로 페이드할 대상.
     /// 정점 AO(<see cref="vertexAO"/>, B1-5): 템플릿 메시별 AO 메시 사본(uv3 = 앞/뒷면 AO, 서브에셋) — 볼륨과 무관하지만 같은 베이크·파일로 관리.
     /// 알파(B1-6): <see cref="alphaCutout"/> = 베이크 레이가 컷아웃 머티리얼 구멍을 통과했는지(기록용 — 런타임 무관).
+    /// 배치(B2 — 결정 D1): <see cref="columnHeights"/> 가 비면 균일 3D 격자, 있으면 지형 추종 2.5D(<see cref="ProbeTerrainLayers"/> —
+    ///   열 (i,k) 지면 높이 + 층, grid.origin.y = 지면 위 첫 층 높이). 계수·valid·Texture3D 는 같은 인덱스 공간 그대로, 픽셀 셰이더용
+    ///   높이맵 <see cref="heightTexture"/>(RFloat dims.x × dims.z, 서브에셋)만 추가.
     /// 인스턴스 배치는 저장하지 않는다 — 배치가 바뀌면 <see cref="Sample"/> 만 다시(재베이크 불필요, 결정 D2).
     /// 대량 프로브(수십만 × 7 float4)라 바이너리 직렬화.
     /// </summary>
@@ -34,6 +37,10 @@ namespace HuskyLibs.CustomLightmapper.Bake
         public Texture3D[] textures = Array.Empty<Texture3D>();
         [Tooltip("폴백 SH(하늘만 — 빈 씬 베이크, SHPacked 7×float4). 픽셀 셰이더가 볼륨 밖 페이드 대상으로 사용(B1-4). 비어 있으면 페이드 없이 경계 클램프.")]
         public Vector4[] fallbackSH = Array.Empty<Vector4>();
+        [Tooltip("B2 지형 추종: 열 (i,k) 지면 높이(길이 dims.x × dims.z, 인덱스 i + dims.x·k). 비어 있으면 균일 3D 격자. 이때 grid.origin.y = 지면 위 첫 층 높이.")]
+        public float[] columnHeights = Array.Empty<float>();
+        [Tooltip("B2: 열 높이 텍스처(서브에셋, RFloat dims.x × dims.z, Point·Clamp) — 픽셀 셰이더 _HuskyPV_Height. 균일 격자면 없음.")]
+        public Texture2D heightTexture;
 
         [Header("베이크 정보 (읽기 전용)")]
         public int dirCount;
@@ -53,6 +60,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
         public string lightLog;
         [Tooltip("베이크 씬 구성 요약(템플릿·정적 메시 출처 Roots/Collected·템플릿 중복 제외 수·BLAS·인스턴스 수).")]
         public string sceneLog;
+        [Tooltip("B2: 배치 요약(균일 / 지형 추종 — 층 수·지면 높이 범위·균일 환산 프로브 수·절감률·지면 미스 열).")]
+        public string layoutLog;
         [Tooltip("같은 계수의 EXR 사본(32-bit float). 레이아웃은 ExrLayout 참조.")]
         public Texture2D coefficientsExr;
 
@@ -72,6 +81,10 @@ namespace HuskyLibs.CustomLightmapper.Bake
         public VertexAOBake.Settings vertexAOSettings;
 
         public int ProbeCount => grid.Count;
+        /// <summary>B2 지형 추종 배치인지(열 높이 있음).</summary>
+        public bool IsTerrainLayers => columnHeights != null && columnHeights.Length > 0;
+        /// <summary>프로브 idx 의 월드 위치(균일 = grid.Position, 지형 추종 = 열 높이 반영).</summary>
+        public Vector3 ProbePosition(int index) => ProbeTerrainLayers.Position(grid, columnHeights, index);
 
         /// <summary>원본 템플릿 메시의 AO 메시(없으면 null).</summary>
         public Mesh FindAOMesh(Mesh source)
@@ -90,6 +103,13 @@ namespace HuskyLibs.CustomLightmapper.Bake
             { error = $"SH 패킹 {shPacked?.Length ?? 0} ≠ 기대 {n * SHPacked.Float4Count}(프로브 {n} × 7)"; return false; }
             if (valid != null && valid.Length != 0 && valid.Length != n)
             { error = $"valid 길이 {valid.Length} ≠ 프로브 {n}"; return false; }
+            if (IsTerrainLayers)
+            {
+                int cols = ProbeTerrainLayers.ColumnCount(grid);
+                if (columnHeights.Length != cols) { error = $"열 높이 {columnHeights.Length} ≠ 열 {cols}(dims.x × dims.z)"; return false; }
+                foreach (float h in columnHeights)
+                    if (float.IsNaN(h) || float.IsInfinity(h)) { error = "열 높이에 NaN/Inf"; return false; }
+            }
             error = null;
             return true;
         }
@@ -104,7 +124,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
         }
 
         /// <summary>
-        /// 위치 배열에서 볼륨 샘플(CPU trilinear — <see cref="ProbeGrid.Sample(SH9[], bool[], Vector3)"/>). 패킹은 호출당 1회 해제.
+        /// 위치 배열에서 볼륨 샘플(CPU trilinear — <see cref="ProbeTerrainLayers.Sample"/>: 균일이면 <see cref="ProbeGrid.Sample(SH9[], bool[], Vector3)"/> 그대로,
+        /// 지형 추종이면 열 격자 기준). 패킹은 호출당 1회 해제.
         /// <paramref name="useValidity"/> 면 무효 탭 가중치 0(dilation 과 이중 방어).
         /// </summary>
         public SH9[] Sample(Vector3[] points, bool useValidity = true)
@@ -112,7 +133,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             var sh = UnpackProbes();
             bool[] mask = useValidity && valid != null && valid.Length == sh.Length ? valid : null;
             var outp = new SH9[points.Length];
-            for (int i = 0; i < points.Length; i++) outp[i] = grid.Sample(sh, mask, points[i]);
+            for (int i = 0; i < points.Length; i++) outp[i] = ProbeTerrainLayers.Sample(grid, columnHeights, sh, mask, points[i]);
             return outp;
         }
 
@@ -149,6 +170,29 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 texs[t] = tex;
             }
             return texs;
+        }
+
+        /// <summary>
+        /// B2 열 높이 → Texture2D(RFloat, 미지원이면 RGBAFloat — half 는 높이 정밀도가 부족) dims.x × dims.z, Point·Clamp.
+        /// 텍셀 (i, k) = heights[i + dims.x·k](SetPixels 순서 x + w·y). 셰이더는 Load 로 4탭을 읽어 CPU 와 같은 식으로 bilinear.
+        /// </summary>
+        public static Texture2D CreateHeightTexture(in ProbeGrid grid, float[] heights, string name = "ProbeHeight")
+        {
+            int w = grid.dims.x, h = grid.dims.z;
+            if (heights == null || heights.Length != w * h)
+                throw new ArgumentException($"열 높이 {heights?.Length ?? 0} ≠ {w}×{h}", nameof(heights));
+            var fmt = SystemInfo.SupportsTextureFormat(TextureFormat.RFloat) ? TextureFormat.RFloat : TextureFormat.RGBAFloat;
+            var tex = new Texture2D(w, h, fmt, false, true)
+            {
+                name = name,
+                wrapMode = TextureWrapMode.Clamp,
+                filterMode = FilterMode.Point,
+            };
+            var px = new Color[w * h];
+            for (int i = 0; i < px.Length; i++) px[i] = new Color(heights[i], 0f, 0f, 1f);
+            tex.SetPixels(px);
+            tex.Apply(false);
+            return tex;
         }
 
         // ───────────────────────── EXR 사본 ─────────────────────────

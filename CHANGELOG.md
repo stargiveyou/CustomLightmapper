@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added — Track B B2: 지형 추종 2.5D 프로브 (2026-10-28)
+- `ProbeTerrainLayers`(Runtime/ProbeVolume): 결정 D1 의 적응형 배치 — XZ 균일 격자 × 열 (i,k) 지면 높이 + 층. 점 p 의 '열 격자'(origin.y 만 H(p.xz) + 첫 층 높이)로 위치·샘플·셰이더가 균일 규약을 그대로 쓴다. 열 높이 bilinear · 지면 레이(`ColumnHeights`, 미스 열은 이웃 링 평균) · 절감 리포트(`Measure`/`Describe`).
+- `ProbeVolumeBaker.layout`(`Uniform` 기본 / `TerrainLayers`) · `groundOffset`(0.25) · `layerHeight`(6) · `groundRoots`(비우면 정적 입력 — 템플릿 제외) · Bake 로그 `layout:`(균일 환산 대비 프로브·메모리 절감률).
+- `ProbeVolumeAsset.columnHeights` · `heightTexture`(RFloat, 서브에셋) · `layoutLog` · `ProbePosition` · `IsTerrainLayers`. `HuskyProbeVolume.hlsl` `_HuskyPV_Height` + `_HuskyPV_Params.w` · `ProbeVolumeShaderBinding` 높이 텍스처 바인딩·지형 추종 CPU 미러.
+- `ProbeGrid` partial 분리 — `ProbeGrid.Bake.cs` 에 위치 배열판 `BakeBurstAt` · `BakeGpuAt`(격자판은 위임).
+- 테스트 `ProbeTerrainLayersTests`(헤드리스 10/10) · `ProbeVolumeTerrainTests`(에디터) — RunAll 40종.
+
+### Changed
+- 기본 `layout = Uniform` 은 구 거동 그대로(위치 배열 = `grid.Positions()` — 비트 동일). `ProbeVolumeGpuSampleTests` 헬퍼 internal(B2 GPU 테스트가 재사용).
+
 ### Changed — 적응 샘플링 기본값 · 0 고착 방지 (2026-10-28)
 - `AtlasApplyDebug.samplesPerPass` 기본 8 → **32**. 8 은 256 상한에서 패스 32회 × (디스패치 · readback · 판정) 오버헤드로 같은 평균 spp 의 균등 베이크보다 1.7배 느렸다(0.83s ↔ 0.48s). 32 에서 0.53s, 상대오차 relMean 0.0145 · P99 0.086(균등 75: 0.0202 · 0.177). 진행형 미리보기도 같은 필드라 패스가 줄고 빨라진다. 씬에 저장된 기존 값(8)은 그대로이니 필요하면 인스펙터에서 바꿀 것.
 - `ProgressiveAccumulator`: 경로가 전부 0 인 점(m2 == 0)은 분산 0 → 첫 판정에서 바로 '수렴'해 접촉 그림자 텍셀이 0 으로 굳던 문제 → `MinSamples × ZeroPathMinFactor(4)`(≤ MaxSamples)까지 유지. 임시 씬에서 0 고착 84 → 3 텍셀(균등 75 와 같음), 비용 +2% spp. `Converged()` 자체는 그대로(순수 함수 · 테스트 D 불변).

@@ -17,7 +17,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
     /// </summary>
     public static class ProbeVolumeGpuSampleTests
     {
-        const string TestShader = "Hidden/HuskyLibs/ProbeVolumeSampleTest";
+        internal const string TestShader = "Hidden/HuskyLibs/ProbeVolumeSampleTest";
 
         public static string RunAll()
         {
@@ -72,7 +72,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             return a;
         }
 
-        static SH9[] ReadBackProbes(ProbeVolumeAsset a)
+        internal static SH9[] ReadBackProbes(ProbeVolumeAsset a)
         {
             int n = a.grid.Count;
             var packed = new Vector4[n * SHPacked.Float4Count];
@@ -194,8 +194,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
             finally { Object.DestroyImmediate(mat); }
         }
 
-        // 한 그룹: 바인딩(Material) → N×1 Blit → ReadPixels → CPU 미러와 |Δ| ≤ tol·(1 + |E|)
-        static void RunGroup(StringBuilder sb, ref int pass, ref int total, Material mat, ProbeVolumeAsset a, SH9[] probes,
+        // 한 그룹: 바인딩(Material) → N×1 Blit → ReadPixels → CPU 미러와 |Δ| ≤ tol·(1 + |E|). B2 지형 추종 에셋이면 미러도 열 높이 반영.
+        internal static void RunGroup(StringBuilder sb, ref int pass, ref int total, Material mat, ProbeVolumeAsset a, SH9[] probes,
                              string name, List<Vector3> pts, List<Vector4> nrm, float biasCells, float fadeCells, float tol)
         {
             int n = pts.Count;
@@ -229,7 +229,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                     Color c = tex.GetPixel(i, 0);
                     Vector3 nn = new Vector3(nrm[i].x, nrm[i].y, nrm[i].z);
                     Vector3 cpu = a != null
-                        ? ProbeVolumeShaderBinding.EvaluateIrradiance(grid, probes, fb, v, pts[i], nn, nrm[i].w)
+                        ? ProbeVolumeShaderBinding.EvaluateIrradiance(grid, a.columnHeights, probes, fb, v, pts[i], nn, nrm[i].w)
                         : Vector3.zero;
                     float err = MaxAbs(new Vector3(c.r, c.g, c.b) - cpu);
                     maxErr = Mathf.Max(maxErr, err);
@@ -263,13 +263,13 @@ namespace HuskyLibs.CustomLightmapper.Bake
             return new Vector3(Lerp(rng, lo.x, hi.x), Lerp(rng, lo.y, hi.y), Lerp(rng, lo.z, hi.z));
         }
 
-        static Vector3 RandDir(System.Random rng)
+        internal static Vector3 RandDir(System.Random rng)
         {
             Vector3 d;
             do d = new Vector3(Lerp(rng, -1f, 1f), Lerp(rng, -1f, 1f), Lerp(rng, -1f, 1f)); while (d.sqrMagnitude < 1e-2f || d.sqrMagnitude > 1f);
             return d.normalized;
         }
 
-        static Vector4 Dir4(Vector3 d, float t) => new Vector4(d.x, d.y, d.z, t);
+        internal static Vector4 Dir4(Vector3 d, float t) => new Vector4(d.x, d.y, d.z, t);
     }
 }

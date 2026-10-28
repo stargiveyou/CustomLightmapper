@@ -1,5 +1,4 @@
 using System;
-using Unity.Collections;
 using UnityEngine;
 
 namespace HuskyLibs.CustomLightmapper.Bake
@@ -13,9 +12,11 @@ namespace HuskyLibs.CustomLightmapper.Bake
     ///   HW trilinear(Clamp) ≡ <see cref="Sample(SH9[], bool[], Vector3)"/>(볼륨 밖은 경계 프로브로 클램프).
     /// 베이크: 격자 위치를 그대로 <see cref="BurstSHBaker"/>/<see cref="GpuSHBaker"/> 의 points 로 넘김 — 신규 커널 없음.
     /// SH 계수는 입사 radiance 에 선형이라 위치에 대한 선형 보간도 유효한 SH(= 조도 보간).
+    /// 이 파일 = 배치·인덱싱·샘플(엔진 API 는 Vector3·Mathf 만 — 헤드리스 테스트 대상), 베이크 연결은 ProbeGrid.Bake.cs(partial).
+    /// B2 지형 추종 배치는 <see cref="ProbeTerrainLayers"/>(열 높이 + 이 격자의 규약 재사용).
     /// </summary>
     [Serializable]
-    public struct ProbeGrid
+    public partial struct ProbeGrid
     {
         /// <summary>GpuSHBaker 1D 디스패치 한도: (n+63)/64 그룹 ≤ 65535.</summary>
         public const int MaxGpuProbes = 65535 * 64;
@@ -132,7 +133,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         }
 
         // 축 하나: g → (하위 프로브, 분율). 볼륨 밖은 경계로 클램프(NaN → 0). n=1 축은 항상 (0, 0).
-        static void Axis(float g, int n, out int i0, out float f)
+        internal static void Axis(float g, int n, out int i0, out float f)
         {
             if (n <= 1) { i0 = 0; f = 0f; return; }
             g = g > 0f ? Mathf.Min(g, n - 1) : 0f;
@@ -152,49 +153,6 @@ namespace HuskyLibs.CustomLightmapper.Bake
             a.c0 *= s; a.c1 *= s; a.c2 *= s;
             a.c3 *= s; a.c4 *= s; a.c5 *= s;
             a.c6 *= s; a.c7 *= s; a.c8 *= s;
-        }
-
-        // ───────────────────────── 베이크 (재사용) ─────────────────────────
-
-        /// <summary>GPU 커널 이름 — <see cref="BakeGpu"/> 에 넘길 kernel 은 이 이름으로 FindKernel.</summary>
-        public static string GpuKernelName(BakeQualitySettings q) => q.MaxBounces > 1 ? "CSSHBakeMulti" : "CSSHBake";
-
-        /// <summary>
-        /// 전 프로브 Burst 베이크(선형 인덱스 순서). q.MaxBounces ≤ 1 → <see cref="BurstSHBaker.Bake"/>(1바운스+앰비언트 근사, 결정적),
-        /// ≥ 2 → <see cref="BurstSHBaker.BakeMultiBounce"/>(경로추적) — <see cref="InstanceSceneBaker"/> 의 bounces 규약과 동일.
-        /// </summary>
-        public readonly SH9[] BakeBurst(in BurstScene scene, BurstSky sky, DirectionalLight sun, BakeQualitySettings q, int dirCount, uint seed)
-        {
-            var pts = new NativeArray<Vector3>(Positions(), Allocator.TempJob);
-            try
-            {
-                var outp = q.MaxBounces > 1
-                    ? BurstSHBaker.BakeMultiBounce(scene, sky, sun, q, pts, dirCount, seed, Allocator.TempJob)
-                    : BurstSHBaker.Bake(scene, sky, sun, pts, dirCount, Allocator.TempJob);
-                var arr = outp.ToArray();
-                outp.Dispose();
-                return arr;
-            }
-            finally { pts.Dispose(); }
-        }
-
-        /// <summary>
-        /// 전 프로브 GPU 베이크 — kernel 은 <see cref="GpuKernelName"/>(q) 로 찾은 것. 방향셋은 Burst 와 같은 피보나치를 CPU 에서 계산해
-        /// 업로드(교차검증 계약). 프로브 수 ≤ <see cref="MaxGpuProbes"/>.
-        /// </summary>
-        public readonly SH9[] BakeGpu(GpuScene gpu, ComputeShader cs, int kernel, DirectionalLight sun, BurstSky sky,
-                                      BakeQualitySettings q, int dirCount, uint seed)
-        {
-            if (Count > MaxGpuProbes)
-                throw new ArgumentOutOfRangeException(nameof(dims), $"프로브 {Count}개 > GPU 디스패치 한도 {MaxGpuProbes}");
-            var dirsNa = BurstSHBaker.FibonacchiSphere(dirCount, Allocator.Temp);
-            var dirs = dirsNa.ToArray();
-            dirsNa.Dispose();
-            float w = 4f * Mathf.PI / dirCount;
-            var pts = Positions();
-            return q.MaxBounces > 1
-                ? GpuSHBaker.BakeMultiBounce(gpu, cs, kernel, sun, sky, q, seed, pts, dirs, w)
-                : GpuSHBaker.Bake(gpu, cs, kernel, sun, sky, pts, dirs, w);
         }
 
         public override readonly string ToString() =>

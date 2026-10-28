@@ -97,6 +97,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
             sb.AppendLine(ProbeAlphaTests.RunAll());              // Track B B1-6 알파 잎 차폐: ᾱ=1 ≡ 알파 없음·ᾱ=0 ≡ 메시 제거(비트 동일)·체커 ≈0.5·정점 AO·베이커 머티리얼 경로·GPU
             sb.AppendLine(BakeSceneCollectPolicyTests.RunAll());      // C0 수집 정책(결정성·배타성·LOD·사유 우선순위·리포트·SceneMembers — 헤드리스)
             sb.AppendLine(ProbeVolumeC0Tests.RunAll());           // Track B 정적 입력 C0 합류: Roots 구 거동·Collected ≡ Roots·템플릿 중복 제외(비트 동일)·빈 입력
+            sb.AppendLine(ProbeTerrainLayersTests.RunAll());      // Track B B2 지형 추종 2.5D 배치: 높이 0·상수 ≡ 균일(비트 동일)·열 높이 bilinear·경사 샘플·지면 레이·미스 보간·절감 리포트(헤드리스)
+            sb.AppendLine(ProbeVolumeTerrainTests.RunAll());      // Track B B2 베이커: 평지·경사 열 높이·코어 직접 파이프라인 ≡(비트 동일)·지면 규칙·인스턴스 샘플·바인딩·GPU ≡ CPU(렌더 컨텍스트)
             Debug.Log(sb.ToString(), this);
         }
 
@@ -161,11 +163,11 @@ namespace HuskyLibs.CustomLightmapper.Bake
         [ContextMenu("Run Atlas Bake Asset Test (step 9)")]
         public void RunAtlasBakeAssetTest() => Debug.Log(AtlasBakeAssetTests.RunAll(), this);
 
-        [ContextMenu("Run Probe Volume Tests (Track B B1-1 ~ B1-6 + C0)")]
+        [ContextMenu("Run Probe Volume Tests (Track B B1-1 ~ B1-6 + C0 + B2)")]
         public void RunProbeVolumeTests() =>
             Debug.Log(ProbeGridTests.RunAll() + "\n" + ProbeValidityTests.RunAll() + "\n" + ProbeVolumeBakerTests.RunAll()
                       + "\n" + ProbeVolumeGpuSampleTests.RunAll() + "\n" + VertexAOBakeTests.RunAll() + "\n" + ProbeAlphaTests.RunAll()
-                      + "\n" + ProbeVolumeC0Tests.RunAll(), this);
+                      + "\n" + ProbeVolumeC0Tests.RunAll() + "\n" + ProbeTerrainLayersTests.RunAll() + "\n" + ProbeVolumeTerrainTests.RunAll(), this);
 
         [ContextMenu("Run Scene Collect Tests (C0)")]
         public void RunSceneCollectTests() => Debug.Log(BakeSceneCollectPolicyTests.RunAll() + "\n" + ProbeVolumeC0Tests.RunAll(), this);

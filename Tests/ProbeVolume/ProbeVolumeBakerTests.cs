@@ -388,6 +388,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             if (a == null) return;
             if (a.textures != null) foreach (var t in a.textures) if (t != null) Object.DestroyImmediate(t);
             if (a.vertexAO != null) foreach (var e in a.vertexAO) if (e?.aoMesh != null) Object.DestroyImmediate(e.aoMesh);   // B1-5 AO 메시 사본
+            if (a.heightTexture != null) Object.DestroyImmediate(a.heightTexture);   // B2 열 높이 텍스처
             Object.DestroyImmediate(a);
         }
 

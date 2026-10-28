@@ -3,7 +3,7 @@
 > 기준: 기획서 v15 §2 「Track B(식생): Light Probe/SH9(주) + 정점 베이크(보조), 텍스처 회피」 · §8 마일스톤 B1 · §9.1 결정 ②(프로브+정점) ⑥(적응형 프로브) · §11 다음 단계 5번.
 > 선행: 공유 코어(2단 BVH·경로추적, CPU/Burst/GPU) ✅ · SH 트랙(SH9·`BurstSHBaker`/`GpuSHBaker` 1/다바운스·`EvaluateSH9.hlsl`·`InstanceSceneBaker`/`InstanceSHBakeAsset`) ✅.
 > 원칙: **코어(BVH·순회·RadianceCore·SH 베이커) 무수정 재사용**, 신규는 별도 파일. (B1-6 은 원래 유일한 코어 변경 예정이었으나 D5 갱신으로 패키지 α any-hit 를 그대로 써서 코어 무수정.)
-> **진행(2026-10-26)**: D1~D6 권장안 확정 · B1-1 `ProbeGrid` · B1-2 `BurstProbeValidity`(v15.7) · B1-3 `ProbeVolumeAsset`·`ProbeVolumeBaker`·인스턴스 적용(v15.8) · B1-4 `HuskyProbeVolume.hlsl`·`InstancedVegetation_URP`(v15.9) · B1-5 `VertexAOBake`(v15.10) · **B1-6 알파 잎 차폐(v15.13 — 패키지 α any-hit 연결)** — 테스트 6종, 에디터 실행 대기 · B1 완료 → 다음 B2(적응형).
+> **진행(2026-10-26)**: D1~D6 권장안 확정 · B1-1 `ProbeGrid` · B1-2 `BurstProbeValidity`(v15.7) · B1-3 `ProbeVolumeAsset`·`ProbeVolumeBaker`·인스턴스 적용(v15.8) · B1-4 `HuskyProbeVolume.hlsl`·`InstancedVegetation_URP`(v15.9) · B1-5 `VertexAOBake`(v15.10) · **B1-6 알파 잎 차폐(v15.13 — 패키지 α any-hit 연결)** — 테스트 6종, 에디터 실행 대기 · B1 완료 → 다음 B2(적응형). · **B2 지형 추종 2.5D**(v15.22 — `ProbeTerrainLayers`, `ProbeVolumeBaker.layout = TerrainLayers`).
 
 ---
 
@@ -46,7 +46,8 @@
 ```
 [씬 입력] 정적 MeshFilter(지형·건물) + 템플릿·행렬(나무·풀·프롭)
    └─ TemplateInstanceSource.BuildScene → 2단 BVH (+ BurstScene / GpuScene)
-[프로브 배치]  ProbeGrid(origin, spacing, dims)  →  positions[]          (B1-1, 이후 B2 적응형)
+[프로브 배치]  ProbeGrid(origin, spacing, dims)  →  positions[]          (B1-1)
+               └ B2 지형 추종: ProbeTerrainLayers(grid + 열 지면 높이) → positions[]   (v15.22, 같은 인덱스 공간)
 [베이크]       BurstSHBaker / GpuSHBaker (1·다바운스)  →  SH9[]          (재사용)
 [유효성]       ProbeValidity(backface 비율)  →  valid[] → dilation      (B1-2)
 [저장]         ProbeVolumeAsset(SO: 메타·SH 패킹·valid + Texture3D×7) + EXR(z 슬라이스 타일)   (B1-3)
@@ -137,7 +138,7 @@
 | **B1-4** ✅ | 픽셀 샘플 셰이더 | `Shaders/HuskyProbeVolume.hlsl`, `Shaders/InstancedVegetation_URP.shader` | GPU 샘플 ≡ CPU `Sample`(렌더 컨텍스트, `SHEvalProbeGpuTests` 패턴 — 텍셀 중심 정렬·클램프 경계 포함) · glslang 컴파일 |
 | **B1-5** ✅ | 정점 AO(템플릿 로컬) [히어로 정점 조도는 미착수] | `ProbeVolume/VertexAOBake.cs` | 정점 AO ≡ `BurstAO.Compute` 직접 호출 · 고립 평면 AO=1 · 무한 천장 아래 AO≈0 · (히어로) 정점 조도 ≡ 같은 점·노멀 `BurstRadianceBaker` |
 | **B1-6** ✅ | 알파 잎 차폐 — 패키지 α any-hit 연결(코어 무수정) | `ProbeVolumeBaker`(알파 설정·`BuildAlphaData`)·`VertexAOBake`(alpha 인자) 수정 + `Tests/ProbeVolume/ProbeAlphaTests.cs` | `ProbeAlphaTests`: ᾱ=1(전부 불투명 마스크) ≡ 알파 없음 **비트 동일**(SH 1·다바운스·뒷면 비율) · ᾱ=0 ≡ 메시 제거(비트 동일) · 체커 ᾱ≈0.5 → E(up) 비율 ∈ [0.3,0.7] · 정점 AO 동일 3종 · 베이커 머티리얼 경로 · GPU ≡ Burst |
-| **B2** | 적응형(D1 선택안) | `ProbeVolume/…` | 세분 영역 샘플 ≡ 같은 해상도 균일 격자 · 프로브 수·메모리 절감률 리포트 |
+| **B2** ✅ | 적응형(D1 선택안 = 지형 추종 2.5D) | `ProbeVolume/ProbeTerrainLayers.cs`(+ `ProbeGrid.Bake.cs` 분리) · 에셋/베이커/셰이더/바인딩 수정 + `Tests/ProbeVolume/ProbeTerrainLayersTests.cs`(헤드리스)·`ProbeVolumeTerrainTests.cs` | 높이 0·상수 ≡ 같은 해상도 균일 격자(**비트 동일**) · 지면 기준 선형장 재현 · 지면 레이 · 에셋 ≡ 코어 직접 파이프라인 · GPU ≡ CPU · **프로브 수·메모리 절감률 리포트**(로그 `layout:`) |
 | B3 | (선택) Unity LightProbes 내보내기 | — | `SphericalHarmonicsL2` 변환 왕복 ≡ |
 
 - 모든 신규 테스트는 Tests 어셈블리(`Script/Test/ProbeVolume/`) + `LightmapEvaluateDebugger.RunAllTests` 배선(코어 → 테스트 참조 0 유지).
@@ -217,7 +218,22 @@
 4. 나무 템플릿을 captureSource 로 캡처한 씬 → Bake 로그 `scene:` 줄에 '템플릿 중복 −N'(나무 MeshFilter 수만큼) · Roots 로 굽던 결과와 차이가 나면 `scene:` 줄의 static 수 차이(LOD1+·Contribute GI 꺼짐 등 C0 제외분)로 설명되는지.
 5. Undo 로 `collectedStatics`·`staticSource` 복원.
 
-다음: **B2** 적응형 프로브(D1 — 지형 추종 2.5D).
+**B2 완료(v15.22)** — 지형 추종 2.5D(결정 D1). 구현 메모:
+- 배치: `ProbeVolumeBaker.layout = TerrainLayers` → XZ = 볼륨의 균일 격자 그대로, 열 (i,k) 마다 지면 높이 h, 층 j 의 y = (h + `groundOffset`) + j·`probeSpacing.y`, 층 수 = ⌈`layerHeight` / 간격⌉ + 1. 에셋 `grid.origin.y` = 첫 층 높이(오프셋), `columnHeights`(+ 높이맵 `heightTexture`).
+- 지면 높이: 지면 메시(`groundRoots` 하위, 비우면 정적 입력 — **템플릿 제외**라 수관·식생이 층을 들어 올리지 않음)에 볼륨 위에서 아래로 레이(범위 = `volumeSize.y`). 미스 열 = 이웃 링 평균, 전부 미스면 볼륨 바닥.
+- 샘플: 점 p 의 '열 격자' = origin.y 만 H(p.xz) + 오프셋(H = 열 높이 bilinear). CPU(`ProbeTerrainLayers.Sample`) · 셰이더(`HuskyPV_GridCoord`, `_HuskyPV_Params.w = 1`) 같은 식 — 층 좌표가 지면 기준이라 경사에서도 '지면 위 1m' 는 같은 층.
+- 균일과의 관계: 높이 없음 = 균일 그 자체, 높이 상수 c = origin.y 를 c + 오프셋으로 둔 균일과 비트 동일. 계수·valid·dilation(6-이웃)·Texture3D·EXR 은 인덱스 공간이라 무변경.
+- 절감: 로그 `layout: TerrainLayers nx×K×nz = N 프로브 (MB) · 지면 a~b · 균일 환산 nx×K'×nz = N' (MB) → −x%`(K' = ⌈(지면 높이차 + (K−1)·간격)/간격⌉ + 1).
+- 한계: 2.5D — 지붕·다리 아래 같은 다층 공간은 한 층만(지면 메시 선택으로 우회, 근본은 희소 브릭). 급경사에선 층이 기울어 보간이 비등방.
+
+**B2 에디터 확인 체크리스트**
+1. "Run Probe Volume Tests (Track B B1-1 ~ B1-6 + C0 + B2)" 전부 PASS — 특히 `ProbeVolumeTerrainTests` B(코어 직접 ≡ 비트 동일)·G(GPU ≡ CPU, 렌더 컨텍스트).
+2. 실지형: `layout = TerrainLayers` · `groundOffset` 0.25 · `layerHeight` = 식생 최대 높이 → Bake → 로그 `layout:` 줄의 절감률 · 미스 열 수 확인(많으면 `volumeSize.y` 가 지면을 다 덮는지).
+3. 기즈모: 프로브 층이 지면을 따라 휘는지 · 무효(빨강)가 지면 바로 아래에 몰리지 않는지(몰리면 `groundOffset` ↑).
+4. 식생(PerPixelVolume): 경사·언덕에서 균일 대비 밝기 분포가 자연스러운지 · 볼륨 가장자리 페이드.
+5. `groundRoots` 를 지형 메시만으로 지정했을 때 건물 지붕 위로 층이 올라가지 않는지.
+
+다음: (선택) 희소 브릭(다층 구조) · B3 Unity LightProbes 연동.
 
 ---
 
@@ -225,7 +241,7 @@
 
 - **누수(leak)**: trilinear 는 벽을 넘어 보간 → 얇은 벽·지면 경계 번짐. B1-2(유효성)·B1-4(normalBias)로 완화, 근본 해결(가시성 가중 — DDGI 식 깊이 모멘트)은 범위 밖.
 - ~~**알파 잎 과차폐**~~: B1-6(v15.13)으로 해소 — 컷아웃 머티리얼이 지정된 경우. 머티리얼이 없거나 판별 실패하면 여전히 통짜(로그 `alpha=OFF` 로 확인).
-- **볼륨 해상도 vs 메모리**: 균일 격자는 빈 공간 낭비 → B2 필요. 간격이 크면 풀 접지부 음영 손실(정점 AO 가 일부 보완).
+- **볼륨 해상도 vs 메모리**: 균일 격자는 빈 공간 낭비 → ✅ B2(v15.22) 지형 추종으로 완화(로그에 절감률). 간격이 크면 풀 접지부 음영 손실(정점 AO 가 일부 보완). 다층 구조(지붕·다리 아래)는 2.5D 한계 — 희소 브릭이 근본.
 - ~~**씬 입력 이원화**~~: v15.19 로 정적 메시는 해소 — `staticSource = Collected` 면 볼륨이 텍스처 경로와 같은 C0 분류를 쓴다(기본 Roots 는 구 거동이라 사용자가 고를 것). 메시→BLAS 변환 코드는 아직 두 벌(`AtlasApplyDebug.BuildGiScene` 은 적용된 uv2 메시의 원본 추적 때문에 별도) — 같은 식(로컬 Tri · `_BaseColor`/`_Color` Linear 알베도)이라 결과는 같다.
 - ~~**B1-6 코어 변경**~~: D5 갱신으로 코어 무수정(패키지 any-hit 재사용). ᾱ=1 비트 동일 게이트는 `ProbeAlphaTests` A 로 유지.
 - **SH 링잉**: 고대비(하늘↔지면) 볼륨에서 L2 링잉 — 기존 디링잉(W2=0.5) 공유, 필요 시 볼륨 전용 윈도우.
