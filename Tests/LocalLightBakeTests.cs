@@ -61,7 +61,11 @@ namespace HuskyLibs.CustomLightmapper.Bake
 #if UNITY_EDITOR
                 rc.areaSize = new Vector2(1.5f, 0.5f);
                 dc.areaSize = new Vector2(0.4f, 0.4f);
+#if UNITY_6000_7_OR_NEWER
+                pl.shapeRadius = 0.25f;
+#else
                 pl.shadowRadius = 0.25f;
+#endif
 #endif
                 bool c1 = BakeLightUtil.TryConvert(pl, opt, out var P);
                 bool c2 = BakeLightUtil.TryConvert(sp, opt, out var S);

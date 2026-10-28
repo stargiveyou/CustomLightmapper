@@ -79,7 +79,11 @@ namespace HuskyLibs.CustomLightmapper.Bake
             float radius = 0f;
             Vector2 area = Vector2.one;
 #if UNITY_EDITOR
+#if UNITY_6000_7_OR_NEWER
+            radius = light.shapeRadius;
+#else
             radius = light.shadowRadius;
+#endif
             area = light.areaSize;
 #endif
             int soft = radius > 0f ? Mathf.Max(1, opt.SoftSamples) : 1;
