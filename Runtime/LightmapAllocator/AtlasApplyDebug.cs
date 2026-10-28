@@ -162,9 +162,11 @@ namespace HuskyLibs.CustomLightmapper.Bake
                  "수렴한 텍셀은 더 쏘지 않는다(indirectSamples = 상한). 밝고 트인 면은 일찍 멈추고 그림자 경계·구석만 상한까지 — 같은 상한에서 레이 절감, " +
                  "같은 시간이면 상한을 올려 노이즈↓. 끄면 전 텍셀 indirectSamples(구 거동과 비트 동일). CPU/Burst/GPU 공통(판정은 관리 코드라 백엔드 무관).")]
         public bool adaptiveSampling = false;
-        [Tooltip("패스당 간접 경로 수. 적응 판정·진행형 미리보기의 간격. 작을수록 판정이 촘촘(조기 종료↑)하지만 패스 오버헤드↑.")]
-        [Min(1)] public int samplesPerPass = 8;
-        [Tooltip("이 spp 이전에는 수렴 판정을 하지 않는다(분산 추정이 믿을 만해지는 최소 표본). 16~32 권장.")]
+        [Tooltip("패스당 간접 경로 수. 적응 판정·진행형 미리보기의 간격. 작을수록 판정이 촘촘(조기 종료↑)하지만 패스마다 디스패치·readback·판정 " +
+                 "오버헤드가 붙는다 — 8 이면 256 상한에서 같은 평균 spp 의 균등 베이크보다 1.7배 느렸고 32 에서 같아졌다(2026-10-28 실측).")]
+        [Min(1)] public int samplesPerPass = 32;
+        [Tooltip("이 spp 이전에는 수렴 판정을 하지 않는다(분산 추정이 믿을 만해지는 최소 표본). 16~32 권장. " +
+                 "경로가 전부 0 인 텍셀은 이 값 × 4 까지 더 쏜 뒤 판정(접촉 그림자가 0 으로 굳는 것 방지).")]
         [Min(2)] public int adaptiveMinSamples = 16;
         [Tooltip("수렴 기준: 평균 휘도의 표준오차 ≤ 이 값 × (직사+간접) 텍셀 휘도. 0.02~0.05 권장 — 작을수록 품질↑ 비용↑.")]
         [Range(0.001f, 0.5f)] public float adaptiveThreshold = 0.03f;
@@ -2104,7 +2106,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             Mathf.Max(0f, lin.x), Mathf.Max(0f, lin.y), Mathf.Max(0f, lin.z), 1f);
 
         /// <summary>
-        /// C0 씬 수집 결과 주입(Editor <c>SceneCollectMenu</c>) — targets/occluders 를 교체할 뿐 베이크 경로는 그대로(C0 결정 ①).
+        /// C0 씬 수집 결과 주입(Editor <c>BakeSceneCollectMenu</c>) — targets/occluders 를 교체할 뿐 베이크 경로는 그대로(C0 결정 ①).
         /// 아래 ResolveTargets 의 occluder 차집합 · ResolveOccluderUnion 이 기존 계약대로 소비한다.
         /// </summary>
         public void SetCollected(MeshFilter[] receivers, MeshFilter[] occluderOnly)

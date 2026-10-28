@@ -9,14 +9,14 @@ namespace HuskyLibs.CustomLightmapper.Bake.EditorTools
     /// <summary>
     /// C0-3 배선 — 씬 수집 → <see cref="AtlasApplyDebug.SetCollected"/>(targets/occluders 교체) + 리포트 로그.
     /// Track B: 같은 분류를 <see cref="ProbeVolumeBaker.SetCollected"/>(정적 입력 = receiver ∪ occluder)에도 — 텍스처·볼륨이 같은 씬을 본다.
-    /// AtlasApplyDebug 에는 세터 하나만 있고 수집·판정은 여기와 <see cref="SceneCollector"/> 에 둔다(C0 결정 ①).
-    /// 손 수정: 결과 배열을 인스펙터에서 고치거나, 재수집에도 남기려면 <see cref="SceneCollectOverride"/> 표식(결정 ⑧).
-    /// 옵션(<see cref="SceneCollectOptions"/>)은 메뉴 토글(EditorPrefs)로 고른다.
+    /// AtlasApplyDebug 에는 세터 하나만 있고 수집·판정은 여기와 <see cref="BakeSceneCollector"/> 에 둔다(C0 결정 ①).
+    /// 손 수정: 결과 배열을 인스펙터에서 고치거나, 재수집에도 남기려면 <see cref="BakeSceneCollectOverride"/> 표식(결정 ⑧).
+    /// 옵션(<see cref="BakeSceneCollectOptions"/>)은 메뉴 토글(EditorPrefs)로 고른다.
     /// </summary>
-    public static class SceneCollectMenu
+    public static class BakeSceneCollectMenu
     {
         const string Root = "HuskyLibs/CustomLightmapper/Scene Collect (C0)/";
-        const string PrefNonGi = "HuskyLibs.CustomLightmapper.C0.NonGiAsOccluder";
+        // const string PrefNonGi = "HuskyLibs.CustomLightmapper.C0.NonGiAsOccluder";   // ContributeGI 규칙 제외(2026-10-28)
         const string PrefLod = "HuskyLibs.CustomLightmapper.C0.LodChildAsOccluder";
         const string PrefStrict = "HuskyLibs.CustomLightmapper.C0.Strict";
 
@@ -50,7 +50,7 @@ namespace HuskyLibs.CustomLightmapper.Bake.EditorTools
         static void DryRun()
         {
             if (InPrefabStage()) return;
-            Debug.Log(SceneCollector.Collect(null, Options()).Report());
+            Debug.Log(BakeSceneCollector.Collect(null, Options()).Report());
         }
 
         /// <summary>C0-V1: 같은 씬을 2회 수집해 순서·분류·MeshFilter 목록이 완전히 같은지.</summary>
@@ -61,8 +61,8 @@ namespace HuskyLibs.CustomLightmapper.Bake.EditorTools
             var opt = Options();
             var fa = new List<MeshFilter>();
             var fb = new List<MeshFilter>();
-            var a = SceneCollector.Collect(null, opt, outFilters: fa);
-            var b = SceneCollector.Collect(null, opt, outFilters: fb);
+            var a = BakeSceneCollector.Collect(null, opt, outFilters: fa);
+            var b = BakeSceneCollector.Collect(null, opt, outFilters: fb);
             int firstDiff = -1;
             int n = Mathf.Max(fa.Count, fb.Count);
             for (int i = 0; i < n && firstDiff < 0; i++)
@@ -90,7 +90,7 @@ namespace HuskyLibs.CustomLightmapper.Bake.EditorTools
                     var mesh = mf.sharedMesh;
                     if (mesh == null || !seen.Add(mesh)) continue;
                     count++;
-                    if (!SceneCollector.DiagnoseCleanup(mesh, out int welded, out int degen, out int weldedCount))
+                    if (!BakeSceneCollector.DiagnoseCleanup(mesh, out int welded, out int degen, out int weldedCount))
                     { sb.AppendLine($"  {mesh.name}: Read/Write 꺼짐 — 진단 불가"); continue; }
                     sb.AppendLine($"  {mesh.name}: 정점 {mesh.vertexCount} → 용접 후 {weldedCount} (−{welded}) · 퇴화 삼각형 {degen}");
                 }
@@ -100,10 +100,11 @@ namespace HuskyLibs.CustomLightmapper.Bake.EditorTools
 
         // ── 옵션 토글 ──
 
-        [MenuItem(Root + "Options/Non-GI Static As Occluder")]
-        static void ToggleNonGi() => EditorPrefs.SetBool(PrefNonGi, !EditorPrefs.GetBool(PrefNonGi, false));
-        [MenuItem(Root + "Options/Non-GI Static As Occluder", true)]
-        static bool ToggleNonGiValidate() { Menu.SetChecked(Root + "Options/Non-GI Static As Occluder", EditorPrefs.GetBool(PrefNonGi, false)); return true; }
+        // ContributeGI 규칙 제외(2026-10-28)로 토글이 효과 없음 → 메뉴에서 뺌.
+        // [MenuItem(Root + "Options/Non-GI Static As Occluder")]
+        // static void ToggleNonGi() => EditorPrefs.SetBool(PrefNonGi, !EditorPrefs.GetBool(PrefNonGi, false));
+        // [MenuItem(Root + "Options/Non-GI Static As Occluder", true)]
+        // static bool ToggleNonGiValidate() { Menu.SetChecked(Root + "Options/Non-GI Static As Occluder", EditorPrefs.GetBool(PrefNonGi, false)); return true; }
 
         [MenuItem(Root + "Options/LOD1+ As Occluder")]
         static void ToggleLod() => EditorPrefs.SetBool(PrefLod, !EditorPrefs.GetBool(PrefLod, false));
@@ -117,10 +118,10 @@ namespace HuskyLibs.CustomLightmapper.Bake.EditorTools
 
         // ── 공통 ──
 
-        static SceneCollectOptions Options()
+        static BakeSceneCollectOptions Options()
         {
-            var o = SceneCollectOptions.Default;
-            o.NonGiAsOccluder = EditorPrefs.GetBool(PrefNonGi, false);
+            var o = BakeSceneCollectOptions.Default;
+            // o.NonGiAsOccluder = EditorPrefs.GetBool(PrefNonGi, false);   // ContributeGI 규칙 제외(2026-10-28)
             o.LodChildAsOccluder = EditorPrefs.GetBool(PrefLod, false);
             o.WarnOnly = !EditorPrefs.GetBool(PrefStrict, false);
             return o;
@@ -131,7 +132,7 @@ namespace HuskyLibs.CustomLightmapper.Bake.EditorTools
             if (dbg == null || InPrefabStage()) return;
 
             var filters = new List<MeshFilter>();
-            var col = SceneCollector.Collect(SceneCollector.SceneRoots(allLoadedScenes), Options(), outFilters: filters);
+            var col = BakeSceneCollector.Collect(BakeSceneCollector.SceneRoots(allLoadedScenes), Options(), outFilters: filters);
             string report = col.Report();
 
             // targets 가 비면 ResolveTargets 가 자식 폴백으로 바뀐다 → receiver 0 이면 적용하지 않는다(엉뚱한 집합을 굽는 사고 방지)
@@ -141,8 +142,8 @@ namespace HuskyLibs.CustomLightmapper.Bake.EditorTools
                 return;
             }
 
-            var receivers = SceneCollectPolicy.Pick(col, filters, col.ReceiverIdx);
-            var occluders = SceneCollectPolicy.Pick(col, filters, col.OccluderIdx);
+            var receivers = BakeSceneCollectPolicy.Pick(col, filters, col.ReceiverIdx);
+            var occluders = BakeSceneCollectPolicy.Pick(col, filters, col.OccluderIdx);
             Undo.RecordObject(dbg, "Collect Scene (C0)");
             dbg.SetCollected(receivers, occluders);
             PrefabUtility.RecordPrefabInstancePropertyModifications(dbg);
@@ -166,9 +167,9 @@ namespace HuskyLibs.CustomLightmapper.Bake.EditorTools
             if (baker == null || InPrefabStage()) return;
 
             var filters = new List<MeshFilter>();
-            var col = SceneCollector.Collect(SceneCollector.SceneRoots(allLoadedScenes), Options(), outFilters: filters);
+            var col = BakeSceneCollector.Collect(BakeSceneCollector.SceneRoots(allLoadedScenes), Options(), outFilters: filters);
             string report = col.Report();
-            var members = SceneCollectPolicy.Pick(col, filters, SceneCollectPolicy.SceneMembers(col));
+            var members = BakeSceneCollectPolicy.Pick(col, filters, BakeSceneCollectPolicy.SceneMembers(col));
             if (members.Length == 0)
             {
                 Debug.LogWarning("[C0] 베이크 참여(receiver ∪ occluder) 0건 — 적용하지 않음. 리포트:\n" + report, baker);

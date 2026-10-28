@@ -3,6 +3,8 @@
 > **작업 추적용 문서.** 구현하면서 체크박스·게이트 결과·이슈를 이 파일에 채운다.
 > 선행 스냅샷: `진행상황_G0-Burst_2026-06-29.md` 이후 A/C/G/SH/후처리/α/SSAA 완료
 > (완료 현황은 `04_Complete_Dev_Docs/00_INDEX.md` 대시보드가 기준).
+> **이름 변경(2026-10-28)**: `SceneCollector`·`SceneCollectMenu`·`SceneCollectPolicy`·`SceneCollection`·`SceneCollectOptions`·`SceneCollectOverride`·`SceneCollectPolicyTests` → 앞에 `Bake`(`BakeSceneCollector` 등). 동작·메뉴 경로·EditorPrefs 키·`.meta` GUID 는 그대로 — 본문은 작성 당시 이름(기록). 현재 이름은 개발문서 v15 §5.8.
+> **Contribute GI 규칙 제외(2026-10-28, v15.21)**: 본문의 `!ContributeGI → Excluded / NonGiAsOccluder → OccluderOnly` 규칙 · 옵션 · 메뉴 토글 · 테스트 T7 은 코드에서 주석 처리됐다(되살리기 = 주석 해제). 현재 판정 순서는 개발문서 v15 §5.8 · §12 v15.21.
 
 ## 1. 한 줄 요약
 

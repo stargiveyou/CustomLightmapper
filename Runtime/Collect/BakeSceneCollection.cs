@@ -24,7 +24,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         EmptyBounds,         // 렌더러 bounds 가 0 → 면적 0
         NoTriangles,         // 인덱스 0
         LodChild,            // LODGroup 의 LOD1+ 전용 렌더러
-        NotContributeGI,     // StaticEditorFlags.ContributeGI 꺼짐
+        NotContributeGI,     // StaticEditorFlags.ContributeGI 꺼짐 — 규칙 제외(2026-10-28)로 현재 안 붙음(enum 순서 유지용)
         ReceiveGiLightProbes,// receiveGI = LightProbes → 라이트맵 안 받음(→ OccluderOnly)
         UserOccluder,        // 사용자가 occluder-only 로 지정(→ OccluderOnly)
         RendererDisabled,    // MeshRenderer.enabled == false — 비활성 오브젝트와 같은 이유로 굽지도 차폐하지도 않는다
@@ -44,7 +44,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
     /// <summary>
     /// 정책 입력 1건 — <b>이미 조회가 끝난 값만</b> 담는다. 정책은 UnityEditor·메시 배열에 접근하지 않는다(결정 ③·⑦).
-    /// Editor 어댑터(<c>SceneCollector</c>)가 배열 복사 없는 API(GetIndexCount·HasVertexAttribute·vertexCount·bounds)로 채운다.
+    /// Editor 어댑터(<c>BakeSceneCollector</c>)가 배열 복사 없는 API(GetIndexCount·HasVertexAttribute·vertexCount·bounds)로 채운다.
     /// </summary>
     public struct CollectCandidate
     {
@@ -69,7 +69,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         public float  BoundsExtentSq; // renderer.bounds.extents.sqrMagnitude (면적 0 판정용 — WorldArea 아님)
 
         // 라이트맵 관련 플래그(Editor 어댑터가 조회)
-        public bool   ContributeGI;
+        public bool   ContributeGI;   // 조회만 — ContributeGI 규칙 제외(2026-10-28)로 정책은 안 본다
         public bool   ReceiveGiLightProbes;
         public bool   IsLodChild;
 
@@ -78,7 +78,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         public bool   UserExcluded;
     }
 
-    /// <summary>분류 결과 1건. <see cref="SceneCollection.Entries"/> 의 원소.</summary>
+    /// <summary>분류 결과 1건. <see cref="BakeSceneCollection.Entries"/> 의 원소.</summary>
     public struct CollectEntry
     {
         public int            Order;
@@ -89,23 +89,24 @@ namespace HuskyLibs.CustomLightmapper.Bake
     }
 
     /// <summary>정책 옵션. <b><see cref="Default"/> 를 쓸 것</b> — new() 는 WarnOnly=false(경고 항목까지 제외).</summary>
-    public struct SceneCollectOptions
+    public struct BakeSceneCollectOptions
     {
-        /// <summary>ContributeGI 가 꺼진 정적 오브젝트를 occluder 로 살릴지. 기본 false(제외).</summary>
-        public bool NonGiAsOccluder;
+        // ContributeGI 규칙 제외(2026-10-28)로 쓸 곳이 없어 주석.
+        // /// <summary>ContributeGI 가 꺼진 정적 오브젝트를 occluder 로 살릴지. 기본 false(제외).</summary>
+        // public bool NonGiAsOccluder;
         /// <summary>LOD1+ 를 occluder 로 살릴지. 기본 false — LOD0 가 이미 같은 자리를 차폐한다.</summary>
         public bool LodChildAsOccluder;
         /// <summary>서브메시 255 초과·UV0 없음을 경고로만 남길지(true) 제외할지(false). 기본 true.</summary>
         public bool WarnOnly;
 
-        public static SceneCollectOptions Default => new SceneCollectOptions { WarnOnly = true };
+        public static BakeSceneCollectOptions Default => new BakeSceneCollectOptions { WarnOnly = true };
     }
 
     /// <summary>
-    /// C0 수집 결과 — 직렬화 대상이 아닌 값(결정 ⑧). <see cref="SceneCollectPolicy.Run"/> 이 만들고
+    /// C0 수집 결과 — 직렬화 대상이 아닌 값(결정 ⑧). <see cref="BakeSceneCollectPolicy.Run"/> 이 만들고
     /// Editor 수집기가 <see cref="RootCount"/>·<see cref="ElapsedMs"/> 를 채운다.
     /// </summary>
-    public sealed class SceneCollection
+    public sealed class BakeSceneCollection
     {
         public CollectEntry[] Entries = Array.Empty<CollectEntry>();   // 입력 순서 = 씬 순회 순서(결정 ②)
         public int[] ReceiverIdx = Array.Empty<int>();                 // Entries 인덱스, 순서 보존
@@ -195,7 +196,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         {
             CollectReason.NotReadable => "임포터 Read/Write Enabled 를 켜세요",
             CollectReason.NonTriangleTopology => "Triangles 토폴로지 메시만 지원합니다",
-            CollectReason.NotContributeGI => "Static ▸ Contribute GI 를 켜거나 NonGiAsOccluder 로 차폐만 참여",
+            // CollectReason.NotContributeGI => "Static ▸ Contribute GI 를 켜거나 NonGiAsOccluder 로 차폐만 참여",   // ContributeGI 규칙 제외(2026-10-28)
             CollectReason.LodChild => "LOD0 가 굽고 차폐합니다(LodChildAsOccluder 로 차폐 참여 가능)",
             _ => null,
         };

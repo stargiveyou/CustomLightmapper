@@ -39,7 +39,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
     /// 패스 k 는 아직 활성인 점마다 경로 SamplesPerPass 개를 같은 RNG 스트림에서 '이어서' 추적한다(점별 상태 보존).
     /// 그래서 Adaptive=false 로 끝까지 돌리면 덧셈 순서가 일괄 베이크(EvaluateRadiance / BurstRadianceBaker / CSRadiance)와
     /// 같아 최종값 direct + sum/N 이 CPU·Burst 에서 일괄 결과와 비트 동일하다(GPU 는 커널이 달라 통계 일치).
-    /// Adaptive=true 면 MinSamples 이후 매 패스 끝에 점별 표준오차를 보고 수렴한 점을 활성 목록에서 뺀다 —
+    /// Adaptive=true 면 MinSamples 이후 매 패스 끝에 점별 표준오차를 보고 수렴한 점을 활성 목록에서 뺀다(경로가 전부 0 인 점은
+    /// MinSamples × <see cref="ZeroPathMinFactor"/> 까지 유지) —
     /// 판정은 전부 여기(관리 코드, double)에서 하므로 같은 백엔드면 일괄/진행형 어느 경로로 돌려도 같은 점이 같은 패스에 멈춘다.
     /// </summary>
     public sealed class ProgressiveAccumulator
@@ -47,10 +48,16 @@ namespace HuskyLibs.CustomLightmapper.Bake
         /// <summary>어두운 텍셀의 상대 기준 하한(휘도). 이보다 어두우면 절대 오차 Threshold×하한으로 판정 → 0 근처에서 무한 샘플링 방지.</summary>
         public const float LuminanceFloor = 1e-4f;
 
+        /// <summary>
+        /// 경로가 전부 0 인 점(m2 == 0)은 표본분산도 0 이라 <see cref="Converged"/> 가 바로 참이 된다 — 드물게 빛이 드는 접촉 그림자가
+        /// 첫 판정에서 0 으로 굳는 원인. 그런 점은 MinSamples × 이 배수(≤ MaxSamples)까지 더 쏜 뒤에야 멈춘다.
+        /// </summary>
+        public const int ZeroPathMinFactor = 4;
+
         readonly IPathAccumBackend _backend;
         readonly AdaptiveSampling _s;
         readonly int _n;
-        readonly int _max, _perPass, _min;
+        readonly int _max, _perPass, _min, _zeroMin;
 
         public readonly Vector3[] Direct;
         public readonly Vector3[] Sum;
@@ -83,6 +90,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             _max = Math.Max(1, s.MaxSamples);
             _perPass = Math.Max(1, Math.Min(s.SamplesPerPass, _max));
             _min = Math.Max(2, Math.Min(s.MinSamples, _max));
+            _zeroMin = Math.Min(_max, _min * ZeroPathMinFactor);
             Direct = new Vector3[_n];
             Sum = new Vector3[_n];
             M2 = new float[_n];
@@ -114,11 +122,13 @@ namespace HuskyLibs.CustomLightmapper.Bake
             if (_s.Adaptive && _done >= _min && _done < _max)
             {
                 // 순서 보존 압축(활성 목록이 오름차순 유지 → 백엔드 접근 패턴·결과 결정적)
+                // 경로가 전부 0 이면 분산 추정을 믿을 수 없다 → _zeroMin 까지는 수렴으로 보지 않는다(ZeroPathMinFactor)
                 int w = 0;
                 for (int j = 0; j < _activeCount; j++)
                 {
                     int i = _active[j];
-                    if (!Converged(Direct[i], Sum[i], M2[i], Count[i], _s.Threshold)) _active[w++] = i;
+                    bool done = Converged(Direct[i], Sum[i], M2[i], Count[i], _s.Threshold) && (M2[i] > 0f || Count[i] >= _zeroMin);
+                    if (!done) _active[w++] = i;
                 }
                 _activeCount = w;
             }

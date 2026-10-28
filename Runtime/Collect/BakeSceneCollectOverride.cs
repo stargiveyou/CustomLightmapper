@@ -9,7 +9,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
     /// 베이크 경로는 이 컴포넌트를 모른다 — 수집기(Editor)만 읽는다.
     /// </summary>
     [DisallowMultipleComponent]
-    public sealed class SceneCollectOverride : MonoBehaviour
+    public sealed class BakeSceneCollectOverride : MonoBehaviour
     {
         public enum Mode
         {

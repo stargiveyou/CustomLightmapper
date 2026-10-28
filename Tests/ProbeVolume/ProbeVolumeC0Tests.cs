@@ -14,7 +14,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
     ///  C) Excluded 템플릿도 제외 키에 포함 — 베이크 씬에서 뺀 식생이 정적 입력으로 되살아나지 않음.
     ///  D) SetCollected(source 전환 · null → 빈 배열) · null/중복/메시 없는 MeshFilter 건너뜀.
     ///  E) Collected 인데 비어 있음 → 경고 후 정적 없이 진행 = Roots + 빈 staticRoots 와 비트 동일.
-    /// SceneCollector(에디터 어셈블리) 자체는 여기서 부르지 않는다 — 수집 결과 주입 이후 계약만. 호출: Debug.Log(ProbeVolumeC0Tests.RunAll());
+    /// BakeSceneCollector(에디터 어셈블리) 자체는 여기서 부르지 않는다 — 수집 결과 주입 이후 계약만. 호출: Debug.Log(ProbeVolumeC0Tests.RunAll());
     /// </summary>
     public static class ProbeVolumeC0Tests
     {

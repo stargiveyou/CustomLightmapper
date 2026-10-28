@@ -203,4 +203,4 @@ flowchart TD
 2. 수집 순서를 **정렬하지 말 것** — 인스턴스 인덱스가 ST 할당과 텍셀 시드에 들어간다.
 3. 수집 단계에서 `LightmapAllocator.WorldArea` 호출 금지 — 면적 0 판정은 `renderer.bounds`로.
 4. 베이크 경로 코드는 무변경 — `AtlasApplyDebug`에는 `SetCollected` 세터 하나만 추가.
-5. Samples asmdef는 Editor를 참조하지 않는다 — 메뉴는 `Editor/SceneCollectMenu.cs`에.
+5. Samples asmdef는 Editor를 참조하지 않는다 — 메뉴는 `Editor/BakeSceneCollectMenu.cs`에.

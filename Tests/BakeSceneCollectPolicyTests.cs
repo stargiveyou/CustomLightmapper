@@ -4,21 +4,21 @@ using System.Text;
 namespace HuskyLibs.CustomLightmapper.Bake
 {
     /// <summary>
-    /// C0-0 검증: <see cref="SceneCollectPolicy"/> · <see cref="SceneCollection"/> (개발문서 §8 T1~T8 + 확장).
+    /// C0-0 검증: <see cref="BakeSceneCollectPolicy"/> · <see cref="BakeSceneCollection"/> (개발문서 §8 T1~T8 + 확장).
     ///  T1 순서 보존(C0-V1) · T2 결정성(C0-V1) · T3 배타성(C0-V2) · T4 사유 우선순위 · T5 NotReadable(C0-V4) ·
-    ///  T6 LOD(C0-V5) · T7 NonGiAsOccluder · T8 경고 무제외(WarnOnly).
+    ///  T6 LOD(C0-V5) · T7 NonGiAsOccluder(ContributeGI 규칙 제외로 주석 — 2026-10-28) · T8 경고 무제외(WarnOnly).
     ///  T9 판정 순서 전수(§4.3 — 각 규칙이 뒤 규칙 조건을 모두 가진 후보에서 이긴다) ·
     ///  T10 확장 사유(RendererDisabled·NonTriangleTopology·WarnOnly=false) · T11 경고 부착 범위 ·
     ///  T12 Report(§7 형식·조치 문구·상세 절단·결정성) · T13 Pick(병렬 목록 대응·길이 불일치 예외) ·
     ///  T14 SceneMembers(프로브 볼륨 정적 입력 = Receiver ∪ OccluderOnly, Entries 순서 — v15.19).
-    /// 순수 함수라 씬·에디터·GPU 불필요(헤드리스). 호출: Debug.Log(SceneCollectPolicyTests.RunAll());
+    /// 순수 함수라 씬·에디터·GPU 불필요(헤드리스). 호출: Debug.Log(BakeSceneCollectPolicyTests.RunAll());
     /// </summary>
-    public static class SceneCollectPolicyTests
+    public static class BakeSceneCollectPolicyTests
     {
         public static string RunAll()
         {
             var sb = new StringBuilder();
-            sb.AppendLine("=== C0 SceneCollectPolicy (씬 수집·분류) ===");
+            sb.AppendLine("=== C0 BakeSceneCollectPolicy (씬 수집·분류) ===");
             int pass = 0, total = 0;
             TestOrder(sb, ref pass, ref total);
             TestDeterminism(sb, ref pass, ref total);
@@ -26,7 +26,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             TestReasonPriority(sb, ref pass, ref total);
             TestNotReadable(sb, ref pass, ref total);
             TestLod(sb, ref pass, ref total);
-            TestNonGiOption(sb, ref pass, ref total);
+            // TestNonGiOption(sb, ref pass, ref total);   // ContributeGI 규칙 제외(2026-10-28)
             TestWarnOnly(sb, ref pass, ref total);
             TestRuleOrder(sb, ref pass, ref total);
             TestExtendedReasons(sb, ref pass, ref total);
@@ -82,7 +82,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         // ── T1 순서 보존 ──
         static void TestOrder(StringBuilder sb, ref int pass, ref int total)
         {
-            var col = SceneCollectPolicy.Run(Mixed(200, 7), SceneCollectOptions.Default);
+            var col = BakeSceneCollectPolicy.Run(Mixed(200, 7), BakeSceneCollectOptions.Default);
             bool okOrder = col.Entries.Length == 200;
             for (int i = 0; i < col.Entries.Length; i++) okOrder &= col.Entries[i].Order == i;
             Check(sb, ref pass, ref total, "T1: Entries[i].Order == i (입력 순서 그대로, 정렬 없음)", okOrder);
@@ -93,8 +93,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
         // ── T2 결정성 ──
         static void TestDeterminism(StringBuilder sb, ref int pass, ref int total)
         {
-            var a = SceneCollectPolicy.Run(Mixed(300, 11), SceneCollectOptions.Default);
-            var b = SceneCollectPolicy.Run(Mixed(300, 11), SceneCollectOptions.Default);
+            var a = BakeSceneCollectPolicy.Run(Mixed(300, 11), BakeSceneCollectOptions.Default);
+            var b = BakeSceneCollectPolicy.Run(Mixed(300, 11), BakeSceneCollectOptions.Default);
             bool same = a.Entries.Length == b.Entries.Length
                      && SameInts(a.ReceiverIdx, b.ReceiverIdx) && SameInts(a.OccluderIdx, b.OccluderIdx)
                      && a.ReceiverCount == b.ReceiverCount && a.OccluderCount == b.OccluderCount && a.ExcludedCount == b.ExcludedCount;
@@ -109,7 +109,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         // ── T3 배타성 ──
         static void TestExclusivity(StringBuilder sb, ref int pass, ref int total)
         {
-            var col = SceneCollectPolicy.Run(Mixed(500, 3), SceneCollectOptions.Default);
+            var col = BakeSceneCollectPolicy.Run(Mixed(500, 3), BakeSceneCollectOptions.Default);
             var seen = new bool[col.Entries.Length];
             bool disjoint = true;
             foreach (int i in col.ReceiverIdx) seen[i] = true;
@@ -119,30 +119,31 @@ namespace HuskyLibs.CustomLightmapper.Bake
             bool classMatch = true;
             for (int i = 0; i < col.Entries.Length; i++)
                 classMatch &= seen[i] == (col.Entries[i].Class != CollectClass.Excluded);
-            bool nonGiNeither = true;
-            foreach (var e in col.Entries)
-                if (e.Reason == CollectReason.NotContributeGI) nonGiNeither &= e.Class == CollectClass.Excluded;
+            // ContributeGI 규칙 제외(2026-10-28) — NotContributeGI 사유가 안 붙어 아래 검사는 항상 참(무의미)
+            // bool nonGiNeither = true;
+            // foreach (var e in col.Entries)
+            //     if (e.Reason == CollectReason.NotContributeGI) nonGiNeither &= e.Class == CollectClass.Excluded;
             Check(sb, ref pass, ref total,
                   $"T3: receiver {col.ReceiverCount} ∩ occluder {col.OccluderCount} = ∅ · 합 + excluded {col.ExcludedCount} = {col.Entries.Length}",
                   disjoint && sum && classMatch);
-            Check(sb, ref pass, ref total, "T3: ContributeGI off(기본 옵션) → receiver·occluder 어느 쪽도 아님", nonGiNeither);
+            // Check(sb, ref pass, ref total, "T3: ContributeGI off(기본 옵션) → receiver·occluder 어느 쪽도 아님", nonGiNeither);
         }
 
         // ── T4 사유 우선순위 ──
         static void TestReasonPriority(StringBuilder sb, ref int pass, ref int total)
         {
             var c = Valid(0); c.UserExcluded = true; c.MeshReadable = false;
-            var cls = SceneCollectPolicy.Classify(c, SceneCollectOptions.Default, out var r);
+            var cls = BakeSceneCollectPolicy.Classify(c, BakeSceneCollectOptions.Default, out var r);
             Check(sb, ref pass, ref total, "T4: UserExcluded ∧ !MeshReadable → Excluded(UserExcluded)",
                   cls == CollectClass.Excluded && r == CollectReason.UserExcluded);
 
             c = Valid(0); c.UserOccluder = true; c.MeshReadable = false;
-            cls = SceneCollectPolicy.Classify(c, SceneCollectOptions.Default, out r);
+            cls = BakeSceneCollectPolicy.Classify(c, BakeSceneCollectOptions.Default, out r);
             Check(sb, ref pass, ref total, "T4: UserOccluder 도 R/W 미설정은 못 이긴다 → Excluded(NotReadable)",
                   cls == CollectClass.Excluded && r == CollectReason.NotReadable);
 
             c = Valid(0); c.UserOccluder = true; c.IsLodChild = true; c.ContributeGI = false; c.ReceiveGiLightProbes = true;
-            cls = SceneCollectPolicy.Classify(c, SceneCollectOptions.Default, out r);
+            cls = BakeSceneCollectPolicy.Classify(c, BakeSceneCollectOptions.Default, out r);
             Check(sb, ref pass, ref total, "T4: UserOccluder 는 LOD·ContributeGI·LightProbes 자동 판정을 이긴다",
                   cls == CollectClass.OccluderOnly && r == CollectReason.UserOccluder);
         }
@@ -151,10 +152,10 @@ namespace HuskyLibs.CustomLightmapper.Bake
         static void TestNotReadable(StringBuilder sb, ref int pass, ref int total)
         {
             var c = Valid(0); c.MeshReadable = false;   // ContributeGI 켜짐
-            var cls = SceneCollectPolicy.Classify(c, SceneCollectOptions.Default, out var r);
+            var cls = BakeSceneCollectPolicy.Classify(c, BakeSceneCollectOptions.Default, out var r);
             var cands = new[] { Valid(0), c, Valid(2) };
             cands[1].Order = 1;
-            var col = SceneCollectPolicy.Run(cands, SceneCollectOptions.Default);
+            var col = BakeSceneCollectPolicy.Run(cands, BakeSceneCollectOptions.Default);
             bool inNeither = Array.IndexOf(col.ReceiverIdx, 1) < 0 && Array.IndexOf(col.OccluderIdx, 1) < 0;
             Check(sb, ref pass, ref total, "T5: readable=false(ContributeGI on) → Excluded(NotReadable) · receiver·occluder 양쪽에서 빠짐",
                   cls == CollectClass.Excluded && r == CollectReason.NotReadable && inNeither && col.ReceiverCount == 2);
@@ -164,31 +165,31 @@ namespace HuskyLibs.CustomLightmapper.Bake
         static void TestLod(StringBuilder sb, ref int pass, ref int total)
         {
             var c = Valid(0); c.IsLodChild = true;
-            var clsDef = SceneCollectPolicy.Classify(c, SceneCollectOptions.Default, out var rDef);
-            var opt = SceneCollectOptions.Default; opt.LodChildAsOccluder = true;
-            var clsOcc = SceneCollectPolicy.Classify(c, opt, out var rOcc);
+            var clsDef = BakeSceneCollectPolicy.Classify(c, BakeSceneCollectOptions.Default, out var rDef);
+            var opt = BakeSceneCollectOptions.Default; opt.LodChildAsOccluder = true;
+            var clsOcc = BakeSceneCollectPolicy.Classify(c, opt, out var rOcc);
             Check(sb, ref pass, ref total, "T6: IsLodChild → 기본 Excluded(LodChild) · LodChildAsOccluder 면 OccluderOnly(LodChild)",
                   clsDef == CollectClass.Excluded && rDef == CollectReason.LodChild
                   && clsOcc == CollectClass.OccluderOnly && rOcc == CollectReason.LodChild);
         }
 
-        // ── T7 NonGiAsOccluder ──
-        static void TestNonGiOption(StringBuilder sb, ref int pass, ref int total)
-        {
-            var c = Valid(0); c.ContributeGI = false;
-            var clsOff = SceneCollectPolicy.Classify(c, SceneCollectOptions.Default, out var rOff);
-            var opt = SceneCollectOptions.Default; opt.NonGiAsOccluder = true;
-            var clsOn = SceneCollectPolicy.Classify(c, opt, out var rOn);
-            Check(sb, ref pass, ref total, "T7: !ContributeGI → NonGiAsOccluder off=Excluded / on=OccluderOnly (사유 NotContributeGI)",
-                  clsOff == CollectClass.Excluded && clsOn == CollectClass.OccluderOnly
-                  && rOff == CollectReason.NotContributeGI && rOn == CollectReason.NotContributeGI);
-        }
+        // ── T7 NonGiAsOccluder ── ContributeGI 규칙 제외(2026-10-28)로 주석
+        // static void TestNonGiOption(StringBuilder sb, ref int pass, ref int total)
+        // {
+        //     var c = Valid(0); c.ContributeGI = false;
+        //     var clsOff = BakeSceneCollectPolicy.Classify(c, BakeSceneCollectOptions.Default, out var rOff);
+        //     var opt = BakeSceneCollectOptions.Default; opt.NonGiAsOccluder = true;
+        //     var clsOn = BakeSceneCollectPolicy.Classify(c, opt, out var rOn);
+        //     Check(sb, ref pass, ref total, "T7: !ContributeGI → NonGiAsOccluder off=Excluded / on=OccluderOnly (사유 NotContributeGI)",
+        //           clsOff == CollectClass.Excluded && clsOn == CollectClass.OccluderOnly
+        //           && rOff == CollectReason.NotContributeGI && rOn == CollectReason.NotContributeGI);
+        // }
 
         // ── T8 경고 무제외 ──
         static void TestWarnOnly(StringBuilder sb, ref int pass, ref int total)
         {
             var c = Valid(0); c.HasUv0 = false;
-            var col = SceneCollectPolicy.Run(new[] { c }, SceneCollectOptions.Default);
+            var col = BakeSceneCollectPolicy.Run(new[] { c }, BakeSceneCollectOptions.Default);
             var e = col.Entries[0];
             Check(sb, ref pass, ref total, "T8: !HasUv0 정상 후보 → Receiver 유지 + 경고 NoUv0 (WarnOnly 기본)",
                   e.Class == CollectClass.Receiver && e.Reason == CollectReason.None && e.Warnings == CollectWarning.NoUv0);
@@ -211,7 +212,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 (CollectReason.EmptyBounds,         CollectClass.Excluded,     a => a[0].BoundsExtentSq = 0f),
                 (CollectReason.UserOccluder,        CollectClass.OccluderOnly, a => a[0].UserOccluder = true),
                 (CollectReason.LodChild,            CollectClass.Excluded,     a => a[0].IsLodChild = true),
-                (CollectReason.NotContributeGI,     CollectClass.Excluded,     a => a[0].ContributeGI = false),
+                // (CollectReason.NotContributeGI,     CollectClass.Excluded,     a => a[0].ContributeGI = false),   // ContributeGI 규칙 제외(2026-10-28)
                 (CollectReason.ReceiveGiLightProbes,CollectClass.OccluderOnly, a => a[0].ReceiveGiLightProbes = true),
             };
             bool ok = true;
@@ -220,12 +221,12 @@ namespace HuskyLibs.CustomLightmapper.Bake
             {
                 var box = new[] { Valid(0) };
                 for (int j = k; j < rules.Length; j++) rules[j].set(box);
-                var cls = SceneCollectPolicy.Classify(box[0], SceneCollectOptions.Default, out var r);
+                var cls = BakeSceneCollectPolicy.Classify(box[0], BakeSceneCollectOptions.Default, out var r);
                 bool hit = cls == rules[k].cls && r == rules[k].reason;
                 if (!hit && firstFail == null) firstFail = $"{rules[k].reason} → {cls}({r})";
                 ok &= hit;
             }
-            var none = SceneCollectPolicy.Classify(Valid(0), SceneCollectOptions.Default, out var rn);
+            var none = BakeSceneCollectPolicy.Classify(Valid(0), BakeSceneCollectOptions.Default, out var rn);
             ok &= none == CollectClass.Receiver && rn == CollectReason.None;
             Check(sb, ref pass, ref total, $"T9: 판정 순서 {rules.Length}규칙 + 기본 Receiver — 앞 규칙이 항상 사유" +
                   (firstFail != null ? $" (첫 불일치 {firstFail})" : ""), ok);
@@ -234,30 +235,30 @@ namespace HuskyLibs.CustomLightmapper.Bake
         // ── T10 확장 사유 ──
         static void TestExtendedReasons(StringBuilder sb, ref int pass, ref int total)
         {
-            var strict = SceneCollectOptions.Default; strict.WarnOnly = false;
+            var strict = BakeSceneCollectOptions.Default; strict.WarnOnly = false;
 
             var c = Valid(0); c.HasUv0 = false;
-            var clsUv = SceneCollectPolicy.Classify(c, strict, out var rUv);
+            var clsUv = BakeSceneCollectPolicy.Classify(c, strict, out var rUv);
             c = Valid(0); c.SubMeshCount = 256;
-            var clsSub = SceneCollectPolicy.Classify(c, strict, out var rSub);
-            var clsSubWarn = SceneCollectPolicy.Classify(c, SceneCollectOptions.Default, out _);
+            var clsSub = BakeSceneCollectPolicy.Classify(c, strict, out var rSub);
+            var clsSubWarn = BakeSceneCollectPolicy.Classify(c, BakeSceneCollectOptions.Default, out _);
             Check(sb, ref pass, ref total, "T10: WarnOnly=false → !HasUv0 Excluded(NoUv0) · 서브메시 256 Excluded(TooManySubMeshes) · WarnOnly=true 면 Receiver",
                   clsUv == CollectClass.Excluded && rUv == CollectReason.NoUv0
                   && clsSub == CollectClass.Excluded && rSub == CollectReason.TooManySubMeshes
                   && clsSubWarn == CollectClass.Receiver);
 
             c = Valid(0); c.SubMeshCount = 255;
-            var cls255 = SceneCollectPolicy.Classify(c, strict, out _);
+            var cls255 = BakeSceneCollectPolicy.Classify(c, strict, out _);
             c = Valid(0); c.BoundsExtentSq = float.NaN;
-            var clsNaN = SceneCollectPolicy.Classify(c, SceneCollectOptions.Default, out var rNaN);
+            var clsNaN = BakeSceneCollectPolicy.Classify(c, BakeSceneCollectOptions.Default, out var rNaN);
             Check(sb, ref pass, ref total, "T10: 서브메시 255 는 한도 이내(Receiver) · bounds NaN → Excluded(EmptyBounds)",
                   cls255 == CollectClass.Receiver && clsNaN == CollectClass.Excluded && rNaN == CollectReason.EmptyBounds);
 
-            var raw = new SceneCollectOptions();   // WarnOnly=false — Default 를 안 쓰면 경고 항목까지 제외됨(문서화된 함정)
+            var raw = new BakeSceneCollectOptions();   // WarnOnly=false — Default 를 안 쓰면 경고 항목까지 제외됨(문서화된 함정)
             c = Valid(0); c.HasUv0 = false;
-            var clsRaw = SceneCollectPolicy.Classify(c, raw, out _);
-            Check(sb, ref pass, ref total, "T10: new SceneCollectOptions() 는 WarnOnly=false (Default 와 다름 — 주석 계약)",
-                  SceneCollectOptions.Default.WarnOnly && !raw.WarnOnly && clsRaw == CollectClass.Excluded);
+            var clsRaw = BakeSceneCollectPolicy.Classify(c, raw, out _);
+            Check(sb, ref pass, ref total, "T10: new BakeSceneCollectOptions() 는 WarnOnly=false (Default 와 다름 — 주석 계약)",
+                  BakeSceneCollectOptions.Default.WarnOnly && !raw.WarnOnly && clsRaw == CollectClass.Excluded);
         }
 
         // ── T11 경고 부착 범위 ──
@@ -266,7 +267,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             var a = Valid(0); a.HasUv0 = false; a.UserOccluder = true;                    // occluder + 경고
             var b = Valid(1); b.HasUv0 = false; b.MeshReadable = false;                   // excluded → 경고 없음
             var c = Valid(2); c.HasUv0 = false; c.SubMeshCount = 300;                     // receiver + 경고 2종
-            var col = SceneCollectPolicy.Run(new[] { a, b, c }, SceneCollectOptions.Default);
+            var col = BakeSceneCollectPolicy.Run(new[] { a, b, c }, BakeSceneCollectOptions.Default);
             Check(sb, ref pass, ref total, "T11: 경고는 베이크에 들어가는 항목에만 — occluder NoUv0 · excluded None · receiver NoUv0|TooManySubMeshes",
                   col.Entries[0].Class == CollectClass.OccluderOnly && col.Entries[0].Warnings == CollectWarning.NoUv0
                   && col.Entries[1].Class == CollectClass.Excluded && col.Entries[1].Warnings == CollectWarning.None
@@ -284,7 +285,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             for (int i = 0; i < 25; i++) { var x = Valid(o++, $"Fence_{i:00}"); x.MeshReadable = false; list.Add(x); }
             { var x = Valid(o++, "Rock_01"); x.HasUv0 = false; list.Add(x); }
             { var x = Valid(o++, "Tree_LOD1"); x.IsLodChild = true; list.Add(x); }
-            var col = SceneCollectPolicy.Run(list.ToArray(), SceneCollectOptions.Default);
+            var col = BakeSceneCollectPolicy.Run(list.ToArray(), BakeSceneCollectOptions.Default);
             col.RootCount = 4; col.ElapsedMs = 21;
             string rep = col.Report(maxDetail: 20);
 
@@ -310,12 +311,12 @@ namespace HuskyLibs.CustomLightmapper.Bake
             var cands = Mixed(40, 5);
             var names = new string[cands.Length];
             for (int i = 0; i < names.Length; i++) names[i] = cands[i].Name;
-            var col = SceneCollectPolicy.Run(cands, SceneCollectOptions.Default);
-            var rec = SceneCollectPolicy.Pick(col, names, col.ReceiverIdx);
+            var col = BakeSceneCollectPolicy.Run(cands, BakeSceneCollectOptions.Default);
+            var rec = BakeSceneCollectPolicy.Pick(col, names, col.ReceiverIdx);
             bool ok = rec.Length == col.ReceiverCount;
             for (int i = 0; ok && i < rec.Length; i++) ok &= rec[i] == col.Entries[col.ReceiverIdx[i]].Name;
             bool threw = false;
-            try { SceneCollectPolicy.Pick(col, new string[cands.Length - 1], col.ReceiverIdx); }
+            try { BakeSceneCollectPolicy.Pick(col, new string[cands.Length - 1], col.ReceiverIdx); }
             catch (ArgumentException) { threw = true; }
             Check(sb, ref pass, ref total, "T13: Pick = 병렬 목록에서 인덱스 순서대로 · 길이 불일치 → ArgumentException", ok && threw);
         }
@@ -323,8 +324,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
         // ── T14 SceneMembers ──
         static void TestSceneMembers(StringBuilder sb, ref int pass, ref int total)
         {
-            var col = SceneCollectPolicy.Run(Mixed(200, 9), SceneCollectOptions.Default);
-            var m = SceneCollectPolicy.SceneMembers(col);
+            var col = BakeSceneCollectPolicy.Run(Mixed(200, 9), BakeSceneCollectOptions.Default);
+            var m = BakeSceneCollectPolicy.SceneMembers(col);
 
             // 집합 = Receiver ∪ OccluderOnly(서로소) · 순서 = Entries 오름차순(두 목록을 이어 붙인 것이 아님)
             bool count = m.Length == col.ReceiverCount + col.OccluderCount && col.ReceiverCount > 0 && col.OccluderCount > 0;
@@ -339,9 +340,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
             // 섞여 있어야 '이어 붙이기'와 구별된다 — occluder 가 receiver 보다 앞선 곳이 1개 이상
             bool interleaved = col.OccluderIdx.Length > 0 && col.ReceiverIdx.Length > 0 && col.OccluderIdx[0] < col.ReceiverIdx[col.ReceiverIdx.Length - 1];
 
-            var empty = SceneCollectPolicy.SceneMembers(SceneCollectPolicy.Run(null, SceneCollectOptions.Default));
+            var empty = BakeSceneCollectPolicy.SceneMembers(BakeSceneCollectPolicy.Run(null, BakeSceneCollectOptions.Default));
             bool threw = false;
-            try { SceneCollectPolicy.SceneMembers(null); }
+            try { BakeSceneCollectPolicy.SceneMembers(null); }
             catch (ArgumentNullException) { threw = true; }
             Check(sb, ref pass, ref total,
                   $"T14: SceneMembers = Receiver {col.ReceiverCount} ∪ Occluder {col.OccluderCount} = {m.Length} · Entries 오름차순(섞인 순서 유지) · Excluded 없음 · 빈 입력 0 · null → 예외",

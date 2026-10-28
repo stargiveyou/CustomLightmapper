@@ -92,7 +92,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
         [Header("씬 입력 — 정적 메시 (지형·건물)")]
         [Tooltip("Roots = staticRoots 하위 MeshFilter 전부(구 거동). Collected = C0 씬 분류 결과(collectedStatics) — 텍스처 라이트맵과 같은 기준" +
-                 "(LOD1+ · Contribute GI 꺼짐 · 꺼진 렌더러 · Read/Write 꺼짐 등 제외, SceneCollectOverride 표식 반영). 우클릭 'Collect Scene (C0)'.")]
+                 "(LOD1+ · 꺼진 렌더러 · Read/Write 꺼짐 등 제외, BakeSceneCollectOverride 표식 반영). 우클릭 'Collect Scene (C0)'.")]
         public StaticSource staticSource = StaticSource.Roots;
         [Tooltip("staticSource = Roots: 하위 MeshFilter 전부를 차폐·반사로 넣음(Read/Write 필요). 알베도는 머티리얼 _BaseColor/_Color.")]
         public Transform[] staticRoots = new Transform[0];
@@ -225,8 +225,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
         }
 
         /// <summary>
-        /// C0 씬 수집 결과 주입(Editor <c>SceneCollectMenu</c>) — <see cref="collectedStatics"/> 교체 + <see cref="staticSource"/> = Collected.
-        /// 프로브 볼륨엔 '굽기/차폐만' 구분이 없어 Receiver ∪ OccluderOnly 를 한 목록으로 받는다(<see cref="SceneCollectPolicy.SceneMembers"/>).
+        /// C0 씬 수집 결과 주입(Editor <c>BakeSceneCollectMenu</c>) — <see cref="collectedStatics"/> 교체 + <see cref="staticSource"/> = Collected.
+        /// 프로브 볼륨엔 '굽기/차폐만' 구분이 없어 Receiver ∪ OccluderOnly 를 한 목록으로 받는다(<see cref="BakeSceneCollectPolicy.SceneMembers"/>).
         /// </summary>
         public void SetCollected(MeshFilter[] statics)
         {

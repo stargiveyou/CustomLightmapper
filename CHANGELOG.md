@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Changed — 적응 샘플링 기본값 · 0 고착 방지 (2026-10-28)
+- `AtlasApplyDebug.samplesPerPass` 기본 8 → **32**. 8 은 256 상한에서 패스 32회 × (디스패치 · readback · 판정) 오버헤드로 같은 평균 spp 의 균등 베이크보다 1.7배 느렸다(0.83s ↔ 0.48s). 32 에서 0.53s, 상대오차 relMean 0.0145 · P99 0.086(균등 75: 0.0202 · 0.177). 진행형 미리보기도 같은 필드라 패스가 줄고 빨라진다. 씬에 저장된 기존 값(8)은 그대로이니 필요하면 인스펙터에서 바꿀 것.
+- `ProgressiveAccumulator`: 경로가 전부 0 인 점(m2 == 0)은 분산 0 → 첫 판정에서 바로 '수렴'해 접촉 그림자 텍셀이 0 으로 굳던 문제 → `MinSamples × ZeroPathMinFactor(4)`(≤ MaxSamples)까지 유지. 임시 씬에서 0 고착 84 → 3 텍셀(균등 75 와 같음), 비용 +2% spp. `Converged()` 자체는 그대로(순수 함수 · 테스트 D 불변).
+
+### Changed — A4 셸프 패킹 차트 회전 (2026-10-28)
+- `ShelfPacker.Pack`: 배치 후보 3종 — UV 그대로 / 차트별 최소 면적 bbox 방향(가로) / +90°(세로) — 중 균일 스케일(= 점유)이 가장 큰 것을 채택. LSCM·MVC 차트가 기울어진 채 나와 bbox 채움이 50% 로 떨어지던 문제(원통 인스턴스 점유 49.4% → 20.7%) 해소: 원통 **77.8%** · 구 39.0 → 43.2% · 캡슐 40.1%(그대로) · 큐브 65.4%.
+- '그대로'가 첫 후보라 어떤 메시도 점유가 줄지 않고, 그대로가 뽑히면 UV 결과가 이전과 비트 동일. 회전이 뽑힌 메시는 uv2 배치가 바뀌므로 저장된 베이크 결과는 다시 구워야 맞는다.
+
+### Changed — C0 Static ▸ Contribute GI 규칙 제외 (2026-10-28)
+- `BakeSceneCollectPolicy`: Contribute GI 가 꺼진 오브젝트를 Excluded(또는 `NonGiAsOccluder` 면 OccluderOnly)로 빼던 판정을 주석 처리 — 이제 다른 규칙에 안 걸리면 Receiver 로 굽는다. 텍스처 라이트맵 · 프로브 볼륨 Collected 둘 다 해당. 빼려면 `BakeSceneCollectOverride`.
+- 같이 주석: `BakeSceneCollectOptions.NonGiAsOccluder` · 메뉴 `Options/Non-GI Static As Occluder` · 리포트 조치 문구 · 테스트 T7 · T3/T9 의 ContributeGI 검사(`BakeSceneCollectPolicyTests` 21 → 19 검사). `CollectReason.NotContributeGI` 는 enum 에 남겨 둠(현재 안 붙음).
+
+### Changed — C0 타입 이름 변경 (2026-10-28)
+- `SceneCollect*` → `BakeSceneCollect*`: `BakeSceneCollector` · `BakeSceneCollectMenu`(Editor) · `BakeSceneCollectPolicy` · `BakeSceneCollection` · `BakeSceneCollectOptions` · `BakeSceneCollectOverride`(Runtime) · `BakeSceneCollectPolicyTests`(Tests). 결과가 라이트맵·프로브 볼륨 공용 "베이크 씬 참여자" 분류라 이름에 드러나게 했다.
+- 파일 이름도 같이 바꿨고 `.meta` 를 옮겨 GUID 는 그대로 — 씬에 붙은 표식 컴포넌트 참조 유지. 메뉴 경로 · EditorPrefs 키 · `Collect*` enum/struct · 거동은 그대로. 이 아래 이전 항목은 당시 이름 그대로 둔다.
+
 ### Fixed (2026-10-27)
 - `SH9BakeTextureTest` "Bake SH & Write Texture": PNG 저장 경로가 구 저장소 경로 `Assets/Study/CustomLightmapper/Script/SH/` 로 고정돼 폴더가 없으면 쓰기가 실패하던 문제 → 새 필드 `outputFolder`(기본 `Assets/CustomLightmapper/BakeOutput`, 없으면 생성).
 - 에디터 메뉴 `Husky/Tool/Custom Lightmapper//Allocate Selected (per-instance ST)` 경로의 `//` 제거 → `Husky/Tool/Custom Lightmapper/Allocate Selected (per-instance ST)`.

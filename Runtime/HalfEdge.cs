@@ -288,7 +288,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
 
         // 용접 거리 임계값(월드 단위). float.Epsilon 이 아니라 실제 거리여야 한다.
-        // C0-4: 진단(SceneCollector.DiagnoseCleanup)이 같은 값을 쓰도록 공개 — 값 무변경.
+        // C0-4: 진단(BakeSceneCollector.DiagnoseCleanup)이 같은 값을 쓰도록 공개 — 값 무변경.
         public const float WeldEpsilon = 1e-4f;
 
         public WeldedHalfEdge(Mesh mesh)

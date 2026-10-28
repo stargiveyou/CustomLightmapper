@@ -1,4 +1,4 @@
-# C0 — SceneCollector 개발문서 (v1, 2026-08-18)
+# C0 — BakeSceneCollector 개발문서 (v1, 2026-08-18)
 
 > **이 문서는 "무엇을 어떻게 짜는가"** — 타입 시그니처·알고리즘·배선·테스트.
 > **"왜 그렇게 정했는가"는 설계 문서**: `01_Planning_And_Design/커스텀_라이트매퍼_C0_씬수집_설계.md`
@@ -6,6 +6,8 @@
 >
 > 로드맵 위치: 개발문서 v14 §10.1(병합 후 v15 §10). 파이프라인 단계 1.
 > **구현 v1.1(2026-10-26)**: C0-0~C0-4 구현 — 문서 대비 차이는 **§11**, 미확정 항목 확정은 **§10**. 진행·게이트: `03_Progress_And_Validation/진행상황_C0-SceneCollector_2026-08-18.md`.
+> **이름 변경(2026-10-28)**: `SceneCollector`·`SceneCollectMenu`·`SceneCollectPolicy`·`SceneCollection`·`SceneCollectOptions`·`SceneCollectOverride`·`SceneCollectPolicyTests` → 앞에 `Bake`(`BakeSceneCollector` 등). 동작·메뉴 경로·EditorPrefs 키·`.meta` GUID 는 그대로 — 본문 반영(파일명은 링크 유지를 위해 구 이름).
+> **Contribute GI 규칙 제외(2026-10-28, v15.21)**: 본문의 `!ContributeGI → Excluded / NonGiAsOccluder → OccluderOnly` 규칙 · 옵션 · 메뉴 토글 · 테스트 T7 은 코드에서 주석 처리됐다(되살리기 = 주석 해제). 현재 판정 순서는 개발문서 v15 §5.8 · §12 v15.21.
 
 ---
 
@@ -13,16 +15,16 @@
 
 | 코드 | asmdef | 이유 |
 |---|---|---|
-| `SceneCollectPolicy` · `SceneCollection` · POD 타입 | `HuskyLibs.CustomLightmapper` (Runtime) | 순수 함수 → **헤드리스 테스트 가능**. `UnityEditor` 미참조 |
-| `SceneCollector` (씬 순회 · 플래그 조회) | `HuskyLibs.CustomLightmapper.Editor` | `StaticEditorFlags`/`LODGroup`/`ModelImporter` 는 `UnityEditor` 전용 |
-| `SceneCollectPolicyTests` | `HuskyLibs.CustomLightmapper.Tests` | Tests asmdef 는 Runtime 만 참조 → 정책만 테스트 가능(그래서 정책을 분리했다, 결정 ③) |
+| `BakeSceneCollectPolicy` · `BakeSceneCollection` · POD 타입 | `HuskyLibs.CustomLightmapper` (Runtime) | 순수 함수 → **헤드리스 테스트 가능**. `UnityEditor` 미참조 |
+| `BakeSceneCollector` (씬 순회 · 플래그 조회) | `HuskyLibs.CustomLightmapper.Editor` | `StaticEditorFlags`/`LODGroup`/`ModelImporter` 는 `UnityEditor` 전용 |
+| `BakeSceneCollectPolicyTests` | `HuskyLibs.CustomLightmapper.Tests` | Tests asmdef 는 Runtime 만 참조 → 정책만 테스트 가능(그래서 정책을 분리했다, 결정 ③) |
 | `AtlasApplyDebug` 배선 | `HuskyLibs.CustomLightmapper.Samples` | Samples 는 Runtime+Tests 참조. **Editor 참조가 없다** → §6 주의 |
 
 **네임스페이스**: Runtime/Tests = `HuskyLibs.CustomLightmapper.Bake`, Editor = `HuskyLibs.CustomLightmapper.Bake.EditorTools`
 (기존 파일과 동일 — `AlphaTypes.cs`, `LightmapDenoiseCompareMenu.cs` 참조).
 
 > ⚠ **Samples asmdef 는 Editor asmdef 를 참조하지 않는다**(순환 방지: Editor → Tests → Runtime).
-> 따라서 `AtlasApplyDebug` 가 `SceneCollector` 를 직접 부를 수 없다. §6 에서 해결한다.
+> 따라서 `AtlasApplyDebug` 가 `BakeSceneCollector` 를 직접 부를 수 없다. §6 에서 해결한다.
 
 ---
 
@@ -107,7 +109,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         public CollectReason Reason;   // Receiver 면 None
     }
 
-    public sealed class SceneCollection
+    public sealed class BakeSceneCollection
     {
         public CollectEntry[] Entries;      // Order 오름차순 = 씬 순회 순서(결정 ②)
         public int[]          ReceiverIdx;  // Entries 인덱스, 순서 보존
@@ -118,7 +120,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         public string Report(int maxDetail = 20);
     }
 
-    public struct SceneCollectOptions
+    public struct BakeSceneCollectOptions
     {
         /// <summary>ContributeGI 가 꺼진 정적 오브젝트를 occluder 로 살릴지. 기본 false(제외).</summary>
         public bool NonGiAsOccluder;
@@ -127,21 +129,21 @@ namespace HuskyLibs.CustomLightmapper.Bake
         /// <summary>서브메시 255 초과·UV0 없음을 경고로만 남길지(true) 제외할지(false). 기본 true.</summary>
         public bool WarnOnly;
 
-        public static SceneCollectOptions Default => new SceneCollectOptions { WarnOnly = true };
+        public static BakeSceneCollectOptions Default => new BakeSceneCollectOptions { WarnOnly = true };
     }
 ```
 
 ### 2.4 정책
 
 ```csharp
-    public static class SceneCollectPolicy
+    public static class BakeSceneCollectPolicy
     {
         /// <summary>후보 1건 분류. 부작용 없음 · 결정적 · UnityEditor 미의존.</summary>
-        public static CollectClass Classify(in CollectCandidate c, in SceneCollectOptions o,
+        public static CollectClass Classify(in CollectCandidate c, in BakeSceneCollectOptions o,
                                             out CollectReason reason);
 
-        /// <summary>후보 배열 → SceneCollection. 입력 순서를 그대로 유지한다.</summary>
-        public static SceneCollection Run(CollectCandidate[] cands, in SceneCollectOptions o);
+        /// <summary>후보 배열 → BakeSceneCollection. 입력 순서를 그대로 유지한다.</summary>
+        public static BakeSceneCollection Run(CollectCandidate[] cands, in BakeSceneCollectOptions o);
     }
 ```
 
@@ -152,13 +154,13 @@ namespace HuskyLibs.CustomLightmapper.Bake
 ```csharp
 namespace HuskyLibs.CustomLightmapper.Bake.EditorTools
 {
-    public static class SceneCollector
+    public static class BakeSceneCollector
     {
         /// <param name="roots">null 이면 활성 씬의 루트 GameObject 전부</param>
         /// <param name="userOccluders">occluder-only 로 강제할 렌더러(인스펙터 지정)</param>
         /// <param name="userExcluded">제외할 렌더러</param>
-        public static SceneCollection Collect(GameObject[] roots,
-                                              in SceneCollectOptions opt,
+        public static BakeSceneCollection Collect(GameObject[] roots,
+                                              in BakeSceneCollectOptions opt,
                                               HashSet<MeshFilter> userOccluders = null,
                                               HashSet<MeshFilter> userExcluded = null,
                                               List<MeshFilter> outFilters = null);
@@ -166,7 +168,7 @@ namespace HuskyLibs.CustomLightmapper.Bake.EditorTools
 }
 ```
 
-`outFilters` 는 `SceneCollection.Entries[i]` 와 **인덱스가 1:1로 대응**하는 실제 `MeshFilter` 목록이다.
+`outFilters` 는 `BakeSceneCollection.Entries[i]` 와 **인덱스가 1:1로 대응**하는 실제 `MeshFilter` 목록이다.
 POD 결과와 유니티 오브젝트를 분리해 두기 위해 참조를 별도 리스트로 돌려준다.
 
 ---
@@ -289,19 +291,19 @@ public static void RemoveDegenerateTriangles(int[] triangles, out int[] degenera
 ## 6. AtlasApplyDebug 배선
 
 **문제**: Samples asmdef 가 Editor asmdef 를 참조하지 않는다(§1) → `AtlasApplyDebug` 안에서
-`SceneCollector.Collect` 를 직접 호출할 수 없다.
+`BakeSceneCollector.Collect` 를 직접 호출할 수 없다.
 
 **해결**: 메뉴를 **Editor 쪽에 둔다.** 기존 `Editor/LightmapDenoiseCompareMenu.cs` 와 같은 패턴이다.
 
 ```csharp
-// Editor/SceneCollectMenu.cs
+// Editor/BakeSceneCollectMenu.cs
 [MenuItem("Tools/CustomLightmapper/Collect Scene → AtlasApplyDebug")]
 static void CollectIntoSelected()
 {
     var dbg = Selection.activeGameObject?.GetComponent<AtlasApplyDebug>();
     if (dbg == null) { Debug.LogWarning("AtlasApplyDebug 를 가진 오브젝트를 선택하세요."); return; }
 
-    var col = SceneCollector.Collect(null, SceneCollectOptions.Default, ..., outFilters: filters);
+    var col = BakeSceneCollector.Collect(null, BakeSceneCollectOptions.Default, ..., outFilters: filters);
 
     Undo.RecordObject(dbg, "Collect Scene");
     dbg.SetCollected(receivers, occluders);      // ← 아래 신설 API
@@ -351,16 +353,16 @@ public void SetCollected(MeshFilter[] receivers, MeshFilter[] occluderOnly)
 
 ## 8. 테스트
 
-`Tests/SceneCollectPolicyTests.cs`, 프로젝트 규약대로 `public static string RunAll()` 반환.
+`Tests/BakeSceneCollectPolicyTests.cs`, 프로젝트 규약대로 `public static string RunAll()` 반환.
 `LightmapEvaluateDebugger.RunAllTests`(`:58~78`)에 한 줄 추가 + 전용 ContextMenu.
 
 ```csharp
-sb.AppendLine(SceneCollectPolicyTests.RunAll());   // C0 수집 정책(결정성·배타성·LOD·사유 우선순위)
+sb.AppendLine(BakeSceneCollectPolicyTests.RunAll());   // C0 수집 정책(결정성·배타성·LOD·사유 우선순위)
 ```
 
 ```csharp
 [ContextMenu("Run Scene Collect Tests (C0)")]
-public void RunSceneCollectTests() => Debug.Log(SceneCollectPolicyTests.RunAll(), this);
+public void RunSceneCollectTests() => Debug.Log(BakeSceneCollectPolicyTests.RunAll(), this);
 ```
 
 | 케이스 | 게이트 | 내용 |
@@ -383,10 +385,10 @@ public void RunSceneCollectTests() => Debug.Log(SceneCollectPolicyTests.RunAll()
 
 | 단계 | 파일 | 완료 조건 |
 |---|---|---|
-| **C0-0** | `Runtime/Collect/SceneCollection.cs`, `SceneCollectPolicy.cs` | T1~T8 통과 |
-| **C0-1** | `Editor/SceneCollector.cs` | 실 씬에서 후보 수 = 계층의 활성 MeshFilter 수 |
-| **C0-2** | `SceneCollection.Report()` | §7 형식 출력, NotReadable 조치 문구 포함 |
-| **C0-3** | `Editor/SceneCollectMenu.cs`, `AtlasApplyDebug.SetCollected` | 메뉴 → 배열 채움 → 베이크 완주 (**C0-V3 비트동일**) |
+| **C0-0** | `Runtime/Collect/BakeSceneCollection.cs`, `BakeSceneCollectPolicy.cs` | T1~T8 통과 |
+| **C0-1** | `Editor/BakeSceneCollector.cs` | 실 씬에서 후보 수 = 계층의 활성 MeshFilter 수 |
+| **C0-2** | `BakeSceneCollection.Report()` | §7 형식 출력, NotReadable 조치 문구 포함 |
+| **C0-3** | `Editor/BakeSceneCollectMenu.cs`, `AtlasApplyDebug.SetCollected` | 메뉴 → 배열 채움 → 베이크 완주 (**C0-V3 비트동일**) |
 | **C0-4** | `Runtime/HalfEdge.cs` 접근자 공개 | `Run All Tests` 109/109 유지 (**C0-V7**) |
 | **C0-5** | (선택) R/W 일괄 수정, 레이어 필터, 프리뷰 기즈모 | — |
 
@@ -398,9 +400,9 @@ C0-3 이 끝나면 "실 씬을 한 번에 굽는다"가 성립한다. C0-4/5 는
 
 1. **`MeshRenderer.receiveGI`** — **Editor 전용 프로퍼티**. 플레이어 빌드 참조 DLL(UnityEngine.Modules 2021.3)로 타입 검사하면
    `receiveGI` 가 없다(같은 Editor 전용인 `scaleInLightmap`·`stitchLightmapSeams` 도 함께 빠짐). → 설계대로 Editor 어댑터만 읽고 정책엔 bool.
-2. **프리팹 스테이지** — 메뉴 전부 `PrefabStageUtility.GetCurrentPrefabStage() != null` 이면 경고 후 중단(`SceneCollectMenu.InPrefabStage`).
+2. **프리팹 스테이지** — 메뉴 전부 `PrefabStageUtility.GetCurrentPrefabStage() != null` 이면 경고 후 중단(`BakeSceneCollectMenu.InPrefabStage`).
 3. **`Undo.RecordObject`** — 세터 호출 전에 기록 + 프리팹 인스턴스면 `PrefabUtility.RecordPrefabInstancePropertyModifications`. Ctrl+Z 복원은 에디터 확인 항목으로 남김.
-4. **멀티 씬** — 기본 활성 씬만. `Collect Scene - All Loaded Scenes (C0)` 는 로드된 씬을 `SceneManager.GetSceneAt` 순서로 이어 붙인다(`SceneCollector.SceneRoots(true)`).
+4. **멀티 씬** — 기본 활성 씬만. `Collect Scene - All Loaded Scenes (C0)` 는 로드된 씬을 `SceneManager.GetSceneAt` 순서로 이어 붙인다(`BakeSceneCollector.SceneRoots(true)`).
 5. **토폴로지** — 서브메시 하나라도 `GetTopology(s) != Triangles` 면 Excluded. 사유는 NoTriangles 대신 별도 **`NonTriangleTopology`**(조치 문구가 달라서).
 
 ## 11. 구현 반영 — 이 문서 대비 차이 (v1.1)
@@ -411,13 +413,13 @@ C0-3 이 끝나면 "실 씬을 한 번에 굽는다"가 성립한다. C0-4/5 는
 | 판정 순서(§4.3) | 1~12 | 5 뒤 `RendererDisabled`, 6 앞 `NonTriangleTopology`, 7 뒤 `NoUv0`/`TooManySubMeshes`(WarnOnly=false 만). 나머지 순서 동일. 7 은 `!(ext² > 1e-12)` — NaN 도 제외 | 지오메트리 사고는 플래그보다 먼저(§4.3 원칙 그대로) |
 | `CollectCandidate` | — | + `RendererDisabled`(기본 false = 켜짐) · `NonTriangleTopology` | POD 기본값이 안전한 쪽이 되도록 '꺼짐' 쪽을 필드로 |
 | 경고 | 리포트 문구만 | `[Flags] CollectWarning{NoUv0, TooManySubMeshes}` 를 `CollectEntry.Warnings` 에. **Excluded 엔 붙이지 않음**(베이크에 안 들어가므로) | 리포트·테스트가 같은 값을 본다 |
-| `SceneCollection` | Entries·인덱스·수 | + `RootCount` · `ElapsedMs`(수집기가 채움 — 리포트 머리줄) | §7 머리줄 `(roots N, 순회 M건, Xms)` |
+| `BakeSceneCollection` | Entries·인덱스·수 | + `RootCount` · `ElapsedMs`(수집기가 채움 — 리포트 머리줄) | §7 머리줄 `(roots N, 순회 M건, Xms)` |
 | `Report` | §7 | 집계 = 건수 내림차순(동률은 분류·사유 enum 순 — 결정적) · 상세 = **Excluded 사유 전부**(조치 문구: NotReadable · NonTriangleTopology · NotContributeGI · LodChild) | §7 은 NotReadable 상세만 예시 |
-| 병렬 목록 | `outFilters` 1:1 | + `SceneCollectPolicy.Pick(col, parallel, idx)` — 길이 불일치면 예외 | 메뉴가 receiver/occluder 배열을 뽑을 때 1:1 깨짐을 조용히 쓰지 않게 |
-| 사용자 오버라이드 | `userOccluders`/`userExcluded` 집합 | 집합 + **`SceneCollectOverride` 표식 컴포넌트**(Runtime, `Mode{OccluderOnly, Exclude}`, `includeChildren` — 가장 가까운 조상 표식) 합집합 | 결과 배열을 손으로 고쳐도 재수집이 덮어쓴다 → 재수집에도 남는 손 수정 지점(결정 ⑧) |
+| 병렬 목록 | `outFilters` 1:1 | + `BakeSceneCollectPolicy.Pick(col, parallel, idx)` — 길이 불일치면 예외 | 메뉴가 receiver/occluder 배열을 뽑을 때 1:1 깨짐을 조용히 쓰지 않게 |
+| 사용자 오버라이드 | `userOccluders`/`userExcluded` 집합 | 집합 + **`BakeSceneCollectOverride` 표식 컴포넌트**(Runtime, `Mode{OccluderOnly, Exclude}`, `includeChildren` — 가장 가까운 조상 표식) 합집합 | 결과 배열을 손으로 고쳐도 재수집이 덮어쓴다 → 재수집에도 남는 손 수정 지점(결정 ⑧) |
 | 중복 | — | roots 가 서로 조상/자손이면 같은 MeshFilter 는 첫 등장만 | 순서 결정성 유지 + receiver 중복 방지 |
 | LOD 매핑(§4.2) | LODGroup 별 add → remove | 전 LODGroup 의 LOD0 집합 / LOD1+ 집합을 모은 뒤 차집합 | 그룹 순서와 무관(같은 렌더러가 다른 그룹의 LOD0 이어도 LOD0 승) |
 | 배선(§6) | `Samples/AtlasApplyDebug` + Tools 메뉴 | `AtlasApplyDebug` 는 병합(v15.11)으로 **Runtime** — 메뉴는 그대로 Editor: `CONTEXT/AtlasApplyDebug/Collect Scene (C0)` · `… - All Loaded Scenes (C0)` + 상단 `HuskyLibs/CustomLightmapper/Scene Collect (C0)/`(선택 대상 수집 · Report Only · Verify Determinism (C0-V1) · Diagnose Selected Meshes · Options 토글 3종 — EditorPrefs) | 기존 Editor 메뉴(`AtlasApplyDiffTestsMenu`) 패턴 |
 | receiver 0 | — | 메뉴가 적용하지 않음(경고 + 리포트) | 빈 `targets` 는 `ResolveTargets` 자식 폴백으로 바뀌어 엉뚱한 집합을 굽는다 |
-| C0-4 | 접근자 공개 | + `WeldedHalfEdge.WeldEpsilon` 공개(값 무변경). 진단 `SceneCollector.DiagnoseCleanup(mesh, …)` — 용접으로 줄어드는 정점 수·퇴화 삼각형 수만 보고, 선택 오브젝트 메뉴에서만 | 결정 ⑥ — 결과를 차폐 씬에 넣지 않는다 |
-| 테스트(§8) | T1~T8 | T1~T8 + T9 판정 순서 전수(13규칙) · T10 확장 사유·`new SceneCollectOptions()` 함정 · T11 경고 부착 범위 · T12 Report · T13 Pick — 20 체크 | 헤드리스 — .NET 8 콘솔에서 실제 실행 20/20 PASS |
+| C0-4 | 접근자 공개 | + `WeldedHalfEdge.WeldEpsilon` 공개(값 무변경). 진단 `BakeSceneCollector.DiagnoseCleanup(mesh, …)` — 용접으로 줄어드는 정점 수·퇴화 삼각형 수만 보고, 선택 오브젝트 메뉴에서만 | 결정 ⑥ — 결과를 차폐 씬에 넣지 않는다 |
+| 테스트(§8) | T1~T8 | T1~T8 + T9 판정 순서 전수(13규칙) · T10 확장 사유·`new BakeSceneCollectOptions()` 함정 · T11 경고 부착 범위 · T12 Report · T13 Pick — 20 체크 | 헤드리스 — .NET 8 콘솔에서 실제 실행 20/20 PASS |

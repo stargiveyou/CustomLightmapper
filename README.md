@@ -48,7 +48,7 @@ mkdir Samples~ && git mv Samples "Samples~/Demo"
 ## 사용 (기본 흐름)
 
 - **텍스처 라이트맵**: 씬에 `AtlasApplyDebug` 컴포넌트를 붙이고 대상 MeshFilter 를 지정한 뒤, 인스펙터 우클릭 → **Bake & Apply**. 라이팅 모드 결과는 `AtlasBakeAsset`(SO) + EXR 로 저장되고 OnEnable 에 다시 적용된다.
-  - 대상 지정 대신 인스펙터 우클릭 → **Collect Scene (C0)**: 활성 씬을 훑어 Static `Contribute GI` · LODGroup · `receiveGI` · Read/Write 기준으로 receiver(`targets`) / occluder-only(`occluders`) / 제외를 나누고 사유별 리포트를 로그로 남긴다. 자동 판정을 고정하려면 해당 오브젝트(또는 조상)에 `SceneCollectOverride`.
+  - 대상 지정 대신 인스펙터 우클릭 → **Collect Scene (C0)**: 활성 씬을 훑어 LODGroup · `receiveGI` · Read/Write 기준으로(Static `Contribute GI` 는 보지 않는다 — v15.21) receiver(`targets`) / occluder-only(`occluders`) / 제외를 나누고 사유별 리포트를 로그로 남긴다. 자동 판정을 고정하려면 해당 오브젝트(또는 조상)에 `BakeSceneCollectOverride`.
 - **인스턴싱 SH(프롭)**: `InstanceSceneBaker` — 템플릿 메시 + 인스턴스 행렬 → 2-프로브 SH → `InstancedSH_URP`.
 - **식생 프로브 볼륨(Track B)**: `ProbeVolumeBaker` — 볼륨 박스·간격 → SH9 프로브 격자(+ 유효성·정점 AO) → 인스턴스 대표점 샘플(`InstancedSH_URP`) 또는 픽셀 샘플(`InstancedVegetation_URP`).
 - 검증: `Samples/LightmapEvaluateDebugger` 우클릭 **Run All Tests**(38종).

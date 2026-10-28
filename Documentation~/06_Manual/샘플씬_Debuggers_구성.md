@@ -8,7 +8,7 @@
 ## 1. 결론
 
 - 매뉴얼에 나오는 MonoBehaviour 하니스 중 **7종이 씬에 없었다** → `Debuggers` 자식으로 추가했다.
-- 디버그용 메시가 C0 씬 수집에 섞이지 않도록 `Debuggers` 루트에 `SceneCollectOverride(Exclude)` 를 붙였다.
+- 디버그용 메시가 C0 씬 수집에 섞이지 않도록 `Debuggers` 루트에 `BakeSceneCollectOverride(Exclude)` 를 붙였다.
 - `Debuggers` 자식 14개 전부를 **기획 단계 순서로 정렬하고 이름 앞에 단계 ID** 를 붙였다(§2).
 - 추가한 하니스 중 실행해도 에셋이 생기지 않는 6종은 한 번씩 돌려 봤고 모두 정상이다(§5). `B1_ProbeVolumeBaker` 는 Bake 가 에셋을 쓰므로 돌리지 않고 설정만 확인했다.
 - **씬은 저장하지 않았다.** 작업 전부터 씬에 저장 안 된 변경이 있었기 때문이다(§7).
@@ -37,7 +37,7 @@
 | 13 | `B1_ProbeVolumeBaker` | B1 | Track B 프로브 볼륨(B1-1~6) |
 
 - 씬에 G0~G6·α·SSAA·로컬 광원 전용 오브젝트는 없다. 모두 `C2.5_AtlasApplyDebug` 의 필드·우클릭 메뉴다.
-- C0 표식 `SceneCollectOverride` 는 자식이 아니라 `Debuggers` 루트에 있어 정렬 대상이 아니다.
+- C0 표식 `BakeSceneCollectOverride` 는 자식이 아니라 `Debuggers` 루트에 있어 정렬 대상이 아니다.
 - 이름 변경과 순서 변경은 모두 Undo 로 되돌릴 수 있다.
 
 **이름 변경 영향**: 베이커 3종은 결과 파일 이름에 GameObject 이름을 쓴다(`<씬>_<이름>_Atlas` · `_ProbeVolume` · `_InstanceSH`). 세 컴포넌트 모두 지금 `bakeAsset`/`volumeAsset` 이 비어 있다. 그래서 다음 저장부터는 새 이름의 파일이 생긴다(예: `Mesh_Struct_Sample_Scene_C2.5_AtlasApplyDebug_Atlas.asset`). 씬의 `GameObject` 그룹이 쓰는 uv2 메시(`Cube_uv2`·`Capsule_uv2`)는 기존 `Mesh_Struct_Sample_Scene_AtlasApplyDebug_Atlas.asset` 의 서브에셋이라 그 파일은 지우면 안 된다.
@@ -82,7 +82,7 @@
 
 | 대상 | 컴포넌트 | 설정 | 이유 |
 |---|---|---|---|
-| `Debuggers` 루트 | `SceneCollectOverride` | `mode = Exclude` · `includeChildren = true` | `A4_UVAssemblerTestDebugger` 의 Capsule 렌더러가 Collect Scene (C0) 에 Receiver/Occluder 로 끼어들지 않게 막는다. 지금은 비정적이라 기본 규칙(NotContributeGI)으로도 빠지지만, `Non-GI Static As Occluder` 옵션을 켜면 occluder 로 들어갈 수 있다. 앞으로 `Debuggers` 아래에 디버그 메시를 더 둬도 계속 제외된다. C0 리포트에 `UserExcluded 1` 이 찍히는 게 정상이다 |
+| `Debuggers` 루트 | `BakeSceneCollectOverride` | `mode = Exclude` · `includeChildren = true` | `A4_UVAssemblerTestDebugger` 의 Capsule 렌더러가 Collect Scene (C0) 에 Receiver/Occluder 로 끼어들지 않게 막는다. Static `Contribute GI` 규칙이 v15.21 에서 빠져 비정적이어도 Receiver 로 잡히므로 이 표식이 유일한 제외 수단이다. 앞으로 `Debuggers` 아래에 디버그 메시를 더 둬도 계속 제외된다. C0 리포트에 `UserExcluded 1` 이 찍히는 게 정상이다 |
 
 ### 4.3 추가하지 않은 것
 
@@ -121,7 +121,7 @@
 | 2.1 | A1 메시 구조 · 차트 분할 | 루트 `HalfEdgeConversion` · `A1_ChartSegmentationDebugger` | |
 | 2.2 | A2/A3 평탄화 · UV 조립 | `A3_ParameterizationTestDebugger` · `A4_UVAssemblerTestDebugger` | + 메뉴 `Husky/Tools/UV Layout Viewer` |
 | 2.3 | A4 할당 · 텍셀 | `A4_TexelMapperDebug` · `A4_LightmapAllocatorDebug` | |
-| 2.4 | C0 씬 수집 | `C2.5_AtlasApplyDebug` · `B1_ProbeVolumeBaker` 우클릭 Collect Scene (C0) · `SceneCollectOverride`(Debuggers 루트) | |
+| 2.4 | C0 씬 수집 | `C2.5_AtlasApplyDebug` · `B1_ProbeVolumeBaker` 우클릭 Collect Scene (C0) · `BakeSceneCollectOverride`(Debuggers 루트) | |
 | 2.5 | C1 BVH | `C1_BVHGizmo` · `C2_LightmapEvaluateDebugger`(BVH Mesh/Scene Test) | |
 | 2.6 | C2 라이팅 코어 | `C2_LightmapEvaluateDebugger`(Evaluate) · `C2_InstancedSceneTester` | |
 | 2.7 | 로컬 광원 | `C2.5_AtlasApplyDebug` · `SH_InstanceSceneBaker` · `B1_ProbeVolumeBaker` 의 로컬 광원 설정 | **씬에 Point/Spot/Area 라이트가 없다**(Directional 1개뿐) |

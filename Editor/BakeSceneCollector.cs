@@ -8,22 +8,22 @@ using UnityEngine.SceneManagement;
 namespace HuskyLibs.CustomLightmapper.Bake.EditorTools
 {
     /// <summary>
-    /// C0-1 씬 수집기(Editor 어댑터) — 씬 순회 · StaticEditorFlags · LODGroup · receiveGI · <see cref="SceneCollectOverride"/> 조회
-    /// → <see cref="CollectCandidate"/> → <see cref="SceneCollectPolicy.Run"/>. 분류 판단은 하지 않는다(결정 ③).
+    /// C0-1 씬 수집기(Editor 어댑터) — 씬 순회 · StaticEditorFlags · LODGroup · receiveGI · <see cref="BakeSceneCollectOverride"/> 조회
+    /// → <see cref="CollectCandidate"/> → <see cref="BakeSceneCollectPolicy.Run"/>. 분류 판단은 하지 않는다(결정 ③).
     ///
     /// 순서(결정 ②): roots 배열 순서 × root 별 GetComponentsInChildren(깊이 우선 계층 순서). <b>정렬하지 않는다</b> —
     ///   이 순서가 AtlasApplyDebug 인스턴스 인덱스 i(ST 할당 · per-lumel 시드 seed + li*2654435761u)가 된다.
     /// 비용(결정 ⑦): 메시 배열 복사 API 금지 — GetIndexCount · GetTopology · HasVertexAttribute · vertexCount · bounds 만
     ///   (non-readable 메시에서도 동작). LightmapAllocator.WorldArea 는 부르지 않는다(베이크가 어차피 다시 계산).
     /// </summary>
-    public static class SceneCollector
+    public static class BakeSceneCollector
     {
         /// <param name="roots">null 이면 활성 씬의 루트 GameObject 전부(<see cref="SceneRoots"/>)</param>
-        /// <param name="userOccluders">occluder-only 로 강제할 MeshFilter(<see cref="SceneCollectOverride"/> 표식과 합집합)</param>
+        /// <param name="userOccluders">occluder-only 로 강제할 MeshFilter(<see cref="BakeSceneCollectOverride"/> 표식과 합집합)</param>
         /// <param name="userExcluded">제외할 MeshFilter(표식과 합집합)</param>
         /// <param name="outFilters">Entries 와 인덱스 1:1 인 실제 MeshFilter 목록(Clear 후 채움)</param>
-        public static SceneCollection Collect(GameObject[] roots,
-                                              in SceneCollectOptions opt,
+        public static BakeSceneCollection Collect(GameObject[] roots,
+                                              in BakeSceneCollectOptions opt,
                                               HashSet<MeshFilter> userOccluders = null,
                                               HashSet<MeshFilter> userExcluded = null,
                                               List<MeshFilter> outFilters = null)
@@ -48,7 +48,7 @@ namespace HuskyLibs.CustomLightmapper.Bake.EditorTools
                 }
             }
 
-            var col = SceneCollectPolicy.Run(cands.ToArray(), opt);
+            var col = BakeSceneCollectPolicy.Run(cands.ToArray(), opt);
             col.RootCount = roots.Length;
             col.ElapsedMs = sw.Elapsed.TotalMilliseconds;
             return col;
@@ -134,19 +134,19 @@ namespace HuskyLibs.CustomLightmapper.Bake.EditorTools
             c.ContributeGI = (GameObjectUtility.GetStaticEditorFlags(mf.gameObject) & StaticEditorFlags.ContributeGI) != 0;
 
             var ov = OverrideOf(mf);
-            c.UserOccluder = (userOccluders != null && userOccluders.Contains(mf)) || (ov != null && ov.mode == SceneCollectOverride.Mode.OccluderOnly);
-            c.UserExcluded = (userExcluded != null && userExcluded.Contains(mf)) || (ov != null && ov.mode == SceneCollectOverride.Mode.Exclude);
+            c.UserOccluder = (userOccluders != null && userOccluders.Contains(mf)) || (ov != null && ov.mode == BakeSceneCollectOverride.Mode.OccluderOnly);
+            c.UserExcluded = (userExcluded != null && userExcluded.Contains(mf)) || (ov != null && ov.mode == BakeSceneCollectOverride.Mode.Exclude);
             return c;
         }
 
         // 가장 가까운 표식: 자기 GameObject 것 → 조상 중 includeChildren 인 것(비활성 컴포넌트는 무시)
-        static SceneCollectOverride OverrideOf(MeshFilter mf)
+        static BakeSceneCollectOverride OverrideOf(MeshFilter mf)
         {
-            var own = mf.GetComponent<SceneCollectOverride>();
+            var own = mf.GetComponent<BakeSceneCollectOverride>();
             if (own != null && own.enabled) return own;
             for (var t = mf.transform.parent; t != null; t = t.parent)
             {
-                var ov = t.GetComponent<SceneCollectOverride>();
+                var ov = t.GetComponent<BakeSceneCollectOverride>();
                 if (ov != null && ov.enabled && ov.includeChildren) return ov;
             }
             return null;

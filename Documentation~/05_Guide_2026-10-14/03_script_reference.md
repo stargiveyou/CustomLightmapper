@@ -208,7 +208,7 @@ tags: [custom-lightmapper, guide, reference]
 | `Tests/HuskyLibs.CustomLightmapper.Tests` | Runtime | 전체 ⚠ (Editor 한정 권장) |
 | `Samples/HuskyLibs.CustomLightmapper.Samples` | Runtime, Tests | 전체 ⚠ (Editor 한정 권장) |
 
-모든 asmdef `allowUnsafeCode: true`. **Samples는 Editor를 참조하지 않는다** — 에디터 전용 기능(MenuItem 등)은 `Editor/`에 둘 것(C0 `SceneCollectMenu`도 같은 이유로 Editor에 배치 예정).
+모든 asmdef `allowUnsafeCode: true`. **Samples는 Editor를 참조하지 않는다** — 에디터 전용 기능(MenuItem 등)은 `Editor/`에 둘 것(C0 `BakeSceneCollectMenu`도 같은 이유로 Editor에 배치 예정).
 
 ---
 

@@ -142,8 +142,8 @@ GPU 백엔드는 `GpuScene.TraversalFits`(BVH 순회 스택 요구량 ≤ 32) �
 | 필드 | 타입 | 기본값 | 설명 |
 |---|---|---|---|
 | `adaptiveSampling` | `bool` | `false` | 간접광을 패스로 누적하고 수렴한 텍셀(표준오차 ≤ threshold × 휘도)은 멈춤. `indirectSamples` = 상한. 끄면 구 거동(비트 동일) |
-| `samplesPerPass` | `int` (≥1) | `8` | 패스당 경로 수 — 적응 판정·진행형 미리보기 간격 |
-| `adaptiveMinSamples` | `int` (≥2) | `16` | 이 spp 전에는 판정하지 않음 |
+| `samplesPerPass` | `int` (≥1) | `32` | 패스당 경로 수 — 적응 판정·진행형 미리보기 간격. 작으면 패스 오버헤드(8 은 같은 평균 spp 균등 대비 1.7배 느렸음) |
+| `adaptiveMinSamples` | `int` (≥2) | `16` | 이 spp 전에는 판정하지 않음. 경로가 전부 0 인 텍셀은 × 4(`ProgressiveAccumulator.ZeroPathMinFactor`)까지 유지 |
 | `adaptiveThreshold` | `float` [0.001, 0.5] | `0.03` | 상대 표준오차 기준(직사+간접 휘도 대비) |
 | `progressivePreviewEveryPasses` | `int` (≥1) | `1` | 진행형 미리보기 재합성 간격(패스) |
 
