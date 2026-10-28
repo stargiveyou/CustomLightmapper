@@ -136,7 +136,7 @@ GameObject:
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
+  m_StaticEditorFlags: 1
   m_IsActive: 1
 --- !u!4 &19520390
 Transform:
@@ -248,7 +248,7 @@ GameObject:
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
+  m_StaticEditorFlags: 1
   m_IsActive: 1
 --- !u!4 &23884249
 Transform:
@@ -360,7 +360,7 @@ GameObject:
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
+  m_StaticEditorFlags: 1
   m_IsActive: 1
 --- !u!4 &32637541
 Transform:
@@ -564,7 +564,7 @@ GameObject:
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
+  m_StaticEditorFlags: 1
   m_IsActive: 1
 --- !u!4 &70759758
 Transform:
@@ -676,7 +676,7 @@ GameObject:
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
+  m_StaticEditorFlags: 1
   m_IsActive: 1
 --- !u!4 &72743287
 Transform:
@@ -780,6 +780,7 @@ GameObject:
   serializedVersion: 6
   m_Component:
   - component: {fileID: 109821702}
+  - component: {fileID: 109821703}
   m_Layer: 0
   m_Name: Debuggers
   m_TagString: Untagged
@@ -800,14 +801,36 @@ Transform:
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children:
+  - {fileID: 2056494178}
+  - {fileID: 1069542302}
+  - {fileID: 900344469}
   - {fileID: 1468661706}
   - {fileID: 528226977}
-  - {fileID: 806314175}
-  - {fileID: 534717721}
-  - {fileID: 717112737}
   - {fileID: 2011227999}
+  - {fileID: 534717721}
+  - {fileID: 1792988834}
+  - {fileID: 806314175}
+  - {fileID: 1843198053}
+  - {fileID: 717112737}
+  - {fileID: 217737765}
+  - {fileID: 1788242136}
+  - {fileID: 1839532435}
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &109821703
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 109821701}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: c33a752675414a0d88ca0c50735c41be, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: HuskyLibs.CustomLightmapper::HuskyLibs.CustomLightmapper.Bake.SceneCollectOverride
+  mode: 1
+  includeChildren: 1
 --- !u!1 &138559005
 GameObject:
   m_ObjectHideFlags: 0
@@ -825,7 +848,7 @@ GameObject:
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
+  m_StaticEditorFlags: 1
   m_IsActive: 1
 --- !u!33 &138559006
 MeshFilter:
@@ -1047,6 +1070,52 @@ MonoBehaviour:
   m_ShadowLayerMask: 1
   m_RenderingLayers: 1
   m_ShadowRenderingLayers: 1
+--- !u!1 &217737764
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 217737765}
+  - component: {fileID: 217737766}
+  m_Layer: 0
+  m_Name: SH-5_SHEvalProbeVerify
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &217737765
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 217737764}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 109821702}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &217737766
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 217737764}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 92a0ed9c00fd4d04b9b0a62d5b57417c, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: HuskyLibs.CustomLightmapper.Samples::HuskyLibs.CustomLightmapper.SHEvalProbeVerify
+  epsilon: 0.002
+  projDirs: 512
 --- !u!1 &402829163
 GameObject:
   m_ObjectHideFlags: 0
@@ -1064,7 +1133,7 @@ GameObject:
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
+  m_StaticEditorFlags: 1
   m_IsActive: 1
 --- !u!4 &402829164
 Transform:
@@ -1176,7 +1245,7 @@ GameObject:
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
+  m_StaticEditorFlags: 1
   m_IsActive: 1
 --- !u!4 &405341744
 Transform:
@@ -1282,7 +1351,7 @@ GameObject:
   - component: {fileID: 528226977}
   - component: {fileID: 528226978}
   m_Layer: 0
-  m_Name: LightmapAllocatorDebug
+  m_Name: A4_LightmapAllocatorDebug
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -1340,7 +1409,7 @@ GameObject:
   - component: {fileID: 534717721}
   - component: {fileID: 534717722}
   m_Layer: 0
-  m_Name: LightmapEvaluateDebugger
+  m_Name: C2_LightmapEvaluateDebugger
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -1405,7 +1474,7 @@ MonoBehaviour:
   gizmoSize: 0.03
   drawNormals: 0
   normalLength: 0.1
-  sampleCount: 24
+  sampleCount: 0
   occluderTriCount: 5956
 --- !u!1 &626493384
 GameObject:
@@ -1424,7 +1493,7 @@ GameObject:
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
+  m_StaticEditorFlags: 1
   m_IsActive: 1
 --- !u!4 &626493385
 Transform:
@@ -1536,7 +1605,7 @@ GameObject:
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
+  m_StaticEditorFlags: 1
   m_IsActive: 1
 --- !u!4 &627840507
 Transform:
@@ -1648,7 +1717,7 @@ GameObject:
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
+  m_StaticEditorFlags: 1
   m_IsActive: 1
 --- !u!4 &688331976
 Transform:
@@ -1756,7 +1825,7 @@ GameObject:
   - component: {fileID: 717112738}
   - component: {fileID: 717112740}
   m_Layer: 0
-  m_Name: SHBakeDemo
+  m_Name: SH-4_SHBakeDemo
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -3044,6 +3113,8 @@ MonoBehaviour:
   _mat: {fileID: 0}
   TestMeshes: []
   shBakeBackend: 1
+  shBounces: 1
+  shSeed: 12345
 --- !u!1 &805510280
 GameObject:
   m_ObjectHideFlags: 0
@@ -123079,7 +123150,7 @@ GameObject:
   - component: {fileID: 806314175}
   - component: {fileID: 806314176}
   m_Layer: 0
-  m_Name: AtlasApplyDebug
+  m_Name: C2.5_AtlasApplyDebug
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -123111,7 +123182,7 @@ MonoBehaviour:
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 17f048002c7ecf54693ee673834b06e5, type: 3}
   m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::HuskyLibs.CustomLightmapper.Bake.AtlasApplyDebug
+  m_EditorClassIdentifier: HuskyLibs.CustomLightmapper::HuskyLibs.CustomLightmapper.Bake.AtlasApplyDebug
   targets:
   - {fileID: 1182344260}
   - {fileID: 1411223473}
@@ -123132,42 +123203,90 @@ MonoBehaviour:
   - {fileID: 138559006}
   - {fileID: 23884252}
   occluders: []
-  atlasResolution: 2048
-  texelsPerWorldUnit: 128
-  gutterTexels: 1
+  flatten:
+    PlanarStretchThreshold: 1.005
+    EnableLSCM: 1
+    EnableMVC: 1
+    MaxIterations: 0
+    Tolerance: 0.0000000001
+  atlasResolution: 1024
+  texelsPerWorldUnit: 16
+  gutterTexels: 2
   maxPages: 8
-  mode: 4
+  mode: 0
   chartGutter: 0.01
   background: {r: 0.04, g: 0.04, b: 0.06, a: 1}
   checkerSize: 8
   dilate: 1
   dilateIterations: 4
   dilateBurst: 1
-  atlasFilter: 1
+  atlasFilter: 0
+  hdrOutput: 1
+  denoise: 1
+  denoiseIterations: 3
+  denoiseNormalPower: 32
+  denoisePositionSigmaTexels: 2
+  denoiseColorSigma: 0.25
+  denoiseBurst: 1
   seamStitchTier1: 1
   seamStitchTier2: 1
   seamStitchIterations: 1
   seamMaxAngleDeg: 45
-  lightDirection: {x: -0.8660254, y: -0.5000001, z: -0.000000074505806}
-  lightColor: {r: 1, g: 0.95686275, b: 0.8392157, a: 1}
+  lightDirection: {x: -0.3, y: -1, z: -0.2}
+  lightColor: {r: 1, g: 1, b: 1, a: 1}
   lightIntensity: 1
   ambient: {r: 0.2, g: 0.25, b: 0.35, a: 1}
   aoSamples: 32
   seed: 12345
   surfaceBias: 0
   occluderKind: 1
-  bvhQuality: 1
+  bvhQuality: 0
   indirectSamples: 32
   maxBounces: 2
   skyColor: {r: 0.3, g: 0.35, b: 0.45, a: 1}
   defaultAlbedo: {r: 0.6, g: 0.6, b: 0.6, a: 1}
-  radianceBackend: 1
-  instanceCount: 18
-  pageCount: 1
-  utilization: 0.43054652
+  directSamples: 1
+  sunAngularDiameterDeg: 0
+  localLightSource: 2
+  localLights: []
+  localLightsFollowBakeType: 0
+  areaLightSamples: 16
+  softLightSamples: 8
+  ssaaMode: 0
+  ssaaFactor: 2
+  ssaaEdgeThreshold: 0.1
+  ssaaEdgeNormalAngleDeg: 45
+  ssaaEdgeDilate: 1
+  ssaaDebugMask: 0
+  bakeBatchLumels: 1048576
+  gpuDispatchChunk: 65536
+  adaptiveSampling: 0
+  samplesPerPass: 8
+  adaptiveMinSamples: 16
+  adaptiveThreshold: 0.03
+  progressivePreviewEveryPasses: 1
+  gpuPostProcess: 0
+  postShader: {fileID: 0}
+  alphaCutoutShadows: 1
+  alphaMaskResolution: 256
+  alphaTransparentPolicy: 0
+  alphaForceCutout: []
+  alphaForceCutoutNames: []
+  alphaDefaultCutoff: 0.5
+  radianceBackend: 0
+  pathTraceShader: {fileID: 0}
+  bakeAsset: {fileID: 0}
+  saveBakeResult: 1
+  outputFolder: Assets/CustomLightmapper/BakeOutput
+  exportExr: 1
+  applyOnEnable: 1
+  instanceCount: 0
+  pageCount: 0
+  utilization: 0
   overflow: 0
   atlas: {fileID: 0}
   sharedMat: {fileID: 0}
+  progressiveStatus: 
   _appliedFilters: []
   _originalMeshes: []
   _originalMats: []
@@ -123188,7 +123307,7 @@ GameObject:
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
+  m_StaticEditorFlags: 1
   m_IsActive: 1
 --- !u!4 &882693301
 Transform:
@@ -123283,6 +123402,181 @@ MeshFilter:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 882693300}
   m_Mesh: {fileID: 10202, guid: 0000000000000000e000000000000000, type: 0}
+--- !u!1 &900344468
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 900344469}
+  - component: {fileID: 900344472}
+  - component: {fileID: 900344471}
+  - component: {fileID: 900344470}
+  m_Layer: 0
+  m_Name: A4_UVAssemblerTestDebugger
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &900344469
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 900344468}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 15, y: 0.63817, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 109821702}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &900344470
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 900344468}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 85e99a1ca3fe7e54d9fc7dc77e269cdf, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: HuskyLibs.CustomLightmapper.Samples::HuskyLibs.CustomLightmapper.Bake.UVAssemblerTestDebugger
+  targetMesh: {fileID: 10208, guid: 0000000000000000e000000000000000, type: 0}
+  applyToMeshFilter: 0
+  copyUV2ToUV0: 0
+  chartCount: 8
+  foldoverCharts: 0
+  srcVertexCount: 550
+  expectedVertexCount: 524
+  assembledVertexCount: 524
+  srcTriangleCount: 832
+  assembledTriangleCount: 832
+  seamGroups: 96
+  seamVertices: 202
+  uv2Filled: 1
+--- !u!23 &900344471
+MeshRenderer:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 900344468}
+  m_Enabled: 1
+  m_CastShadows: 1
+  m_ReceiveShadows: 1
+  m_DynamicOccludee: 1
+  m_StaticShadowCaster: 0
+  m_MotionVectors: 1
+  m_LightProbeUsage: 1
+  m_ReflectionProbeUsage: 1
+  m_RayTracingMode: 2
+  m_RayTraceProcedural: 0
+  m_RayTracingAccelStructBuildFlagsOverride: 0
+  m_RayTracingAccelStructBuildFlags: 1
+  m_SmallMeshCulling: 1
+  m_ForceMeshLod: -1
+  m_MeshLodSelectionBias: 0
+  m_RenderingLayerMask: 1
+  m_RendererPriority: 0
+  m_Materials:
+  - {fileID: 2100000, guid: 187e7d9e1d01ecc41996e8ba820c6af0, type: 2}
+  m_StaticBatchInfo:
+    firstSubMesh: 0
+    subMeshCount: 0
+  m_StaticBatchRoot: {fileID: 0}
+  m_ProbeAnchor: {fileID: 0}
+  m_LightProbeVolumeOverride: {fileID: 0}
+  m_ScaleInLightmap: 1
+  m_ReceiveGI: 1
+  m_PreserveUVs: 0
+  m_IgnoreNormalsForChartDetection: 0
+  m_ImportantGI: 0
+  m_StitchLightmapSeams: 1
+  m_SelectedEditorRenderState: 3
+  m_MinimumChartSize: 4
+  m_AutoUVMaxDistance: 0.5
+  m_AutoUVMaxAngle: 89
+  m_LightmapParameters: {fileID: 0}
+  m_GlobalIlluminationMeshLod: 0
+  m_SortingLayerID: 0
+  m_SortingLayer: 0
+  m_SortingOrder: 0
+  m_MaskInteraction: 0
+  m_AdditionalVertexStreams: {fileID: 0}
+--- !u!33 &900344472
+MeshFilter:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 900344468}
+  m_Mesh: {fileID: 10208, guid: 0000000000000000e000000000000000, type: 0}
+--- !u!1 &1069542301
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 1069542302}
+  - component: {fileID: 1069542303}
+  m_Layer: 0
+  m_Name: A3_ParameterizationTestDebugger
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &1069542302
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1069542301}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 12, y: 0.63817, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 109821702}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1069542303
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1069542301}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 8fba28bcd8b24ad4bfc989e396795567, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: HuskyLibs.CustomLightmapper.Samples::HuskyLibs.CustomLightmapper.Bake.ParameterizationTestDebugger
+  targetMesh: {fileID: 10208, guid: 0000000000000000e000000000000000, type: 0}
+  flatten:
+    PlanarStretchThreshold: 1.005
+    EnableLSCM: 1
+    EnableMVC: 1
+    MaxIterations: 0
+    Tolerance: 0.0000000001
+  drawChartLoops: 1
+  outerLoopColor: {r: 0, g: 1, b: 1, a: 1}
+  holeLoopColor: {r: 1, g: 0, b: 1, a: 1}
+  foldoverColor: {r: 1, g: 0, b: 0, a: 1}
+  loopOffset: 0.002
+  chartCount: 8
+  foldoverCharts: 0
+  degenerateTriangles: 0
 --- !u!1 &1182344256
 GameObject:
   m_ObjectHideFlags: 0
@@ -123300,7 +123594,7 @@ GameObject:
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
+  m_StaticEditorFlags: 1
   m_IsActive: 1
 --- !u!4 &1182344257
 Transform:
@@ -123412,7 +123706,7 @@ GameObject:
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
+  m_StaticEditorFlags: 1
   m_IsActive: 1
 --- !u!4 &1259189182
 Transform:
@@ -123524,7 +123818,7 @@ GameObject:
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
+  m_StaticEditorFlags: 1
   m_IsActive: 1
 --- !u!4 &1346218169
 Transform:
@@ -123636,7 +123930,7 @@ GameObject:
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
+  m_StaticEditorFlags: 1
   m_IsActive: 1
 --- !u!4 &1411223470
 Transform:
@@ -123742,7 +124036,7 @@ GameObject:
   - component: {fileID: 1468661706}
   - component: {fileID: 1468661707}
   m_Layer: 0
-  m_Name: TexelMapperDebug
+  m_Name: A4_TexelMapperDebug
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -123790,6 +124084,321 @@ MonoBehaviour:
   coverage: 0.6549988
   boundsMin: {x: -7.6652303, y: -0.5, z: -24.575172}
   boundsMax: {x: -6.6652293, y: 0.5, z: -23.575169}
+--- !u!1 &1788242135
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 1788242136}
+  - component: {fileID: 1788242137}
+  m_Layer: 0
+  m_Name: SH_InstanceSceneBaker
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &1788242136
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1788242135}
+  serializedVersion: 2
+  m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
+  m_LocalPosition: {x: -0.6206598, y: -0.36183, z: 0.08657837}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 109821702}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1788242137
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1788242135}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: bb1d2898b5814e11b3b7254e5b1a527f, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: HuskyLibs.CustomLightmapper::HuskyLibs.CustomLightmapper.Bake.InstanceSceneBaker
+  templates:
+  - mesh: {fileID: 0}
+    albedo: {r: 0, g: 0, b: 0, a: 0}
+    matrices: []
+    captureSource: {fileID: 0}
+  anchorMode: 4
+  surfaceLift: 0.15
+  liftRelativeToBounds: 1
+  sun: {fileID: 0}
+  sunDirection: {x: -0.3, y: -1, z: -0.2}
+  sunColor: {r: 1, g: 1, b: 1, a: 1}
+  sunIntensity: 1.3
+  skyTop: {x: 0.5, y: 0.7, z: 1}
+  skyBottom: {x: 0.1, y: 0.1, z: 0.12}
+  localLights:
+    source: 2
+    lights: []
+    followBakeType: 0
+    areaSamples: 16
+    softSamples: 8
+  backend: 0
+  bounces: 1
+  dirCount: 512
+  seed: 12345
+  pathTraceShader: {fileID: 0}
+  bakeAsset: {fileID: 0}
+  outputFolder: Assets/CustomLightmapper/BakeOutput
+  exportExr: 1
+  material: {fileID: 0}
+  exposure: 1
+  shStrength: 1
+  renderOnEnable: 1
+--- !u!1 &1792988833
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 1792988834}
+  - component: {fileID: 1792988835}
+  m_Layer: 0
+  m_Name: C2_InstancedSceneTester
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &1792988834
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1792988833}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 109821702}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1792988835
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1792988833}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 84e95332d78a93d4db9e0d3f8a668568, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: HuskyLibs.CustomLightmapper.Samples::HuskyLibs.CustomLightmapper.Bake.InstancedSceneTester
+  targets:
+  - {fileID: 1182344260}
+  - {fileID: 1411223473}
+  - {fileID: 1259189185}
+  - {fileID: 72743290}
+  - {fileID: 70759761}
+  - {fileID: 882693304}
+  - {fileID: 32637544}
+  - {fileID: 627840510}
+  - {fileID: 402829167}
+  - {fileID: 405341747}
+  - {fileID: 19520393}
+  - {fileID: 2049526279}
+  - {fileID: 2122278900}
+  - {fileID: 688331979}
+  - {fileID: 626493388}
+  - {fileID: 1346218172}
+  - {fileID: 138559006}
+  - {fileID: 23884252}
+  rays: 3000
+  indirectSamplePoints: 16
+  indirectSamples: 64
+  maxBounces: 2
+  seed: 12345
+  lightDirection: {x: -0.3, y: -1, z: -0.2}
+  lightIntensity: 1
+  skyColor: {r: 0.3, g: 0.35, b: 0.45, a: 1}
+--- !u!1 &1839532434
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 1839532435}
+  - component: {fileID: 1839532436}
+  m_Layer: 0
+  m_Name: B1_ProbeVolumeBaker
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &1839532435
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1839532434}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: -0.28122997, y: 0.73817, z: 0.5361786}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 109821702}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1839532436
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1839532434}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 5cf057c024ba4128ac5d77e9847c4b43, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: HuskyLibs.CustomLightmapper::HuskyLibs.CustomLightmapper.Bake.ProbeVolumeBaker
+  volumeSize: {x: 12, y: 10, z: 12}
+  probeSpacing: {x: 1, y: 1, z: 1}
+  maxProbeCount: 2097152
+  templates: []
+  staticSource: 0
+  staticRoots:
+  - {fileID: 1856873897}
+  collectedStatics: []
+  staticDefaultAlbedo: {r: 0.5, g: 0.5, b: 0.5, a: 1}
+  staticTwoSided: 0
+  sun: {fileID: 169845338}
+  sunDirection: {x: -0.3, y: -1, z: -0.2}
+  sunColor: {r: 1, g: 1, b: 1, a: 1}
+  sunIntensity: 1.3
+  skyTop: {x: 0.5, y: 0.7, z: 1}
+  skyBottom: {x: 0.1, y: 0.1, z: 0.12}
+  localLights:
+    source: 2
+    lights: []
+    followBakeType: 0
+    areaSamples: 16
+    softSamples: 8
+  backend: 0
+  bounces: 1
+  dirCount: 256
+  seed: 12345
+  pathTraceShader: {fileID: 0}
+  computeValidity: 1
+  validityDirCount: 64
+  validityThreshold: 0.25
+  validityMaxDistance: 0
+  dilationIterations: 64
+  volumeAsset: {fileID: 0}
+  outputFolder: Assets/CustomLightmapper/BakeOutput
+  exportExr: 1
+  anchorMode: 4
+  surfaceLift: 0.15
+  liftRelativeToBounds: 1
+  useValidityWeights: 1
+  material: {fileID: 0}
+  exposure: 1
+  shStrength: 1
+  renderOnEnable: 1
+  vegetationMaterial: {fileID: 0}
+  translucency: 0.3
+  normalBiasCells: 0.25
+  edgeFadeCells: 1
+  bindGlobal: 0
+  alphaCutout: 1
+  alphaMaskResolution: 256
+  alphaTransparentPolicy: 0
+  alphaForceCutout: []
+  alphaForceCutoutNames: []
+  alphaDefaultCutoff: 0.5
+  bakeVertexAO: 1
+  vertexAOSettings:
+    samples: 128
+    maxDistanceRelative: 0.5
+    surfaceBiasRelative: 0.0001
+    seed: 12345
+  applyVertexAO: 1
+  vertexAOStrength: 1
+  drawProbes: 1
+  maxGizmoProbes: 4096
+  gizmoProbeSize: 0.1
+--- !u!1 &1843198052
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 1843198053}
+  - component: {fileID: 1843198054}
+  m_Layer: 0
+  m_Name: SH-1_SH9BakeTextureTest
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &1843198053
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1843198052}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 109821702}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1843198054
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1843198052}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: b53c5a73595ce7f4194c356f8fd09eba, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: HuskyLibs.CustomLightmapper.Samples::HuskyLibs.CustomLightmapper.Bake.SH9BakeTextureTest
+  environment: 1
+  skyColor: {r: 0.6, g: 0.75, b: 1.1, a: 1}
+  groundColor: {r: 0.22, g: 0.18, b: 0.14, a: 1}
+  lightColor: {r: 3, g: 2.8, b: 2.4, a: 1}
+  lightDirection: {x: -0.3, y: -1, z: -0.2}
+  lobeSharpness: 32
+  sampleCount: 4096
+  seed: 12345
+  panelWidth: 256
+  panelHeight: 128
+  outputFolder: Assets/CustomLightmapper/BakeOutput
+  fileName: SH9_BakeTest
+  gammaEncode: 1
+  _c0: {x: 0, y: 0, z: 0}
+  _lastPath: 
 --- !u!1 &1856873896
 GameObject:
   m_ObjectHideFlags: 0
@@ -123884,7 +124493,7 @@ GameObject:
   - component: {fileID: 2011227999}
   - component: {fileID: 2011228000}
   m_Layer: 0
-  m_Name: BVHGizmo
+  m_Name: C1_BVHGizmo
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -123970,7 +124579,7 @@ GameObject:
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
+  m_StaticEditorFlags: 1
   m_IsActive: 1
 --- !u!4 &2049526276
 Transform:
@@ -124065,6 +124674,61 @@ MeshFilter:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 2049526275}
   m_Mesh: {fileID: 10208, guid: 0000000000000000e000000000000000, type: 0}
+--- !u!1 &2056494177
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 2056494178}
+  - component: {fileID: 2056494179}
+  m_Layer: 0
+  m_Name: A1_ChartSegmentationDebugger
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &2056494178
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2056494177}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 9, y: 0.63817, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 109821702}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &2056494179
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 2056494177}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: ab67533ac18cf60498b79b98572d4310, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: HuskyLibs.CustomLightmapper.Samples::HuskyLibs.CustomLightmapper.Bake.ChartSegmentationDebugger
+  targetMesh: {fileID: 10208, guid: 0000000000000000e000000000000000, type: 0}
+  drawGizmos: 1
+  drawSeams: 1
+  seamColor: {r: 0, g: 0, b: 0, a: 1}
+  bakeVertexColors: 0
+  drawChartLoops: 1
+  outerLoopColor: {r: 0, g: 1, b: 1, a: 1}
+  holeLoopColor: {r: 1, g: 0, b: 1, a: 1}
+  loopOffset: 0.002
+  chartCount: 8
+  faceCount: 832
 --- !u!1 &2122278896
 GameObject:
   m_ObjectHideFlags: 0
@@ -124082,7 +124746,7 @@ GameObject:
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
-  m_StaticEditorFlags: 0
+  m_StaticEditorFlags: 1
   m_IsActive: 1
 --- !u!4 &2122278897
 Transform:
