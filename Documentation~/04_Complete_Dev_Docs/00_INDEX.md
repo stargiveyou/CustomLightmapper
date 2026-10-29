@@ -75,6 +75,7 @@
 | SSAA | 텍셀 내부 슈퍼샘플링(Adaptive/Full) | ✅ 완료·검증 |
 | C0 | 씬 수집·분류 (알파 마스크는 완료) | ◕ C0-0~C0-4 구현(v15.12, 정책 테스트 19/19 — v15.21 ContributeGI 규칙 제외) · v15.19 프로브 볼륨 정적 입력도 C0 분류로 · 에디터 씬 게이트 V3·V6·V8 대기 · C0-5(선택) 미착수 |
 | B1 | 범용 프로브 격자 / 정점 베이크 | ✅ B1-1~6 구현(격자·유효성·저장·픽셀 셰이더·정점 AO v15.7~10 병합 · 알파 잎 차폐 v15.13) — 에디터 테스트 대기 |
+| B2 | 적응형 프로브(지형 추종 2.5D) | ✅ v15.22 `ProbeTerrainLayers` + `ProbeVolumeBaker.layout = TerrainLayers`(헤드리스 10/10) — 에디터 테스트 대기 |
 | — | LSCM / MVC 솔버 본체 | ✅ v15.14 (헤드리스 17/17) — 에디터 실씬 확인 대기 |
 | — | Point / Spot / Area 광원 | ✅ v15.17 L1 텍스처 라이트맵 · v15.18 L2 SH·프로브 (CPU/Burst/GPU) — 에디터 실측 대기 |
 | — | Track B 정적 입력 C0 합류 | ✅ v15.19 `ProbeVolumeBaker.staticSource = Collected`(텍스처 경로와 같은 씬 기준·템플릿 중복 자동 제외) — 에디터 테스트 대기 |
@@ -90,7 +91,7 @@
 | 1 | **에디터 확인 게이트** | 병합(v15.11) + C0(v15.12) + B1-6(v15.13)은 에디터 밖에서만 검증(패키지 전체 타입 검사 통과) — 재컴파일 0 · Run All Tests 27종 · C0 씬 게이트(V3 비트동일·V6 α 정합) → [C0 진행](../03_Progress_And_Validation/진행상황_C0-SceneCollector_2026-08-18.md) |
 | — | ~~C0 — 씬 수집·분류~~ | ◕ 구현(v15.12) — [설계](../01_Planning_And_Design/커스텀_라이트매퍼_C0_씬수집_설계.md) · [개발문서](../02_Development_And_Reference/커스텀_라이트매퍼_C0_SceneCollector_개발문서.md) §11 구현 차이 |
 | — | ~~B1-6 — Track B 알파 잎 차폐~~ | ✅ 구현(v15.13) — 패키지 α any-hit 연결, 코어 무수정 → [Track B 설계](../01_Planning_And_Design/커스텀_라이트매퍼_TrackB_식생프로브_설계.md) §6 체크리스트 |
-| 2 | Track B B2 — 적응형 프로브 | D1: 균일 격자 → 지형 추종 2.5D. 빈 하늘 공간 낭비 해소 |
+| — | ~~Track B B2 — 적응형 프로브~~ | ✅ v15.22 지형 추종 2.5D — 균일 대비 절감률 리포트. 다층 구조는 (선택) 희소 브릭 |
 | — | ~~LSCM / MVC 솔버 본체~~ | ✅ v15.14 — 곡면 차트 등각 평탄화 · 겹침 MVC |
 | 4 | Point / Spot / Area 광원 | ✅ L1 텍스처 + L2 SH·프로브(계약 `BakeLight`·`LightSampling`, 3백엔드) — 남음: 에디터 실측, 선택 IES·쿠키 |
 | 5 | ~~SH-2 다바운스 · `iid*7` 인덱싱 검증~~ | ✅ 완료(v14.12·v14.14·v15.2 — 병합으로 반영). SH 트랙 잔여는 실씬 노출 튜닝 |

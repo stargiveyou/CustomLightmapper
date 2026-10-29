@@ -10,6 +10,10 @@ namespace HuskyLibs.CustomLightmapper.Bake
     ///
     /// 볼륨: 이 Transform 위치를 중심으로 하는 월드 축 정렬 박스(<see cref="volumeSize"/>) + 간격(<see cref="probeSpacing"/>)
     ///   → <see cref="ProbeGrid.FromBounds"/>.
+    /// 배치(B2 — 결정 D1, <see cref="layout"/>): Uniform = 위 균일 3D 격자 / TerrainLayers = 지형 추종 2.5D(<see cref="ProbeTerrainLayers"/>) —
+    ///   XZ 는 같은 격자, 열마다 지면 메시(<see cref="groundRoots"/>, 비우면 정적 입력)로 볼륨 위에서 아래로 레이를 쏴 지면 높이를 찾고
+    ///   그 위 <see cref="groundOffset"/> 부터 <see cref="layerHeight"/> 만큼 층을 쌓는다. 계수·유효성·dilation·Texture3D 는 같은 인덱스 공간,
+    ///   에셋에 열 높이(+ 높이맵 텍스처)만 추가. 베이크 로그 `layout:` 줄에 균일 환산 대비 프로브·메모리 절감률.
     /// 씬 입력: ① 템플릿·인스턴스 행렬(<see cref="templates"/> — 인스펙터 / <see cref="SetInstances"/> / 자식 캡처, 식생·프롭)
     ///   ② 정적 메시(지형·건물, 메시별 dedupe·머티리얼 색 알베도) — <see cref="staticSource"/>:
     ///      Roots = <see cref="staticRoots"/> 하위 MeshFilter 전부(구 거동) / Collected = C0 씬 분류 결과(<see cref="collectedStatics"/> —
@@ -45,6 +49,13 @@ namespace HuskyLibs.CustomLightmapper.Bake
         {
             Roots,      // staticRoots 하위 MeshFilter 전부(구 거동 — 비트 동일)
             Collected,  // C0 씬 분류 결과(collectedStatics) — 우클릭 'Collect Scene (C0)'
+        }
+
+        /// <summary>프로브 배치(B2 — 결정 D1).</summary>
+        public enum Layout
+        {
+            Uniform,        // 균일 3D 격자(구 거동 — 비트 동일)
+            TerrainLayers,  // 지형 추종 2.5D: 열 지면 높이 + 층
         }
 
         /// <summary>표시 방식(결정 D2).</summary>
@@ -86,6 +97,17 @@ namespace HuskyLibs.CustomLightmapper.Bake
         public Vector3 probeSpacing = new Vector3(2f, 1f, 2f);
         [Tooltip("이보다 많으면 베이크 거부(메모리·시간 보호).")]
         [Min(1)] public int maxProbeCount = 1 << 21;
+
+        [Header("배치 (B2 — 지형 추종 2.5D)")]
+        [Tooltip("Uniform = 균일 3D 격자(구 거동). TerrainLayers = 지형 추종: XZ 는 같은 격자, 열마다 지면 높이를 찾아 그 위로 층을 쌓는다 — " +
+                 "식생이 지면 근처에 몰리는 넓은 지형에서 하늘 빈 공간 프로브를 없앤다. 이때 volumeSize.y 는 지면 탐색 범위(볼륨 위에서 아래로 레이).")]
+        public Layout layout = Layout.Uniform;
+        [Tooltip("TerrainLayers: 지면에서 첫 층까지 높이(월드). 지면에 너무 붙이면 유효성 판정에서 무효가 늘어난다(0.25~0.5 권장).")]
+        [Min(0f)] public float groundOffset = 0.25f;
+        [Tooltip("TerrainLayers: 첫 층 위로 덮을 높이(월드) — 층 수 = ⌈높이 / probeSpacing.y⌉ + 1. 식생 최대 높이 정도.")]
+        [Min(0f)] public float layerHeight = 6f;
+        [Tooltip("TerrainLayers: 지면 판정 메시 루트(하위 MeshFilter, Read/Write 필요). 비우면 정적 메시 입력 전부(staticSource 기준 — 템플릿은 제외라 수관이 층을 들어 올리지 않음).")]
+        public Transform[] groundRoots = new Transform[0];
 
         [Header("씬 입력 — 템플릿·인스턴스 (임시)")]
         public TemplateInput[] templates = new TemplateInput[0];
@@ -203,7 +225,13 @@ namespace HuskyLibs.CustomLightmapper.Bake
         internal int RendererCount => _renderers.Count;
         internal IReadOnlyList<InstancedSHRenderer> Renderers => _renderers;
 
-        public ProbeGrid Grid => ProbeGrid.FromBounds(new Bounds(transform.position, volumeSize), probeSpacing);
+        /// <summary>볼륨 박스(월드 축 정렬). TerrainLayers 에선 XZ 범위 + 지면 탐색 높이 범위.</summary>
+        public Bounds VolumeBounds => new Bounds(transform.position, volumeSize);
+
+        /// <summary>배치 격자: Uniform = 볼륨 균일 격자, TerrainLayers = 같은 XZ + (origin.y = groundOffset, 층 수) — 위치는 열 높이와 함께(<see cref="ProbeTerrainLayers"/>).</summary>
+        public ProbeGrid Grid => layout == Layout.TerrainLayers
+            ? ProbeTerrainLayers.Grid(VolumeBounds, probeSpacing, groundOffset, layerHeight)
+            : ProbeGrid.FromBounds(VolumeBounds, probeSpacing);
 
         // ───────────────────────── 입력 ─────────────────────────
 
@@ -325,7 +353,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
 #endif
             var a = volumeAsset;
             Debug.Log($"[ProbeVolumeBaker] 베이크 완료: {a.grid}, 무효 {a.invalidCount} → dilation {a.dilatedCount}, " +
-                      $"bounces={a.bounces}, dirs={a.dirCount}, backend={usedBackend}, lights={a.lightLog}, alpha={(a.alphaCutout ? "ON" : "OFF")}\n  scene: {a.sceneLog}\n  alpha: {a.alphaLog}", this);
+                      $"bounces={a.bounces}, dirs={a.dirCount}, backend={usedBackend}, lights={a.lightLog}, alpha={(a.alphaCutout ? "ON" : "OFF")}\n  layout: {a.layoutLog}\n  scene: {a.sceneLog}\n  alpha: {a.alphaLog}", this);
             if (renderOnEnable && isActiveAndEnabled) RebuildRender();
         }
 
@@ -342,6 +370,17 @@ namespace HuskyLibs.CustomLightmapper.Bake
             { Debug.LogError($"[ProbeVolumeBaker] 격자 {d} 가 Texture3D 축 한도 {ProbeVolumeAsset.MaxTextureDim} 초과.", this); return null; }
             if (!BuildSceneInput(out var tris, out var albedo, out var insts, out var countBackface, out var meshes, out var instMats)) return null;
             var alpha = BuildAlphaData(meshes, tris, insts, instMats, out string alphaLog);
+
+            // B2 배치: Uniform → 격자 위치 그대로(구 경로와 같은 배열) / TerrainLayers → 열 지면 높이 + 층
+            float[] heights = Array.Empty<float>();
+            string layoutLog;
+            if (layout == Layout.TerrainLayers)
+            {
+                heights = ComputeColumnHeights(grid, out int miss, out string groundLog);
+                layoutLog = ProbeTerrainLayers.Describe(grid, ProbeTerrainLayers.Measure(grid, heights, miss)) + $" · 지면 메시 {groundLog}";
+            }
+            else layoutLog = $"Uniform {d.x}×{d.y}×{d.z} = {grid.Count} 프로브";
+            var positions = ProbeTerrainLayers.Positions(grid, heights);
 
             using var bvh = new TwoLevelBVH(tris, insts, Allocator.TempJob, BVH.BuildQuality.SAH);
             var bakeLights = localLights != null ? localLights.Collect() : Array.Empty<BakeLight>();   // L2: 로컬 광원(바운스 + 직접광 투영)
@@ -360,7 +399,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                     using var gpu = new GpuScene(bScene);
                     if (gpu.TraversalFits)
                     {
-                        sh = grid.BakeGpu(gpu, cs, cs.FindKernel(kName), sunDL, sky, q, dirCount, seed);
+                        sh = ProbeGrid.BakeGpuAt(gpu, cs, cs.FindKernel(kName), sunDL, sky, q, positions, dirCount, seed);
                         usedBackend = "Gpu";
                     }
                     else Debug.LogWarning($"[ProbeVolumeBaker] BVH 깊이(스택 {gpu.RequiredStack}칸 필요) > GPU 순회 스택 {GpuBakeLimits.TraversalStack} → Burst 폴백.", this);
@@ -369,7 +408,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             }
             if (sh == null)
             {
-                sh = grid.BakeBurst(bScene, sky, sunDL, q, dirCount, seed);
+                sh = ProbeGrid.BakeBurstAt(bScene, sky, sunDL, q, positions, dirCount, seed);
                 usedBackend = "Burst";
             }
 
@@ -378,7 +417,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
             if (computeValidity)
             {
                 float maxDist = validityMaxDistance > 0f ? validityMaxDistance : float.MaxValue;
-                valid = BurstProbeValidity.ComputeGrid(bScene, grid, out _, validityDirCount, validityThreshold, countBackface, maxDist);
+                // = ComputeGrid(bScene, grid, …) 의 본체 — 위치 배열(지형 추종 포함)로
+                valid = BurstProbeValidity.Classify(BurstProbeValidity.BackfaceRatio(bScene, positions, validityDirCount, countBackface, maxDist), validityThreshold);
                 foreach (bool v in valid) if (!v) invalid++;
                 if (invalid > 0 && dilationIterations > 0) dilated = BurstProbeValidity.Dilate(grid, sh, valid, dilationIterations);
             }
@@ -393,6 +433,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
             asset.shPacked = SHInstancedBuffer.Flatten(sh);
             asset.valid = valid;
             asset.textures = ProbeVolumeAsset.CreateTextures(grid, asset.shPacked);
+            asset.columnHeights = heights;
+            asset.heightTexture = heights.Length > 0 ? ProbeVolumeAsset.CreateHeightTexture(grid, heights) : null;
+            asset.layoutLog = layoutLog;
             asset.fallbackSH = SHInstancedBuffer.Flatten(new[] { SkySH(sky, dirCount) });
             asset.vertexAO = bakeVertexAO ? BakeVertexAO() : Array.Empty<ProbeVolumeAsset.VertexAOEntry>();
             asset.vertexAOSettings = vertexAOSettings;
@@ -410,6 +453,75 @@ namespace HuskyLibs.CustomLightmapper.Bake
             asset.lightLog = $"{BakeLightUtil.Summary(bakeLights)}({(localLights != null ? localLights.source : LocalLightSource.None)})";
             asset.sceneLog = LastSceneLog;
             return asset;
+        }
+
+        // ───────────────────────── 지면 높이 (B2) ─────────────────────────
+
+        /// <summary>
+        /// B2 열 지면 높이: 지면 메시(<see cref="GroundFilters"/>)로 볼륨 위(top)에서 아래로 레이 → <see cref="ProbeTerrainLayers.ColumnHeights"/>
+        /// (볼륨 높이 범위 밖·미스 열은 이웃 보간, 전부 미스면 볼륨 바닥). <paramref name="groundLog"/> = 지면 메시 요약.
+        /// </summary>
+        internal float[] ComputeColumnHeights(in ProbeGrid grid, out int missCount, out string groundLog)
+        {
+            var b = VolumeBounds;
+            var filters = GroundFilters();
+            var meshToIdx = new Dictionary<Mesh, int>();
+            var triList = new List<Tri[]>();
+            var instList = new List<TwoLevelBVH.Instance>();
+            int notReadable = 0;
+            foreach (var mf in filters)
+            {
+                var mesh = mf.sharedMesh;
+                if (!mesh.isReadable) { notReadable++; continue; }
+                if (!meshToIdx.TryGetValue(mesh, out int mi))
+                {
+                    mi = triList.Count;
+                    meshToIdx[mesh] = mi;
+                    triList.Add(TemplateInstanceSource.MeshToLocalTris(mesh));
+                }
+                instList.Add(new TwoLevelBVH.Instance { MeshIndex = mi, LocalToWorld = mf.transform.localToWorldMatrix });
+            }
+
+            float[] h;
+            if (instList.Count == 0)
+            {
+                Debug.LogWarning("[ProbeVolumeBaker] TerrainLayers: 지면 메시 없음 — 볼륨 바닥(volumeSize 아래면) 평면으로 층을 쌓음. groundRoots 또는 정적 입력을 지정하세요.", this);
+                h = ProbeTerrainLayers.ColumnHeights(null, grid, b.max.y, b.min.y, out missCount);
+            }
+            else
+            {
+                using var gbvh = new TwoLevelBVH(triList.ToArray(), instList.ToArray(), Allocator.TempJob, BVH.BuildQuality.SAH);
+                h = ProbeTerrainLayers.ColumnHeights(gbvh, grid, b.max.y, b.min.y, out missCount);
+            }
+            groundLog = $"{(HasGroundRoots ? "groundRoots" : $"정적({staticSource})")} {instList.Count}개"
+                      + (notReadable > 0 ? $" (Read/Write 꺼짐 −{notReadable})" : "")
+                      + (instList.Count == 0 ? " — 없음: 볼륨 바닥 평면" : "");
+            return h;
+        }
+
+        bool HasGroundRoots
+        {
+            get
+            {
+                if (groundRoots == null) return false;
+                foreach (var r in groundRoots) if (r != null) return true;
+                return false;
+            }
+        }
+
+        /// <summary>지면 판정 MeshFilter: <see cref="groundRoots"/> 하위(지정 시) 또는 정적 입력(<see cref="StaticFilters"/> — 템플릿 제외). 중복·메시 없음 제외.</summary>
+        internal List<MeshFilter> GroundFilters()
+        {
+            if (!HasGroundRoots) return StaticFilters(out _);
+            var list = new List<MeshFilter>();
+            var seen = new HashSet<MeshFilter>();
+            foreach (var root in groundRoots)
+            {
+                if (root == null) continue;
+                foreach (var mf in root.GetComponentsInChildren<MeshFilter>())
+                    if (mf.sharedMesh != null && seen.Add(mf)) list.Add(mf);
+            }
+            return list;
         }
 
         /// <summary>
@@ -661,6 +773,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
             foreach (var tex in target.textures)
                 if (tex != null) UnityEditor.AssetDatabase.AddObjectToAsset(tex, target);
+            if (target.heightTexture != null) UnityEditor.AssetDatabase.AddObjectToAsset(target.heightTexture, target);   // B2 열 높이
             if (target.vertexAO != null)
                 foreach (var e in target.vertexAO)
                     if (e?.aoMesh != null) UnityEditor.AssetDatabase.AddObjectToAsset(e.aoMesh, target);
@@ -826,13 +939,20 @@ namespace HuskyLibs.CustomLightmapper.Bake
 
             var g = volumeAsset.grid;
             Gizmos.color = new Color(1f, 1f, 1f, 0.3f);
-            Gizmos.DrawWireCube((g.origin + g.MaxCorner) * 0.5f, g.MaxCorner - g.origin);
+            Vector3 lo = g.origin, hi = g.MaxCorner;
+            if (volumeAsset.IsTerrainLayers)   // B2: 층이 차지하는 범위 = 최저 지면의 첫 층 ~ 최고 지면의 마지막 층
+            {
+                var st = ProbeTerrainLayers.Measure(g, volumeAsset.columnHeights);
+                lo.y = st.minHeight + g.origin.y;
+                hi.y = st.maxHeight + g.MaxCorner.y;
+            }
+            Gizmos.DrawWireCube((lo + hi) * 0.5f, hi - lo);
             int n = g.Count;
             int stride = Mathf.Max(1, Mathf.CeilToInt((float)n / Mathf.Max(1, maxGizmoProbes)));
             bool hasValid = volumeAsset.valid != null && volumeAsset.valid.Length == n;
             for (int i = 0; i < n; i += stride)
             {
-                Vector3 p = g.Position(i);
+                Vector3 p = volumeAsset.ProbePosition(i);
                 if (hasValid && !volumeAsset.valid[i])
                 {
                     Gizmos.color = Color.red;
