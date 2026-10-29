@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Docs — 결정: B3(Unity 라이트 프로브 연동) 제외 · 희소 브릭 설계 메모 (2026-10-29)
+- 기획서 §9.5 개발 원칙 신설: 커스텀 개발 — Unity GI 기능(라이트 프로브·APV·내장 라이트매퍼)을 쓰지 않는다. Track B 결정 D6 '자체 볼륨만, B3 보류' → **B3 제외**(기획서 · Track B 설계 · 개발문서 · 00_INDEX).
+- Track B 설계 §4.8 에 희소 브릭(다층 공간용) 설계 메모 — 구조 · 재사용할 것 · 새로 필요한 것 · 비용 · 검증 계약 · 착수 기준. 코드 변경 없음.
+
 ### Added — Track B B2: 지형 추종 2.5D 프로브 (2026-10-28)
 - `ProbeTerrainLayers`(Runtime/ProbeVolume): 결정 D1 의 적응형 배치 — XZ 균일 격자 × 열 (i,k) 지면 높이 + 층. 점 p 의 '열 격자'(origin.y 만 H(p.xz) + 첫 층 높이)로 위치·샘플·셰이더가 균일 규약을 그대로 쓴다. 열 높이 bilinear · 지면 레이(`ColumnHeights`, 미스 열은 이웃 링 평균) · 절감 리포트(`Measure`/`Describe`).
 - `ProbeVolumeBaker.layout`(`Uniform` 기본 / `TerrainLayers`) · `groundOffset`(0.25) · `layerHeight`(6) · `groundRoots`(비우면 정적 입력 — 템플릿 제외) · Bake 로그 `layout:`(균일 환산 대비 프로브·메모리 절감률).
