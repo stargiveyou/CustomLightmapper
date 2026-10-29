@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Docs — 희소 브릭(B4) 설계 문서 · Unity CLI 테스트 체크리스트 (2026-10-29)
+- `Documentation~/01_Planning_And_Design/커스텀_라이트매퍼_희소브릭_설계.md` 신설 — 다층 공간용 희소 브릭을 Track B **B4**(선택, 미착수)로: 용어 · 구조(4³ 브릭·레벨 ×3·인디렉션 + 아틀라스) · 세분 판정 · 베이크 7단계(정수 격자 중복 제거·그래프 dilation·레벨 경계 이음매) · 저장 · 셰이더 계약(`_HuskyPV_Params.w = 2`) · 메모리 모델 · 단계 S1~S5 · 결정 항목 · 리스크 · 착수 기준. Track B 설계 §4.8 은 요약 + 링크.
+- `Documentation~/03_Progress_And_Validation/UnityCLI_테스트_체크리스트.md` 신설 — `unity command eval`/`eval_file` 로 컴파일·compute·셰이더 메시지 → RunAll 40종 클래스별(B2 신규 2종 우선, 기대 443/443) → RunAll 밖 10개 → 실베이크 스모크(`ProbeVolumeBaker` Uniform → TerrainLayers 등) → 결과 기록. C# 스니펫(일괄 요약·로그 캡처·실베이크) 포함.
+- 기획서 · 개발문서 · 00_INDEX · 매뉴얼 · 에디터검증 체크리스트에 링크. 기획서 단계 표의 B2 를 ✅ v15.22 로 고치고 B4 행 추가. 코드 변경 없음.
+
 ### Docs — 결정: B3(Unity 라이트 프로브 연동) 제외 · 희소 브릭 설계 메모 (2026-10-29)
 - 기획서 §9.5 개발 원칙 신설: 커스텀 개발 — Unity GI 기능(라이트 프로브·APV·내장 라이트매퍼)을 쓰지 않는다. Track B 결정 D6 '자체 볼륨만, B3 보류' → **B3 제외**(기획서 · Track B 설계 · 개발문서 · 00_INDEX).
 - Track B 설계 §4.8 에 희소 브릭(다층 공간용) 설계 메모 — 구조 · 재사용할 것 · 새로 필요한 것 · 비용 · 검증 계약 · 착수 기준. 코드 변경 없음.
