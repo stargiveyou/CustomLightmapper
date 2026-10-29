@@ -107,7 +107,20 @@
 - **지형 추종 2.5D 레이어**: XZ 격자 × 지면 높이 기준 K층(높이맵 Texture2D 1장 추가). 식생이 지면 근처에 몰리는 오픈월드에 가장 단순·효율적.
 - **희소 브릭(APV식)**: 거친 격자 전역 + 지오메트리 근처만 4³ 브릭 세분, 인디렉션 Texture3D → 브릭 아틀라스 Texture3D. 건물 사이·다층 구조에 강함, 구현량 큼.
 
-### 4.9 Unity LightProbes 연동 (B3, 선택)
+→ v15.22 에서 지형 추종 2.5D 를 구현(아래 B2 완료 메모). 희소 브릭은 다층 공간이 실제로 필요해질 때의 선택 항목:
+
+**희소 브릭 설계 메모 (미착수 — 2026-10-29 검토)**
+- **목적**: 2.5D 는 열마다 지면 하나 → 다리 위/아래·건물 층·동굴·절벽 밑 같은 다층 공간은 한 층만 표현(지면 메시에 다리가 들어가면 다리 밑 식생이 다리 위 빛을 읽음). 균일 격자로 덮으면 하늘까지 전부 프로브(256×32×256m 를 1m 간격 = 약 218만 개 ≈ 122MB, 기본 `maxProbeCount` 초과). 희소 브릭은 프로브를 3D 로 두되 지오메트리 근처만 촘촘히.
+- **구조**: 브릭 = 프로브 4×4×4(셀 3×3×3, 경계 프로브를 이웃 브릭과 중복 → 브릭 안 HW trilinear 가 아틀라스의 다른 브릭으로 새지 않음). 레벨마다 간격 ×3(예 1·3·9m — 브릭 경계가 정렬되는 배율). 인디렉션 Texture3D(거친 칸 → 브릭 아틀라스 위치·레벨) + 브릭 아틀라스 Texture3D×7. 셰이더 = 인디렉션 Load 1회 → 브릭 안 좌표 → 아틀라스 trilinear.
+- **재사용(B2 에서 깔림)**: 위치 배열 베이크 `ProbeGrid.BakeBurstAt`/`BakeGpuAt` · 유효성 `BurstProbeValidity.BackfaceRatio(positions)`. **새로 필요**: 세분 판정(칸 근처 지오메트리 — BVH 짧은 레이 또는 삼각형 AABB 겹침) · 브릭 사이를 건너가는 dilation · 인디렉션·아틀라스 에셋 · `HuskyProbeVolume.hlsl` 세 번째 경로(`_HuskyPV_Params.w` = 2) · CPU 미러 · **레벨 경계 이음매**(세밀 브릭 경계 프로브를 거친 쪽 보간값으로 맞춤 — 가장 까다로움).
+- **비용**: 경계 중복 때문에 같은 영역을 덮는 데 균일 대비 64/27 ≈ 2.4배 프로브(대안: 중복 없이 셰이더 수동 8탭 — 셰이더 비용↑). 넓은 지형 카펫은 촘촘한 브릭이 땅을 다 덮어 2.5D 가 더 쌈 → 브릭 이득은 3D 로 띄엄띄엄한 공간(도시·실내·다층). 혼합안: 지형 = 2.5D, 구조물 주변만 브릭.
+- **검증 계약(B2 와 같은 방식)**: 전부 최소 레벨 브릭 ≡ 같은 해상도 균일 격자(샘플 비트 동일) · GPU ≡ CPU 미러 · 레벨 경계 연속성 · 프로브 수·메모리 리포트.
+- **범위 밖**: 벽 너머 누수(배치가 아니라 가시성 가중 — DDGI 식 깊이 모멘트, 별개 주제).
+- **구현량**: B2 의 3~4배 — ① 브릭 배치·인디렉션·CPU 샘플(헤드리스) ② 세분 판정 ③ 베이크·dilation ④ 에셋·셰이더·GPU 테스트 ⑤ 레벨 경계 이음매.
+- **착수 기준**: 다리 밑·건물 안·동굴·절벽 아래에 식생/인스턴스가 실제로 놓일 때. 넓은 지형 위 식생만이면 2.5D 로 충분.
+
+### 4.9 ~~Unity LightProbes 연동 (B3, 선택)~~ — 제외 (2026-10-29)
+> 커스텀 개발 원칙(기획서 §9.5): Unity GI 기능(라이트 프로브 등)을 쓰지 않는다 → B3 는 로드맵에서 제외. 아래는 검토 당시 기록.
 - LightProbeGroup 으로 위치를 Unity 베이크로 확보 → 우리 볼륨을 그 위치에서 샘플 → `LightmapSettings.lightProbes.bakedProbes` 덮어쓰기(일반 MeshRenderer·SkinnedMesh 가 자동 사용).
 - `SphericalHarmonicsL2` 와 우리 SH9 의 정규화·π·계수 순서 차이 → `AddAmbientLight`/`AddDirectionalLight` + `Evaluate` 왕복 테스트로 변환식 확정 후 진행.
 
@@ -122,7 +135,7 @@
 | **D3** | 런타임 저장 형식 | (**Texture3D×7 RGBAHalf**) / StructuredBuffer float4(수동 8탭) | HW trilinear·캐시 효율. SO 에는 패킹 원본도 보관 |
 | **D4** | 정점 베이크 내용 | (**템플릿 로컬 AO**) / AO + bent normal / 히어로 정점 조도까지 | 인스턴싱과 호환되는 유일한 정점 데이터. bent normal 은 효과 확인 후 |
 | **D5** | 알파 잎 차폐 | 1차 Opaque/Excluded 토글 → ~~삼각형 평균 커버리지 확률 통과~~ / (**텍스처 any-hit — 2026-10-26 갱신, B1-6 ✅ v15.13**) | (원 근거) 커버리지 방식은 순회에 float 1개·해시 1회 추가로 3백엔드 미러 용이. → 패키지 병합으로 any-hit 가 이미 3백엔드 구현·검증돼 있어 구현량 이점이 사라짐 + 텍셀 단위 정확·노이즈 없음 |
-| **D6** | Unity LightProbes 연동 | (**자체 볼륨만, B3 는 보류**) / bakedProbes 내보내기 병행 | DrawMeshInstancedIndirect 는 Unity 프로브를 자동으로 못 받음 → 자체 볼륨이 본선 |
+| **D6** | Unity LightProbes 연동 | (**자체 볼륨만 — B3 제외**, 2026-10-29 보류 → 제외) / ~~bakedProbes 내보내기 병행~~ | DrawMeshInstancedIndirect 는 Unity 프로브를 자동으로 못 받음 → 자체 볼륨이 본선. 2026-10-29: 커스텀 개발 — Unity GI 기능 미사용 방향(기획서 §9.5) |
 
 고정(재확인만): SH9(L2) 계약 유지 · 직사광은 실시간(프로브엔 간접+환경) · 반사 규약 ρ/π·E · URP 우선.
 
@@ -139,7 +152,7 @@
 | **B1-5** ✅ | 정점 AO(템플릿 로컬) [히어로 정점 조도는 미착수] | `ProbeVolume/VertexAOBake.cs` | 정점 AO ≡ `BurstAO.Compute` 직접 호출 · 고립 평면 AO=1 · 무한 천장 아래 AO≈0 · (히어로) 정점 조도 ≡ 같은 점·노멀 `BurstRadianceBaker` |
 | **B1-6** ✅ | 알파 잎 차폐 — 패키지 α any-hit 연결(코어 무수정) | `ProbeVolumeBaker`(알파 설정·`BuildAlphaData`)·`VertexAOBake`(alpha 인자) 수정 + `Tests/ProbeVolume/ProbeAlphaTests.cs` | `ProbeAlphaTests`: ᾱ=1(전부 불투명 마스크) ≡ 알파 없음 **비트 동일**(SH 1·다바운스·뒷면 비율) · ᾱ=0 ≡ 메시 제거(비트 동일) · 체커 ᾱ≈0.5 → E(up) 비율 ∈ [0.3,0.7] · 정점 AO 동일 3종 · 베이커 머티리얼 경로 · GPU ≡ Burst |
 | **B2** ✅ | 적응형(D1 선택안 = 지형 추종 2.5D) | `ProbeVolume/ProbeTerrainLayers.cs`(+ `ProbeGrid.Bake.cs` 분리) · 에셋/베이커/셰이더/바인딩 수정 + `Tests/ProbeVolume/ProbeTerrainLayersTests.cs`(헤드리스)·`ProbeVolumeTerrainTests.cs` | 높이 0·상수 ≡ 같은 해상도 균일 격자(**비트 동일**) · 지면 기준 선형장 재현 · 지면 레이 · 에셋 ≡ 코어 직접 파이프라인 · GPU ≡ CPU · **프로브 수·메모리 절감률 리포트**(로그 `layout:`) |
-| B3 | (선택) Unity LightProbes 내보내기 | — | `SphericalHarmonicsL2` 변환 왕복 ≡ |
+| ~~B3~~ | ~~(선택) Unity LightProbes 내보내기~~ — **제외(2026-10-29, D6)** | — | — |
 
 - 모든 신규 테스트는 Tests 어셈블리(`Script/Test/ProbeVolume/`) + `LightmapEvaluateDebugger.RunAllTests` 배선(코어 → 테스트 참조 0 유지).
 - 이 환경(Unity 없음)에선 tree-sitter 구문·glslang 컴파일·정적 의존성 검사까지 — 에디터 실행 확인은 단계마다 체크리스트로 남김.
@@ -233,7 +246,7 @@
 4. 식생(PerPixelVolume): 경사·언덕에서 균일 대비 밝기 분포가 자연스러운지 · 볼륨 가장자리 페이드.
 5. `groundRoots` 를 지형 메시만으로 지정했을 때 건물 지붕 위로 층이 올라가지 않는지.
 
-다음: (선택) 희소 브릭(다층 구조) · B3 Unity LightProbes 연동.
+다음: (선택) 희소 브릭(다층 구조 — §4.8 설계 메모, 다층 공간이 실제로 필요해질 때). B3 Unity LightProbes 연동은 제외(D6 · 기획서 §9.5).
 
 ---
 
