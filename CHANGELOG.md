@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added — G6-7 GPU 디노이즈 (2026-10-30)
+- `LightmapPost.compute` `CSDenoise`: À-trous Joint Bilateral 1패스(8×8 2D) — `LightmapDenoise`/`LightmapDenoiseBurstJob` 과 같은 식·탭 순서, valid 만 읽고 씀. HLSL `pow(0, 0)` NaN 을 CPU 와 같게 분기.
+- `LightmapPostGpu`: `Options.Denoise`·`DenoiseSettings`·`GuideNormal`·`GuidePos` — `Run` 이 업로드 1회 안에서 denoise → Tier1 → Tier2 → dilation(스크래치 재사용, 가이드 즉시 해제). 단독 `Denoise(cs, px, valid, normal, worldPos, w, h, settings, out error)`.
+- `AtlasApplyDebug.gpuDenoise`(기본 on, `gpuPostProcess` 일 때만): denoise 도 GPU. 실패 시 원본 그대로 CPU 판으로 처음부터. 로그 `denoise=N×(GPU)` · `LastDenoiseBackend`. 기본값(`gpuPostProcess` off)은 결과 불변.
+- 테스트 `GpuDenoiseCompareTests`(A~E + 시간, compute 필요) — RunAll 41종 · 메뉴 "Run Adaptive _ Progressive _ GPU Post Tests (G6-5 _ G6-6 _ G6-7)". 헤드리스: 같은 HLSL 을 SPIR-V → Mesa llvmpipe 로 실행해 .NET 직렬판과 9케이스 대조(상대 ≤ 4.2e-7, 변이 3종 검출).
+
 ### Docs — 희소 브릭(B4) 설계 문서 · Unity CLI 테스트 체크리스트 (2026-10-29)
 - `Documentation~/01_Planning_And_Design/커스텀_라이트매퍼_희소브릭_설계.md` 신설 — 다층 공간용 희소 브릭을 Track B **B4**(선택, 미착수)로: 용어 · 구조(4³ 브릭·레벨 ×3·인디렉션 + 아틀라스) · 세분 판정 · 베이크 7단계(정수 격자 중복 제거·그래프 dilation·레벨 경계 이음매) · 저장 · 셰이더 계약(`_HuskyPV_Params.w = 2`) · 메모리 모델 · 단계 S1~S5 · 결정 항목 · 리스크 · 착수 기준. Track B 설계 §4.8 은 요약 + 링크.
 - `Documentation~/03_Progress_And_Validation/UnityCLI_테스트_체크리스트.md` 신설 — `unity command eval`/`eval_file` 로 컴파일·compute·셰이더 메시지 → RunAll 40종 클래스별(B2 신규 2종 우선, 기대 443/443) → RunAll 밖 10개 → 실베이크 스모크(`ProbeVolumeBaker` Uniform → TerrainLayers 등) → 결과 기록. C# 스니펫(일괄 요약·로그 캡처·실베이크) 포함.

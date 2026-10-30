@@ -36,9 +36,9 @@ ResolveTargets()                    대상 MeshFilter 수집 (occluder 차집합
   │           BakeLumelsBatch(1패스, 배치 전체 BakePointsFull 1회 — 적응 샘플링이면 누적기, 아니면 BakePoints; GPU 는 gpuDispatchChunk 분할 디스패치·1 readback)
   │           → ApplySsaaBatch(SSAA 2패스, 서브샘플 ≤4M 점씩)
   │           → 인스턴스 순서대로 FinishInstance: BlitRegion(+디노이즈 가이드) · 시임 입력 누적 · uv2 메시 + ST(MPB) 적용
-  ├─ 3.3) Denoise (À-trous joint bilateral, Burst/C#) — Radiance/RadianceGI 전용, Seam Stitch 이전
-  ├─ 3.4) Seam Stitch (Tier1 정점 / Tier2 모서리) — Dilation 이전  ┐ gpuPostProcess 면 LightmapPostGpu 가
-  ├─ 3.5) Dilation (Burst/C#) — 거터/배경 텍셀 확장                 ┘ 페이지마다 한 번에(실패 시 CPU)
+  ├─ 3.3) Denoise (À-trous joint bilateral, Burst/C#) — Radiance/RadianceGI 전용 ┐ gpuPostProcess 면 LightmapPostGpu 가 페이지마다
+  ├─ 3.4) Seam Stitch (Tier1 정점 / Tier2 모서리) — Dilation 이전               │ 업로드 1회로(denoise 는 gpuDenoise 일 때 — v15.25).
+  ├─ 3.5) Dilation (Burst/C#) — 거터/배경 텍셀 확장                              ┘ 실패 시 원본 그대로 CPU 판
   ├─ 4) Texture2DArray 생성/갱신 + sharedMat 에 바인딩
   └─ 정리: occluder/GI 씬/GPU/Burst 리소스 Dispose
 ```
@@ -147,10 +147,11 @@ GPU 백엔드는 `GpuScene.TraversalFits`(BVH 순회 스택 요구량 ≤ 32) �
 | `adaptiveThreshold` | `float` [0.001, 0.5] | `0.03` | 상대 표준오차 기준(직사+간접 휘도 대비) |
 | `progressivePreviewEveryPasses` | `int` (≥1) | `1` | 진행형 미리보기 재합성 간격(패스) |
 
-### GPU 후처리 (v15.16)
+### GPU 후처리 (v15.16 · 디노이즈 v15.25)
 | 필드 | 타입 | 기본값 | 설명 |
 |---|---|---|---|
-| `gpuPostProcess` | `bool` | `false` | 시임 스티칭(Tier1·Tier2) + dilation 을 `LightmapPost.compute` 로. 결과 = CPU 판(나눗셈 ULP 차이). 실패 시 CPU 폴백. denoise 는 CPU |
+| `gpuPostProcess` | `bool` | `false` | 시임 스티칭(Tier1·Tier2) + dilation 을 `LightmapPost.compute` 로. 결과 = CPU 판(나눗셈 ULP 차이). 실패 시 CPU 폴백 |
+| `gpuDenoise` | `bool` | `true` | `gpuPostProcess` 일 때 denoise 도 GPU(`CSDenoise`, 같은 업로드 안). CPU 판과 ε(pow/exp GPU 근사, 상대 ~1e-6). 끄면 denoise 만 CPU(`denoiseBurst`) |
 | `postShader` | `ComputeShader` | null | 비우면 Resources("LightmapPost") → (에디터) 패키지 경로 |
 
 ### Result (read-only, `[SerializeField]`)

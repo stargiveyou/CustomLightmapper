@@ -99,6 +99,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             sb.AppendLine(ProbeVolumeC0Tests.RunAll());           // Track B 정적 입력 C0 합류: Roots 구 거동·Collected ≡ Roots·템플릿 중복 제외(비트 동일)·빈 입력
             sb.AppendLine(ProbeTerrainLayersTests.RunAll());      // Track B B2 지형 추종 2.5D 배치: 높이 0·상수 ≡ 균일(비트 동일)·열 높이 bilinear·경사 샘플·지면 레이·미스 보간·절감 리포트(헤드리스)
             sb.AppendLine(ProbeVolumeTerrainTests.RunAll());      // Track B B2 베이커: 평지·경사 열 높이·코어 직접 파이프라인 ≡(비트 동일)·지면 규칙·인스턴스 샘플·바인딩·GPU ≡ CPU(렌더 컨텍스트)
+            sb.AppendLine(GpuDenoiseCompareTests.RunAll());       // G6-7 GPU 디노이즈(CSDenoise) ≈ Burst: 장면·무작위 가이드·계약·통합 Run(denoise→T1→T2→dilate)·실베이크(compute 필요)
             Debug.Log(sb.ToString(), this);
         }
 
@@ -145,8 +146,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
         public void RunLocalLightTests() => Debug.Log(BakeLightTests.RunAll() + "\n" + LocalLightBakeTests.RunAll() + "\n" +
                                                       SHLightProjectionTests.RunAll() + "\n" + SHLocalLightTests.RunAll(), this);
 
-        [ContextMenu("Run Adaptive _ Progressive _ GPU Post Tests (G6-5 _ G6-6)")]
-        public void RunProgressiveTests() => Debug.Log(ProgressiveAccumulatorTests.RunAll() + "\n" + LightmapPostPlanTests.RunAll() + "\n" + ProgressiveBakeTests.RunAll(), this);
+        [ContextMenu("Run Adaptive _ Progressive _ GPU Post Tests (G6-5 _ G6-6 _ G6-7)")]
+        public void RunProgressiveTests() => Debug.Log(ProgressiveAccumulatorTests.RunAll() + "\n" + LightmapPostPlanTests.RunAll() + "\n" + ProgressiveBakeTests.RunAll()
+                                                       + "\n" + GpuDenoiseCompareTests.RunAll(), this);
 
         [ContextMenu("Run Alpha Cutout Tests (a)")]
         public void RunAlphaCutoutTests() => Debug.Log(AlphaCutoutTests.RunAll(), this);

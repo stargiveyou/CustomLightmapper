@@ -115,7 +115,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         //  아래 절반(y<h/2): 차트 A — 평면(노멀 +Y, 위치 = 텍셀그리드×1/16 월드), R 채널 계단(좌 0.15/우 0.85) + 노이즈 ±0.1
         //  위 절반        : 차트 B — 평면(노멀 +Y, 월드에서 +100 유닛 이격), 상수 G=0.5 + 노이즈 ±0.1
         //  clean = 노이즈 없는 정답(품질 게이트 기준).
-        static void MakeSceneInput(int w, int h, out Color[] px, out bool[] valid,
+        internal static void MakeSceneInput(int w, int h, out Color[] px, out bool[] valid,
                                    out Vector3[] nrm, out Vector3[] pos, out Color[] clean)
         {
             int n = w * h;
