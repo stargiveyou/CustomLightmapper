@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added — A4 차트 패킹 MaxRects (2026-10-30)
+- `ChartPacker`(Runtime/UVAssembly): 패킹 진입점 — `Method.Best`(기본) · `Shelf` · `MaxRects`. MaxRects(Best Short Side Fit, 차트별 0°/90°) + 정사각 최소 변 이분 탐색. Best 는 셸프보다 스케일이 엄격히 클 때만 MaxRects(동률이면 셸프 — 비트 동일). 차트 1024개 초과는 셸프. `Occupancy` 진단.
+- `ShelfPacker.Pack` → `Choose`·`Apply` 분리(결과 비트 동일).
+- `AtlasApplyDebug.chartPacking`(기본 Best) · `AtlasApplyDiffTests` 같은 패커 · `TexelMapperDebug.packing` · UV Layout Viewer 방식 선택 + 점유율 표시.
+- 거동 변화: Best 가 MaxRects 를 고른 메시는 uv2 배치가 바뀌어 재베이크 결과가 달라진다(텍셀 밀도↑). 구 거동 = `chartPacking = Shelf`.
+- 테스트 `ChartPackerTests`(헤드리스 5/5 — 합성 세트에서 차트 많은 메시 점유 +15~20%) · `ChartPackerMeshTests`(에디터) — RunAll 43종 · 메뉴 "Run Chart Packer Tests (A4 Shelf _ MaxRects)".
+
 ### Added — G6-7 GPU 디노이즈 (2026-10-30)
 - `LightmapPost.compute` `CSDenoise`: À-trous Joint Bilateral 1패스(8×8 2D) — `LightmapDenoise`/`LightmapDenoiseBurstJob` 과 같은 식·탭 순서, valid 만 읽고 씀. HLSL `pow(0, 0)` NaN 을 CPU 와 같게 분기.
 - `LightmapPostGpu`: `Options.Denoise`·`DenoiseSettings`·`GuideNormal`·`GuidePos` — `Run` 이 업로드 1회 안에서 denoise → Tier1 → Tier2 → dilation(스크래치 재사용, 가이드 즉시 해제). 단독 `Denoise(cs, px, valid, normal, worldPos, w, h, settings, out error)`.

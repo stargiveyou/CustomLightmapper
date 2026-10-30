@@ -56,7 +56,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
     /// 높이 내림차순 행 배치 + 전체 균일 스케일. 배치 후보 3종 — 그대로 / 차트별 최소 bbox 방향(가로) / 같은 방향(세로) — 중
     /// 균일 스케일(= 점유율, UV 면적은 회전 불변)이 가장 큰 것을 쓴다. LSCM·MVC 는 경계 정점 2개를 고정해 풀어 차트가 기울어진 채
     /// 나오므로(원통 옆면 bbox 채움 50%) 회전이 필요하고, 셸프 배치는 종횡비에 민감해 가로/세로 중 하나가 늘 나은 건 아니라 둘 다 본다.
-    /// '그대로'가 첫 후보(동률이면 유지)라 어떤 메시도 회전 도입 전보다 점유가 줄지 않고, 고르면 결과도 그때와 비트 동일. (개선: MaxRects)
+    /// '그대로'가 첫 후보(동률이면 유지)라 어떤 메시도 회전 도입 전보다 점유가 줄지 않고, 고르면 결과도 그때와 비트 동일.
+    /// 베이커는 <see cref="ChartPacker"/>(기본 Best = 이 셸프와 MaxRects 중 점유가 큰 쪽)를 거쳐 부른다.
     /// gutter는 차트 간 여백(후단 Push-Pull/시임 대비).
     /// </summary>
     /*
@@ -76,21 +77,35 @@ namespace HuskyLibs.CustomLightmapper.Bake
     {
         public static void Pack(ChartMesh[] charts, float gutter = 0.01f)
         {
-            int n = charts.Length;
-            if (n == 0) return;
+            if (charts.Length == 0) return;
+            Choose(charts, gutter, out int best, out var angle);
+            Apply(charts, gutter, best, angle);
+        }
 
-            // 후보 0 = 그대로. 후보 1·2 는 차트별 최소 bbox 방향(가로 ≥ 세로) / +90°(세로). 스케일이 '엄격히' 커질 때만 교체.
-            var angle = new float[n];
+        /// <summary>
+        /// 후보 3종의 균일 스케일을 비교해 고른다(UV 는 건드리지 않음). 반환 = 고른 후보의 스케일 — <see cref="ChartPacker"/> 가 MaxRects 와 비교.
+        /// 후보 0 = 그대로. 후보 1·2 는 차트별 최소 bbox 방향(가로 ≥ 세로) / +90°(세로). 스케일이 '엄격히' 커질 때만 교체.
+        /// </summary>
+        internal static float Choose(ChartMesh[] charts, float gutter, out int best, out float[] angle)
+        {
+            int n = charts.Length;
+            angle = new float[n];
             for (int i = 0; i < n; i++) angle[i] = MinBoxAngle(charts[i].UV);
 
-            int best = 0;
+            best = 0;
             float bestScale = Layout(charts, null, 0f, gutter, null, null, null);
             for (int cand = 1; cand <= 2; cand++)
             {
                 float s = Layout(charts, angle, cand == 2 ? Mathf.PI * 0.5f : 0f, gutter, null, null, null);
                 if (s > bestScale) { bestScale = s; best = cand; }
             }
+            return bestScale;
+        }
 
+        /// <summary><see cref="Choose"/> 결과로 회전 → 셸프 배치 → [0,1] 적용(Pack 의 뒷부분 — 결과는 구 Pack 과 비트 동일).</summary>
+        internal static void Apply(ChartMesh[] charts, float gutter, int best, float[] angle)
+        {
+            int n = charts.Length;
             if (best != 0)
             {
                 float extra = best == 2 ? Mathf.PI * 0.5f : 0f;
@@ -163,14 +178,14 @@ namespace HuskyLibs.CustomLightmapper.Bake
             return 1f / Mathf.Max(maxX, y + shelfH);
         }
 
-        static void Bounds(Vector2[] uv, out Vector2 mn, out Vector2 mx)
+        internal static void Bounds(Vector2[] uv, out Vector2 mn, out Vector2 mx)
         {
             mn = uv[0]; mx = uv[0];
             foreach (var p in uv) { mn = Vector2.Min(mn, p); mx = Vector2.Max(mx, p); }
         }
 
         // p 를 -a 만큼 돌린 좌표의 bbox(Rotate 와 같은 식이라 후보 평가 = 최종 적용)
-        static void RotatedBounds(Vector2[] uv, float a, out Vector2 mn, out Vector2 mx)
+        internal static void RotatedBounds(Vector2[] uv, float a, out Vector2 mn, out Vector2 mx)
         {
             float c = Mathf.Cos(-a), s = Mathf.Sin(-a);
             mn = new Vector2(float.MaxValue, float.MaxValue); mx = new Vector2(float.MinValue, float.MinValue);
@@ -181,7 +196,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             }
         }
 
-        static void Rotate(Vector2[] uv, float a)
+        internal static void Rotate(Vector2[] uv, float a)
         {
             float c = Mathf.Cos(-a), s = Mathf.Sin(-a);
             for (int k = 0; k < uv.Length; k++)
@@ -195,7 +210,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         /// 최소 면적 bbox 방향(라디안): 볼록 껍질의 각 변 방향을 후보로 본다(최소 면적 사각형의 한 변은 껍질 변과 겹친다 — 회전 캘리퍼스와 같은 해).
         /// 반환각만큼 -회전하면 bbox 가로 ≥ 세로. 점이 3개 미만이거나 껍질이 퇴화면 0.
         /// </summary>
-        static float MinBoxAngle(Vector2[] uv)
+        internal static float MinBoxAngle(Vector2[] uv)
         {
             var hull = ConvexHull(uv);
             if (hull.Count < 3) return 0f;

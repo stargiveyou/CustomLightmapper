@@ -100,11 +100,16 @@ namespace HuskyLibs.CustomLightmapper.Bake
             sb.AppendLine(ProbeTerrainLayersTests.RunAll());      // Track B B2 지형 추종 2.5D 배치: 높이 0·상수 ≡ 균일(비트 동일)·열 높이 bilinear·경사 샘플·지면 레이·미스 보간·절감 리포트(헤드리스)
             sb.AppendLine(ProbeVolumeTerrainTests.RunAll());      // Track B B2 베이커: 평지·경사 열 높이·코어 직접 파이프라인 ≡(비트 동일)·지면 규칙·인스턴스 샘플·바인딩·GPU ≡ CPU(렌더 컨텍스트)
             sb.AppendLine(GpuDenoiseCompareTests.RunAll());       // G6-7 GPU 디노이즈(CSDenoise) ≈ Burst: 장면·무작위 가이드·계약·통합 Run(denoise→T1→T2→dilate)·실베이크(compute 필요)
+            sb.AppendLine(ChartPackerTests.RunAll());             // A4 패킹: Shelf·MaxRects·Best 계약(비겹침·[0,1]·균일 스케일·감기)·Best ≥ Shelf·점유 개선·결정성·퇴화(헤드리스)
+            sb.AppendLine(ChartPackerMeshTests.RunAll());         // A4 패킹 Unity 메시: 기본 메시 6종 실파이프라인 계약·Best ≥ Shelf · 실베이크 차트 텍셀 Shelf ↔ Best
             Debug.Log(sb.ToString(), this);
         }
 
         [ContextMenu("Run Chart Flatten Tests (A3 LSCM_MVC)")]
         public void RunChartFlattenTests() => Debug.Log(ChartFlattenTests.RunAll(), this);
+
+        [ContextMenu("Run Chart Packer Tests (A4 Shelf _ MaxRects)")]
+        public void RunChartPackerTests() => Debug.Log(ChartPackerTests.RunAll() + "\n" + ChartPackerMeshTests.RunAll(), this);
 
         [ContextMenu("Run Self Tests")]
         public void RunSelfTests() => Debug.Log(LightmapEvaluateTests.RunAll(), this);

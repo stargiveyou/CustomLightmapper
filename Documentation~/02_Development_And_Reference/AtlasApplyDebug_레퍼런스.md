@@ -30,7 +30,7 @@ ResolveTargets()                    대상 MeshFilter 수집 (occluder 차집합
   ├─ (mode별) 차폐 씬 구성:
   │      Radiance    → BuildWorldTris → BVH/BruteForce occluder + _sun
   │      RadianceGI  → BuildGiScene (InstancedRadianceScene + Burst/GPU 백엔드)
-  ├─ 3) 인스턴스 루프(준비): ParameterizationPipeline(seg, flatten) → DensityNormalizer → ShelfPacker
+  ├─ 3) 인스턴스 루프(준비): ParameterizationPipeline(seg, flatten) → DensityNormalizer → ChartPacker(chartPacking — v15.26)
   │      → UVAssembly.Assemble → TexelMapper.Map → PendingBake 대기열
   │      └ 대기열 valid lumel ≥ bakeBatchLumels(0 = 매 인스턴스) 또는 끝 → Flush (v15.15 G6-3b):
   │           BakeLumelsBatch(1패스, 배치 전체 BakePointsFull 1회 — 적응 샘플링이면 누적기, 아니면 BakePoints; GPU 는 gpuDispatchChunk 분할 디스패치·1 readback)
@@ -68,6 +68,7 @@ ResolveTargets()                    대상 MeshFilter 수집 (occluder 차집합
 |---|---|---|---|
 | `mode` | `BakeMode` | `PerInstanceColor` | 베이크 모드(아래 enum 참조) |
 | `chartGutter` | `float` (0~0.05) | `0.01` | 차트 패킹 거터(UV 공간) |
+| `chartPacking` | `ChartPacker.Method` | `Best` | 차트 패킹(v15.26). Best = 셸프·MaxRects(차트별 90° 회전) 중 점유가 큰 쪽(동률이면 셸프 — 비트 동일) / Shelf = 구 거동 / MaxRects = 비교용. 차트 1024개 초과는 셸프 |
 | `background` | `Color` | `(0.04,0.04,0.06)` | 빈 텍셀 배경색(거터 가시화) |
 | `checkerSize` | `int` (≥1) | `8` | Checker 모드 격자 크기 |
 

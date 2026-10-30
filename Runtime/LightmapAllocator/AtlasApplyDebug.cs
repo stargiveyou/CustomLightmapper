@@ -48,6 +48,10 @@ namespace HuskyLibs.CustomLightmapper.Bake
         [Tooltip("PerInstanceColor/WorldNormal/Checker: 매핑 검증(라이팅 없음) / Radiance: 텍셀마다 EvaluateRadiance(AO+Direct+그림자) 베이크 — 실제 라이트맵")]
         public BakeMode mode = BakeMode.PerInstanceColor;
         [Range(0f, 0.05f)] public float chartGutter = 0.01f;
+        [Tooltip("차트 패킹(A4). Best = 셸프와 MaxRects(차트별 90° 회전 · 정사각 최소 변 탐색) 중 점유가 큰 쪽 — 동률이면 셸프(구 결과와 비트 동일). " +
+                 "점유가 오르면 같은 아틀라스 영역에서 텍셀 밀도가 오른다(차트 많은 메시에서 +15~20%, 헤드리스 측정). Shelf = 구 거동. " +
+                 "MaxRects = 비교용. 차트 1024개 초과 메시는 셸프.")]
+        public ChartPacker.Method chartPacking = ChartPacker.Method.Best;
         [Tooltip("차트가 덮지 않은 빈 텍셀의 배경색(거터/여백 가시화).")]
         public Color background = new Color(0.04f, 0.04f, 0.06f, 1f);
         [Min(1)] public int checkerSize = 8;
@@ -552,7 +556,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 var pr = ParameterizationPipeline.Run(src, segmentation, flatten);
                 if (pr.Charts == null || pr.Charts.Length == 0) { Debug.LogWarning($"[AtlasApply] '{mf.name}' 차트 0개 — 건너뜀.", mf); return null; }
                 DensityNormalizer.Normalize(pr.Charts);
-                ShelfPacker.Pack(pr.Charts, chartGutter);
+                ChartPacker.Pack(pr.Charts, chartGutter, chartPacking);
                 (uv2mesh, seams) = UVAssembly.Assemble(pr.Charts, src);
                 uv2mesh.hideFlags = HideFlags.DontSave;
                 // 영역 크기에 맞춰 래스터 → 아틀라스에 1:1 blit
