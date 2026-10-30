@@ -1,8 +1,8 @@
-# Unity CLI 테스트 체크리스트 — RunAll 40종 · RunAll 밖 · 실베이크 스모크
+# Unity CLI 테스트 체크리스트 — RunAll 43종 · RunAll 밖 · 실베이크 스모크
 
-> 기준: v15.24(2026-10-29) · `main` = v15.22 B2(지형 추종 2.5D) 포함 · Unity 6000.x + URP · Unity CLI beta(`unity command`)
+> 기준: v15.26(2026-10-30) · `main` = v15.22 B2(지형 추종 2.5D) · v15.25 GPU 디노이즈 · v15.26 MaxRects 패킹 포함 · Unity 6000.x + URP · Unity CLI beta(`unity command`)
 > 목적: 에디터 GUI 를 손으로 누르지 않고 **Unity CLI 로 연결된 에디터에 C# 를 보내** 컴파일·셰이더·테스트·실베이크를 확인한다. 2026-10-28 검증(`run_script` 로 클래스별 RunAll — 38종 419/419)과 같은 방식을 정리했다.
-> 우선순위: **§2.2 B2 신규 2종**(에디터에서 한 번도 안 돌림) → §2.3 Track B 회귀 → 나머지.
+> 우선순위: **§2.2 신규 5종**(B2 2종 · G6-7 GPU 디노이즈 · A4 패킹 2종 — 에디터에서 한 번도 안 돌림) → §2.3 Track B 회귀 → 나머지.
 > 관련: 수동(GUI) 절차·메뉴 = `06_Manual/챕터별_테스트_실행_매뉴얼.md` §3 · 머지분 에디터 확정 항목 = `에디터검증_체크리스트_v15.12-v15.18.md`(§8 = v15.22).
 > 순서대로 진행 — 앞 단계가 깨지면 뒤 단계 결과는 의미가 없다. FAIL 은 **그 `[FAIL]` 줄 + 그 클래스의 `--- n/m PASS ---` 줄**을 함께 기록.
 
@@ -27,7 +27,7 @@
 |---|---|
 | 프로젝트 경로 | `P=/path/to/HostProject` 로 두고 모든 명령에 `--project-path "$P"`(에디터가 여럿 떠 있어도 대상 고정) |
 | 타임아웃 | 기본 30초 → **`--timeout 600`**. GPU·베이크 테스트는 수십 초~분 단위. 일괄 실행(부록 B)은 `--timeout 1800` |
-| 호출 단위 | **클래스별로 따로**(2026-10-28 방식). 한 번에 40종은 메인 스레드를 오래 잡아 타임아웃 위험 — 일괄은 부록 B 의 `only` 로 묶음을 나눈다. 타임아웃이 나도 에디터 쪽 실행은 계속될 수 있다 → 콘솔/Editor.log 로 결과 확인 |
+| 호출 단위 | **클래스별로 따로**(2026-10-28 방식). 한 번에 43종은 메인 스레드를 오래 잡아 타임아웃 위험 — 일괄은 부록 B 의 `only` 로 묶음을 나눈다. 타임아웃이 나도 에디터 쪽 실행은 계속될 수 있다 → 콘솔/Editor.log 로 결과 확인 |
 | 이름 | `using` 없이 **전체 이름**: 테스트·베이커 모두 `HuskyLibs.CustomLightmapper.Bake.` 네임스페이스 — **예외 `SHPackedTests`** 는 `HuskyLibs.CustomLightmapper.SHPackedTests`. Unity 타입도 `UnityEngine.`/`UnityEditor.` 를 붙인다 |
 | 따옴표 | bash/zsh: 본문을 **작은따옴표**로 감싼다(C# 문자열의 큰따옴표가 그대로 전달). C# 안에 작은따옴표(char 리터럴)를 쓰지 않는다. **PowerShell**: 네이티브 인자 따옴표 처리가 버전마다 달라 **`eval_file` 권장** |
 | 긴 스니펫 | 부록의 본문을 파일로 저장 → `unity command eval_file <파일.cs> --project-path "$P" --timeout 600`. 파일은 `Assets/` **밖**에 둔다(Unity 가 컴파일하려 들지 않게) |
@@ -68,7 +68,7 @@ unity command eval 'var g = UnityEditor.AssetDatabase.FindAssets("Mesh_Struct_Sa
 
 ---
 
-## 2. RunAll 40종 — 클래스별 실행
+## 2. RunAll 43종 — 클래스별 실행
 
 ### 2.1 호출 · 읽는 법
 
@@ -78,18 +78,23 @@ unity command eval 'return HuskyLibs.CustomLightmapper.Bake.ProbeTerrainLayersTe
 
 - 반환 문자열 = 콘솔 리포트와 같다: `=== 이름 ===` → 항목별 `[PASS]` / `[FAIL]` / `[SKIP]` → 끝줄 `--- n/m PASS ---`(`SH9BakeTextureTest` 만 `--- n/m passed ---`).
 - `[SKIP]` 은 실패가 아니다 — 필요한 환경(compute · URP 셰이더 · 그래픽 디바이스)이 없다는 뜻. 사유가 같은 줄에 찍힌다. 배치 상주에서 SKIP 이 많으면 `-nographics` 여부부터 확인.
-- 40종 일괄 + 요약(클래스별 끝줄 · FAIL/SKIP 줄 · 합계 · 시간)은 **부록 B**.
+- 43종 일괄 + 요약(클래스별 끝줄 · FAIL/SKIP 줄 · 합계 · 시간)은 **부록 B**.
 - `SH9BakeTextureTest` 는 Samples 어셈블리(`HuskyLibs.CustomLightmapper.Samples`), 나머지는 Tests 어셈블리. 네임스페이스는 모두 같다.
 
-### 2.2 B2 신규 — 에디터 미실행 (최우선)
+### 2.2 신규 — 에디터 미실행 (최우선)
 
 | # | 클래스 | 요구 | 기대 | 확인하는 것 | 결과 |
 |---|---|---|---|---|---|
 | 39 | `ProbeTerrainLayersTests` | 없음 | **10/10** (헤드리스 .NET 에서 10/10 확인됨) | 높이 없음·상수 높이 ≡ 균일 격자(비트 동일) · 열 높이 bilinear · 울퉁불퉁 지형 샘플 · 지면 레이·미스 보간 · 절감 리포트 | ✅ 10/10 |
 | 40 | `ProbeVolumeTerrainTests` | 없음(G: 렌더) | **14/14** | A 평지 베이크(9×4×9 · 열 높이 ≈ 0 · 높이 텍스처 9×9 · Validate 음성) · B 에셋 ≡ 코어 직접(`BakeBurstAt → BackfaceRatio → Classify → Dilate`, 비트 동일) · C 12° 경사(열 높이 · 층 위치) · D 지면 규칙(수관 템플릿 제외 · `groundRoots`) · E 인스턴스 샘플 ≡ 지형 추종 CPU 샘플(비트 동일) · F 바인딩 · G GPU ≡ CPU | ✅ 14/14 (SKIP 0) |
+| 41 | `GpuDenoiseCompareTests`(v15.25) | Compute(E: URP) | **5/5** + `[time]` 줄 | A 장면 72×40 반복 1~4 GPU ≈ Burst(상대 1e-4) · B 무작위 가이드·HDR·p 32/0/1 · C 계약(Iterations 0·크기 불일치·가이드 없음) · D 통합 Run(denoise → T1 → T2 → dilate) ≈ CPU · E 실베이크 `gpuPostProcess` off ↔ on · `gpuDenoise` off(≤ 2e-3, 로그 백엔드) | |
+| 42 | `ChartPackerTests`(v15.26) | 없음 | **5/5** (헤드리스 .NET 에서 5/5 확인됨) + 점유율 표 · `[time]` 줄 | 합성 7세트 × Shelf·MaxRects·Best 계약 · Shelf ≡ 구 셸프(비트) · Best ≥ Shelf · 차트 많은 세트 +5% 이상 · 결정성 · 퇴화 | |
+| 43 | `ChartPackerMeshTests`(v15.26) | 없음(B: URP) | **2/2** + 점유율 표 | A 기본 메시 6종 실파이프라인 Shelf·Best 계약 · Best ≥ Shelf / B 실베이크 PerInstanceColor 차트 텍셀 Shelf ↔ Best | |
 
 - [x] 두 클래스 모두 PASS(G 가 `[SKIP] G: ARGBFloat RT 미지원` 이면 그래픽 디바이스 확인 후 재실행)
 - [x] 실행 뒤 §1.4 셰이더 메시지 재확인(G 가 `ProbeVolumeSampleTest` 의 지형 추종 변형을 실제 컴파일) — 6종 error 0 · ShaderHasError False 유지
+- [ ] `GpuDenoiseCompareTests`(v15.25) PASS · `[time]` 줄 기록 — 512² 3패스 Burst ms vs GPU ms(업로드·readback 포함). 이 환경(llvmpipe, CPU 에뮬레이션)에선 의미 있는 속도를 못 쟀다
+- [ ] `ChartPackerTests`·`ChartPackerMeshTests`(v15.26) PASS · `ChartPackerMeshTests` A 표의 기본 메시 점유율(Shelf → Best) 기록 — 이 환경에선 Unity 메시 파이프라인(하프에지 NativeArray)을 못 돌려 합성 세트로만 쟀다
 
 ### 2.3 Track B 회귀 — B2 가 손댄 경로 (Uniform 기본 = 비트 동일이어야 함)
 
@@ -146,6 +151,7 @@ B2 는 `ProbeGrid`(partial 분리) · `ProbeVolumeAsset`(열 높이·높이 텍�
 "PASS" 만 적힌 칸은 2026-10-28 합계(419)에는 들어 있지만 클래스별 수를 기록하지 않은 것 — 2026-10-29 에 채웠다(31종 합 330).
 
 - [x] **합계** — 2026-10-28 38종 **419/419** + B2 신규 24(10 + 14) → **40종 443/443 · SKIP 0 · FAIL 0** 기대(GPU 있는 GUI 에디터 기준) — 2026-10-29: **443/443 · SKIP 0 · FAIL 0** (Release · Burst 동기, 묶음 5회 호출 합 약 8초)
+- [ ] **합계(v15.26 이후)** — 위 40종 443 + G6-7 신규 5 + A4 신규 7(5 + 2) → **43종 455/455 · SKIP 0 · FAIL 0** 기대
 
 ---
 
@@ -318,12 +324,12 @@ foreach (var n in new[] { "HuskyLibs/InstancedVegetation_URP", "Hidden/HuskyLibs
 return sb.ToString();
 ```
 
-## 부록 B — RunAll 40종 일괄 + 요약 (`eval_file`, `--timeout 1800`)
+## 부록 B — RunAll 43종 일괄 + 요약 (`eval_file`, `--timeout 1800`)
 
-`only` 에 클래스 이름을 쉼표로 넣으면 그것만 실행(예: B2 신규 2종 → `"ProbeTerrainLayersTests,ProbeVolumeTerrainTests"`). 각 클래스 전체 리포트는 콘솔/Editor.log 에도 남긴다.
+`only` 에 클래스 이름을 쉼표로 넣으면 그것만 실행(예: 신규 5종 → `"ProbeTerrainLayersTests,ProbeVolumeTerrainTests,GpuDenoiseCompareTests,ChartPackerTests,ChartPackerMeshTests"`). 각 클래스 전체 리포트는 콘솔/Editor.log 에도 남긴다.
 
 ```csharp
-var only = "";   // 비우면 40종 전부
+var only = "";   // 비우면 43종 전부
 var names = new[] {
     "ChartFlattenTests", "LightmapEvaluateTests", "BVHTests", "RadianceIndirectTests", "InstancedSceneModeBTests",
     "BurstSceneTests", "BurstRadianceCompareTests", "TemplateInstanceSourceTests", "SH9BakeTextureTest", "BurstSHBakerTests",
@@ -333,6 +339,7 @@ var names = new[] {
     "AlphaCutoutTests", "AlphaGpuCompareTests", "AtlasHdrOutputTests", "InstanceSceneBakerTests", "AtlasBakeAssetTests",
     "ProbeGridTests", "ProbeValidityTests", "ProbeVolumeBakerTests", "ProbeVolumeGpuSampleTests", "VertexAOBakeTests",
     "ProbeAlphaTests", "BakeSceneCollectPolicyTests", "ProbeVolumeC0Tests", "ProbeTerrainLayersTests", "ProbeVolumeTerrainTests",
+    "GpuDenoiseCompareTests", "ChartPackerTests", "ChartPackerMeshTests",
 };
 var pick = only.Length > 0 ? only.Split(',') : null;
 var rx = new System.Text.RegularExpressions.Regex(@"---\s*(\d+)/(\d+)\s*(PASS|passed)");

@@ -34,8 +34,10 @@ namespace HuskyLibs.CustomLightmapper.Bake.EditorTools
         bool _drawEdges = true;
         bool _drawUnitSquare = true;
         bool _highlightFoldover = true;
-        bool _applyA4 = false;       // A3 뒤에 A4(DensityNormalizer→ShelfPacker) 실행해 패킹 검증
-        float _gutter = 0.01f;       // ShelfPacker 차트 간 여백
+        bool _applyA4 = false;       // A3 뒤에 A4(DensityNormalizer→ChartPacker) 실행해 패킹 검증
+        float _gutter = 0.01f;       // 차트 간 여백
+        ChartPacker.Method _packing = ChartPacker.Method.Best;
+        string _packInfo;            // 마지막 패킹: 실제 방식 · 점유율
         [Range(0f, 1f)] float _fillAlpha = 0.25f;
         int _selectedChart = -1; // -1 = 전체
 
@@ -86,13 +88,17 @@ namespace HuskyLibs.CustomLightmapper.Bake.EditorTools
                 }
                 _fillAlpha = EditorGUILayout.Slider("Fill Alpha", _fillAlpha, 0f, 1f);
 
-                // A4 검증 토글: 켜고 Run 하면 A3 결과에 DensityNormalizer→ShelfPacker 를 적용해 본다.
+                // A4 검증 토글: 켜고 Run 하면 A3 결과에 DensityNormalizer→ChartPacker 를 적용해 본다.
                 using (new EditorGUILayout.HorizontalScope())
                 {
                     _applyA4 = GUILayout.Toggle(_applyA4, "Apply A4 (Normalize + Pack)", EditorStyles.miniButton);
                     using (new EditorGUI.DisabledScope(!_applyA4))
+                    {
                         _gutter = EditorGUILayout.Slider("Gutter", _gutter, 0f, 0.1f);
+                        _packing = (ChartPacker.Method)EditorGUILayout.EnumPopup(_packing, GUILayout.Width(90));
+                    }
                 }
+                if (_applyA4 && !string.IsNullOrEmpty(_packInfo)) EditorGUILayout.LabelField(_packInfo, EditorStyles.miniLabel);
 
                 // 차트 선택 드롭다운 (전체 / 개별)
                 if (_charts != null && _charts.Length > 0)
@@ -147,11 +153,13 @@ namespace HuskyLibs.CustomLightmapper.Bake.EditorTools
 
             if (_charts == null || _charts.Length == 0) { _foldover = null; return; }
 
-            // A4 검증: A3 결과에 밀도 정규화 → 셸프 패킹 적용 (파이프라인엔 미편입, 뷰어 한정)
+            // A4 검증: A3 결과에 밀도 정규화 → 차트 패킹 적용 (뷰어 한정 — 베이커는 AtlasApplyDebug.chartPacking)
+            _packInfo = null;
             if (_applyA4)
             {
                 DensityNormalizer.Normalize(_charts);
-                ShelfPacker.Pack(_charts, _gutter);
+                var used = ChartPacker.Pack(_charts, _gutter, _packing, out _);
+                _packInfo = $"패킹 {used} · 점유 {ChartPacker.Occupancy(_charts) * 100f:0.0}%";
             }
 
             // 차트별 foldover 재판정 + 전체 UV 바운드 계산

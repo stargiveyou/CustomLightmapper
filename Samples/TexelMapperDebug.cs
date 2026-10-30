@@ -23,9 +23,11 @@ namespace HuskyLibs.CustomLightmapper.Bake
         [Min(1)] public int resolution = 64;
 
         [Header("A4 (검증용)")]
-        [Tooltip("켜면 DensityNormalizer→ShelfPacker 적용. 끄면 차트가 UV 에서 겹쳐 텍셀 충돌.")]
+        [Tooltip("켜면 DensityNormalizer→ChartPacker 적용. 끄면 차트가 UV 에서 겹쳐 텍셀 충돌.")]
         public bool applyPacking = true;
         [Range(0f, 0.1f)] public float gutter = 0.01f;
+        [Tooltip("패킹 방식(AtlasApplyDebug.chartPacking 과 같음). Best = 셸프·MaxRects 중 점유가 큰 쪽.")]
+        public ChartPacker.Method packing = ChartPacker.Method.Best;
 
         [Header("Preview")]
         public PreviewMode preview = PreviewMode.WorldNormal;
@@ -73,11 +75,11 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 return;
             }
 
-            // A4(옵션): 밀도 정규화 + 셸프 패킹 → uv2 가 [0,1] 아틀라스에 비겹침 배치
+            // A4(옵션): 밀도 정규화 + 차트 패킹 → uv2 가 [0,1] 아틀라스에 비겹침 배치
             if (applyPacking)
             {
                 DensityNormalizer.Normalize(pr.Charts);
-                ShelfPacker.Pack(pr.Charts, gutter);
+                ChartPacker.Pack(pr.Charts, gutter, packing);
             }
 
             // 조립(uv2 + normals 메시) → A5b 래스터화

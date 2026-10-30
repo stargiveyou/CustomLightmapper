@@ -48,6 +48,10 @@ namespace HuskyLibs.CustomLightmapper.Bake
         [Tooltip("PerInstanceColor/WorldNormal/Checker: 매핑 검증(라이팅 없음) / Radiance: 텍셀마다 EvaluateRadiance(AO+Direct+그림자) 베이크 — 실제 라이트맵")]
         public BakeMode mode = BakeMode.PerInstanceColor;
         [Range(0f, 0.05f)] public float chartGutter = 0.01f;
+        [Tooltip("차트 패킹(A4). Best = 셸프와 MaxRects(차트별 90° 회전 · 정사각 최소 변 탐색) 중 점유가 큰 쪽 — 동률이면 셸프(구 결과와 비트 동일). " +
+                 "점유가 오르면 같은 아틀라스 영역에서 텍셀 밀도가 오른다(차트 많은 메시에서 +15~20%, 헤드리스 측정). Shelf = 구 거동. " +
+                 "MaxRects = 비교용. 차트 1024개 초과 메시는 셸프.")]
+        public ChartPacker.Method chartPacking = ChartPacker.Method.Best;
         [Tooltip("차트가 덮지 않은 빈 텍셀의 배경색(거터/여백 가시화).")]
         public Color background = new Color(0.04f, 0.04f, 0.06f, 1f);
         [Min(1)] public int checkerSize = 8;
@@ -173,10 +177,13 @@ namespace HuskyLibs.CustomLightmapper.Bake
         [Tooltip("진행형 미리보기(우클릭 'Bake Progressive (Preview)')에서 이 패스 수마다 아틀라스를 다시 합성(denoise·스티칭·dilation 포함)해 화면 갱신.")]
         [Min(1)] public int progressivePreviewEveryPasses = 1;
 
-        [Header("GPU 후처리 (시임 스티칭 · Dilation)")]
+        [Header("GPU 후처리 (Denoise · 시임 스티칭 · Dilation)")]
         [Tooltip("시임 스티칭(Tier1·Tier2) + dilation 을 컴퓨트 셰이더로(LightmapPost.compute). 결과 = CPU 판(나눗셈 ULP 차이만). " +
-                 "compute 미지원·셰이더 로드 실패 시 CPU 판으로 폴백. denoise 는 CPU(Burst/C#) 그대로.")]
+                 "compute 미지원·셰이더 로드 실패 시 CPU 판으로 폴백. gpuDenoise 가 켜져 있으면 denoise 도 같은 업로드 안에서 GPU 로.")]
         public bool gpuPostProcess = false;
+        [Tooltip("gpuPostProcess 가 켜져 있을 때 denoise 도 GPU 로(페이지 업로드 1회 안에서 denoise → 스티칭 → dilation → readback 1회). " +
+                 "식·탭 순서는 CPU 판과 같고 pow/exp 가 GPU 근사라 CPU 판과 ε(상대 ~1e-6) 차이. 끄면 denoise 만 CPU(denoiseBurst 에 따라 Burst/C#).")]
+        public bool gpuDenoise = true;
         [Tooltip("GPU 후처리용 LightmapPost.compute. 비우면 Resources → (에디터) 패키지 경로에서 찾음.")]
         public ComputeShader postShader;
 
@@ -310,6 +317,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
         internal long LastAccumBudget => _accumBudget;
         /// <summary>마지막 합성의 스티칭·dilation 실행 위치("GPU"/"CPU").</summary>
         internal string LastPostBackend { get; private set; }
+        /// <summary>마지막 합성의 denoise 실행 위치("GPU"/"Burst"/"C#", 안 했으면 "off").</summary>
+        internal string LastDenoiseBackend { get; private set; }
 
         // 원복용 — 적용한 렌더러와 그 원본 메시/머티리얼
         [SerializeField] MeshFilter[] _appliedFilters;
@@ -349,6 +358,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             public int batches, prepared;
             public int stitchT1, stitchT2;
             public bool postOnGpu;
+            public bool denoiseOnGpu;
             public readonly System.Diagnostics.Stopwatch swTotal = new System.Diagnostics.Stopwatch();
             public readonly System.Diagnostics.Stopwatch swScene = new System.Diagnostics.Stopwatch();
             public readonly System.Diagnostics.Stopwatch swBake = new System.Diagnostics.Stopwatch();
@@ -546,7 +556,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 var pr = ParameterizationPipeline.Run(src, segmentation, flatten);
                 if (pr.Charts == null || pr.Charts.Length == 0) { Debug.LogWarning($"[AtlasApply] '{mf.name}' 차트 0개 — 건너뜀.", mf); return null; }
                 DensityNormalizer.Normalize(pr.Charts);
-                ShelfPacker.Pack(pr.Charts, chartGutter);
+                ChartPacker.Pack(pr.Charts, chartGutter, chartPacking);
                 (uv2mesh, seams) = UVAssembly.Assemble(pr.Charts, src);
                 uv2mesh.hideFlags = HideFlags.DontSave;
                 // 영역 크기에 맞춰 래스터 → 아틀라스에 1:1 blit
@@ -684,29 +694,28 @@ namespace HuskyLibs.CustomLightmapper.Bake
             // 3.3) Denoise — MC 노이즈(그레인)를 노멀·위치·색 가이드 에지 보존 필터로 평활.
             //      Seam Stitch 전: 경계 텍셀 값을 먼저 안정화한 뒤 스티칭·확장해야 시임이 매끈하다.
             //      가이드는 valid 텍셀에서만 유효 — 필터도 valid 만 읽고 씀(배경/거터 불변, dilation 소스 마스크 불변).
-            if (r.doDenoise)
+            //      gpuPostProcess + gpuDenoise 면 GPU 후처리 안에서(업로드 1회) — GPU 가 실패하면 원본이 그대로라 CPU 판으로 처음부터.
+            var dq = new DenoiseSettings
             {
-                var dq = new DenoiseSettings
-                {
-                    Iterations = denoiseIterations,
-                    NormalPower = denoiseNormalPower,
-                    PositionSigma = denoisePositionSigmaTexels / Mathf.Max(0.001f, texelsPerWorldUnit),
-                    ColorSigma = denoiseColorSigma,
-                };
-                for (int p = 0; p < pages; p++)
-                {
-                    if (denoiseBurst)
-                        LightmapDenoiseBurstJob.Denoise(slices[p], validMask[p], r.guideN[p], r.guideP[p], res, res, dq);
-                    else
-                        LightmapDenoise.Denoise(slices[p], validMask[p], r.guideN[p], r.guideP[p], res, res, dq);
-                }
-            }
+                Iterations = denoiseIterations,
+                NormalPower = denoiseNormalPower,
+                PositionSigma = denoisePositionSigmaTexels / Mathf.Max(0.001f, texelsPerWorldUnit),
+                ColorSigma = denoiseColorSigma,
+            };
+            bool wantGpuDenoise = r.doDenoise && gpuPostProcess && gpuDenoise;
+            if (r.doDenoise && !wantGpuDenoise) DenoiseCpu(r, dq);
 
-            // 3.4) Seam Stitch → 3.5) Dilation. GPU 후처리(gpuPostProcess)는 페이지마다 T1→T2→dilate 를 한 번에(실패 시 CPU).
+            // 3.4) Seam Stitch → 3.5) Dilation. GPU 후처리(gpuPostProcess)는 페이지마다 (denoise→)T1→T2→dilate 를 한 번에(실패 시 CPU).
             r.stitchT1 = r.stitchT2 = 0;
-            r.postOnGpu = gpuPostProcess && StitchAndDilateGpu(r);
-            if (!r.postOnGpu) StitchAndDilateCpu(r);
+            r.postOnGpu = gpuPostProcess && StitchAndDilateGpu(r, wantGpuDenoise, dq);
+            r.denoiseOnGpu = r.postOnGpu && wantGpuDenoise;
+            if (!r.postOnGpu)
+            {
+                if (wantGpuDenoise) DenoiseCpu(r, dq);
+                StitchAndDilateCpu(r);
+            }
             LastPostBackend = r.postOnGpu ? "GPU" : "CPU";
+            LastDenoiseBackend = !r.doDenoise ? "off" : r.denoiseOnGpu ? "GPU" : (denoiseBurst ? "Burst" : "C#");
 
             r.swPost.Stop();
 
@@ -731,6 +740,17 @@ namespace HuskyLibs.CustomLightmapper.Bake
             for (int p = 0; p < pages; p++) atlas.SetPixels(slices[p], p);
             atlas.Apply(false);
             sharedMat.SetTexture("_Lightmaps", atlas);
+        }
+
+        void DenoiseCpu(BakeRun r, in DenoiseSettings dq)
+        {
+            for (int p = 0; p < r.pages; p++)
+            {
+                if (denoiseBurst)
+                    LightmapDenoiseBurstJob.Denoise(r.slices[p], r.validMask[p], r.guideN[p], r.guideP[p], r.res, r.res, dq);
+                else
+                    LightmapDenoise.Denoise(r.slices[p], r.validMask[p], r.guideN[p], r.guideP[p], r.res, r.res, dq);
+            }
         }
 
         // 3.4) Seam Stitch — 차트 경계 정점(Tier1)/모서리(Tier2)의 불연속을 valid 텍셀 평균으로 제거.
@@ -769,9 +789,9 @@ namespace HuskyLibs.CustomLightmapper.Bake
             }
         }
 
-        // GPU 후처리(LightmapPost.compute): 페이지마다 업로드 1회 → T1(웨이브) → T2(샘플→수집 Jacobi) → dilation 핑퐁 → readback 1회.
-        //   계획(웨이브·CSR)은 CPU 판과 같은 순서·같은 소스 집합이라 결과 = CPU 판(나눗셈 ULP 차이만). 실패하면 false → CPU 판.
-        bool StitchAndDilateGpu(BakeRun r)
+        // GPU 후처리(LightmapPost.compute): 페이지마다 업로드 1회 → (denoise 핑퐁) → T1(웨이브) → T2(샘플→수집 Jacobi) → dilation 핑퐁 → readback 1회.
+        //   계획(웨이브·CSR)은 CPU 판과 같은 순서·같은 소스 집합이라 스티칭·dilation = CPU 판(나눗셈 ULP 차이만), denoise 는 ε. 실패하면 false → CPU 판.
+        bool StitchAndDilateGpu(BakeRun r, bool withDenoise, in DenoiseSettings dq)
         {
             if (!SystemInfo.supportsComputeShaders) return false;
             var cs = LightmapPostGpu.Resolve(postShader);
@@ -783,6 +803,8 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 Tier2 = seamStitchTier2,
                 Tier2Iterations = Mathf.Max(1, seamStitchIterations),
                 DilateIterations = dilate ? dilateIterations : 0,
+                Denoise = withDenoise,
+                DenoiseSettings = dq,
             };
             // 전 페이지를 먼저 복사본으로 돌려 하나라도 실패하면 원본을 건드리지 않고 CPU 판으로 넘긴다(부분 적용 방지).
             var outPx = new Color[r.pages][];
@@ -792,6 +814,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             {
                 outPx[p] = (Color[])r.slices[p].Clone();
                 outValid[p] = (bool[])r.validMask[p].Clone();
+                if (withDenoise) { opt.GuideNormal = r.guideN[p]; opt.GuidePos = r.guideP[p]; }
                 if (!LightmapPostGpu.Run(cs, outPx[p], outValid[p], r.res, r.seamTexelGroups[p], r.seamSegGroups[p], opt, out string err))
                 {
                     Debug.LogWarning($"[AtlasApply] GPU 후처리 실패(페이지 {p}: {err}) — CPU 폴백.", this);
@@ -830,7 +853,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                 ? $", stitch(T1={r.stitchT1},T2={r.stitchT2}{(postTag != null ? ",GPU" : "")})"
                 : ", stitch=off";
             string denoiseInfo = r.doDenoise
-                ? $", denoise={denoiseIterations}×({(denoiseBurst ? "Burst" : "C#")})"
+                ? $", denoise={denoiseIterations}×({(r.denoiseOnGpu ? "GPU" : denoiseBurst ? "Burst" : "C#")})"
                 : ", denoise=off";
             string occInfo = (occluders != null && occluders.Length > 0) ? $", occluders={occluders.Length}" : "";
             string lightInfo = (mode == BakeMode.Radiance || mode == BakeMode.RadianceGI)

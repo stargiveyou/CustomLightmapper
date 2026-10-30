@@ -1,24 +1,29 @@
 // ============================================================================
-// LightmapPost.compute — 라이트맵 후처리 GPU 판: 시임 스티칭(Tier1·Tier2) + dilation.
+// LightmapPost.compute — 라이트맵 후처리 GPU 판: 디노이즈 + 시임 스티칭(Tier1·Tier2) + dilation.
 //   계획(텍셀 목록·웨이브·CSR)은 CPU(LightmapPostPlan)가 만들고, 여기서는 값만 계산한다.
 //   ground truth(정확 미러 대상 — CPU 모델 LightmapPostPlan.Run* 이 원본과 비트 동일함을 테스트로 고정):
 //     Runtime/LightmapStitch/Lightmapseamstitch.cs        (Stitch / StitchEdges)
 //     Runtime/Diliation/LightmapPostProcessBurstJob.cs    (DiliateJob)
+//   ground truth(근사 미러 — pow·exp 가 GPU 근사라 ε 일치, GpuDenoiseCompareTests):
+//     Runtime/Denoise/LightmapDenoise.cs · LightmapDenoiseBurstJob.cs (À-trous Joint Bilateral)
 //
 // 커널:
 //   CSStitchT1        : 웨이브 1회 = 그룹 [_WaveStart, +_WaveCount) — 그룹 합/개수 → 그룹 텍셀 전부(웨이브 안 텍셀 비공유)
 //   CSStitchT2Sample  : 샘플 j = (그룹, t) 의 valid 텍셀 평균 → _SampleAvg[j]
 //   CSStitchT2Gather  : 갱신 텍셀 k = 기여 샘플 평균의 합(샘플 순) / 개수 → _Px (Jacobi: Sample 디스패치 뒤)
 //   CSDilate          : 8-이웃 valid 평균 더블버퍼 1패스(_SrcPx/_SrcValid → _DstPx/_DstValid)
+//   CSDenoise         : À-trous 1패스(간격 _Step) 더블버퍼(_SrcPx → _DstPx). valid 만 읽고 씀, 가이드 = 텍셀 월드 노멀·위치
 //
 // 정밀도: 전 경로 fp32, 덧셈 순서 = CPU. 나눗셈은 GPU 정밀도(≤2.5 ULP)라 CPU 와 ULP 수준 차이만 가능.
-// 1D 커널은 _Base 분할 디스패치(GpuBakeLimits.Tiles), CSDilate 는 8×8 2D(해상도 4096 → 512 그룹/축).
+// 1D 커널은 _Base 분할 디스패치(GpuBakeLimits.Tiles), CSDilate·CSDenoise 는 8×8 2D(해상도 4096 → 512 그룹/축).
+// CSDenoise 의 가중치 식·탭 순서(dy 바깥, dx 안)·덧셈 순서 = CPU 판. pow/exp 는 GPU 근사라 CPU 와 ε(상대 ~1e-6) 차이.
 // ============================================================================
 
 #pragma kernel CSStitchT1
 #pragma kernel CSStitchT2Sample
 #pragma kernel CSStitchT2Gather
 #pragma kernel CSDilate
+#pragma kernel CSDenoise
 
 int _Base;      // 1D 분할 디스패치 오프셋(호출측이 매번 설정·복원)
 int _Count;     // 1D 커널 항목 수
@@ -128,4 +133,68 @@ void CSDilate(uint3 id : SV_DispatchThreadID)
     }
     _DstPx[index] = outPx;
     _DstValid[index] = outV;
+}
+
+// ---- Denoise (À-trous Joint Bilateral) ----
+//   가중치 = B3(dx)·B3(dy) × pow(max(0, n·n'), p) × exp(-‖Δpos‖²·_InvTwoSigP2) × exp(-‖Δrgb‖²·_InvTwoSigC2)
+//   중앙 탭은 B3 만(항상 포함 → wsum > 0). σ 상수는 호출측이 CPU 판과 같은 식으로 계산(_InvTwoSigP2 는 step 배율 포함).
+//   _SrcValid = 디노이즈 대상 마스크(전 패스 불변) — dilation 과 같은 바인딩 이름을 쓴다(커널별 바인딩).
+StructuredBuffer<float4> _GuideN;   // xyz = 텍셀 월드 노멀
+StructuredBuffer<float4> _GuideP;   // xyz = 텍셀 월드 위치
+int   _Step;
+float _NormalPower;
+float _InvTwoSigP2;
+float _InvTwoSigC2;
+
+float DenoiseB3(int d)   // {1,4,6,4,1}/16 — CPU K[] 와 같은 값(2의 거듭제곱 분모라 정확)
+{
+    int a = abs(d);
+    return a == 0 ? 6.0 / 16.0 : (a == 1 ? 4.0 / 16.0 : 1.0 / 16.0);
+}
+
+[numthreads(8, 8, 1)]
+void CSDenoise(uint3 id : SV_DispatchThreadID)
+{
+    int x = (int)id.x, y = (int)id.y;
+    if (x >= _W || y >= _H) return;
+    int index = y * _W + x;
+
+    float4 c = _SrcPx[index];
+    if (_SrcValid[index] == 0u) { _DstPx[index] = c; return; }   // 무효/배경 불변
+
+    float3 cN = _GuideN[index].xyz;
+    float3 cP = _GuideP[index].xyz;
+    float4 sum = float4(0, 0, 0, 0);
+    float  wsum = 0.0;
+
+    [unroll] for (int dy = -2; dy <= 2; dy++)
+    {
+        int ny = y + dy * _Step;
+        if (ny < 0 || ny >= _H) continue;
+        [unroll] for (int dx = -2; dx <= 2; dx++)
+        {
+            int nx = x + dx * _Step;
+            if (nx < 0 || nx >= _W) continue;
+            int nidx = ny * _W + nx;
+            if (_SrcValid[nidx] == 0u) continue;
+
+            float4 nc = _SrcPx[nidx];
+            float wt = DenoiseB3(dx) * DenoiseB3(dy);
+            if (nidx != index)
+            {
+                float ndot = max(0.0, dot(cN, _GuideN[nidx].xyz));
+                // pow(0, p): HLSL 은 exp2(p·log2 0) — p = 0 이면 NaN. CPU(Mathf.Pow/math.pow)는 p > 0 → 0, p = 0 → 1.
+                wt *= ndot > 0.0 ? pow(ndot, _NormalPower) : (_NormalPower > 0.0 ? 0.0 : 1.0);
+
+                float3 dp = _GuideP[nidx].xyz - cP;
+                wt *= exp(-dot(dp, dp) * _InvTwoSigP2);
+
+                float3 dc = nc.xyz - c.xyz;
+                wt *= exp(-dot(dc, dc) * _InvTwoSigC2);
+            }
+            sum += nc * wt;
+            wsum += wt;
+        }
+    }
+    _DstPx[index] = sum / wsum;
 }

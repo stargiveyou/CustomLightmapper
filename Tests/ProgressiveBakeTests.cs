@@ -240,7 +240,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
         }
 
         // 일괄(BakeAndApply) 또는 진행형(BeginProgressive → ProgressiveStep 끝까지) → 전 페이지 픽셀 복사 → 원복
-        static Color[][] Bake(AtlasApplyDebug baker, List<MeshFilter> filters, List<Object> made, bool progressive, out string backend)
+        internal static Color[][] Bake(AtlasApplyDebug baker, List<MeshFilter> filters, List<Object> made, bool progressive, out string backend)
         {
             var originals = new Mesh[filters.Count];
             for (int i = 0; i < filters.Count; i++) originals[i] = filters[i].sharedMesh;
@@ -268,7 +268,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
             return px;
         }
 
-        static float MaxRel(Color[][] a, Color[][] b)
+        internal static float MaxRel(Color[][] a, Color[][] b)
         {
             if (a == null || b == null || a.Length != b.Length) return float.MaxValue;
             float m = 0f;

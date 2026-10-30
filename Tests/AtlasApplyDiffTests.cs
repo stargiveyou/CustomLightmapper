@@ -48,7 +48,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                     var pr = ParameterizationPipeline.Run(srcMesh, t.segmentation, t.flatten);
                     if (pr.Charts == null || pr.Charts.Length == 0) continue;
                     DensityNormalizer.Normalize(pr.Charts);
-                    ShelfPacker.Pack(pr.Charts, t.chartGutter);
+                    ChartPacker.Pack(pr.Charts, t.chartGutter, t.chartPacking);
                     (uv2mesh, _) = UVAssembly.Assemble(pr.Charts, srcMesh);
                     lumel = TexelMapper.Map(uv2mesh, res, mf.transform.localToWorldMatrix);
                 }
@@ -139,7 +139,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                     var pr = ParameterizationPipeline.Run(srcMesh, t.segmentation, t.flatten);
                     if (pr.Charts == null || pr.Charts.Length == 0) continue;
                     DensityNormalizer.Normalize(pr.Charts);
-                    ShelfPacker.Pack(pr.Charts, t.chartGutter);
+                    ChartPacker.Pack(pr.Charts, t.chartGutter, t.chartPacking);
                     (uv2mesh, _) = UVAssembly.Assemble(pr.Charts, srcMesh);
                     lumel = TexelMapper.Map(uv2mesh, res, mf.transform.localToWorldMatrix);
                 }
@@ -257,7 +257,7 @@ namespace HuskyLibs.CustomLightmapper.Bake
                     var pr = ParameterizationPipeline.Run(srcMesh, t.segmentation, t.flatten);
                     if (pr.Charts == null || pr.Charts.Length == 0) continue;
                     DensityNormalizer.Normalize(pr.Charts);
-                    ShelfPacker.Pack(pr.Charts, t.chartGutter);
+                    ChartPacker.Pack(pr.Charts, t.chartGutter, t.chartPacking);
                     (uv2mesh, _) = UVAssembly.Assemble(pr.Charts, srcMesh);
                     lumel = TexelMapper.Map(uv2mesh, res, mf.transform.localToWorldMatrix);
                 }
